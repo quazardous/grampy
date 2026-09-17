@@ -14,12 +14,12 @@
 <header class="masthead">
   <div class="brand">
     <h1>Brick Sorter</h1>
-    <p>A sorting line run by <a href="https://github.com/quazardous/grampy">grampy</a> — the real library, executing in your browser. Every brick is a subject, every station a node; when a TNT brick shows up, the workflow has to decide what to do with it.</p>
+    <p>A sorting line run by <a href="https://github.com/quazardous/grampy">grampy</a> — the real library, executing in your browser. Every brick is a subject, every tray a node, and the line sorts bricks by colour. A TNT brick hides its colour: defused, it shows it and gets sorted; past saving, it goes to waste.</p>
   </div>
   <dl class="tally" aria-live="polite">
     <div><dt>Clock</dt><dd id="clock">--:--:--</dd></div>
-    <div><dt>Shipped</dt><dd id="shipped">0</dd></div>
-    <div class="tally-boom"><dt>TNT rejected</dt><dd id="exploded">0</dd></div>
+    <div><dt>Sorted</dt><dd id="shipped">0</dd></div>
+    <div class="tally-boom"><dt>TNT wasted</dt><dd id="exploded">0</dd></div>
   </dl>
 </header>
 
@@ -56,7 +56,7 @@
 <main class="layout">
   <figure class="floor-frame">
     <div class="floor-scroll">
-      <svg id="floor" viewBox="0 0 1180 590" role="img" aria-label="The sorting line with its stations and bricks"></svg>
+      <svg id="floor" viewBox="0 0 1300 600" role="img" aria-label="The sorting line with its stations and bricks"></svg>
     </div>
     <figcaption id="status" class="status">Loading Python and grampy…</figcaption>
   </figure>
@@ -86,8 +86,9 @@
     <li><span class="glyph glyph-choice"></span><span><b>scan</b> is a <code>choice</code>: it names its branch, and the branch not taken is marked <code>omitted</code>.</span></li>
     <li><span class="glyph glyph-wait"></span><span><b>quarantine</b> is a <code>wait</code>: the brick sits on the shelf until the bomb squad's signal arrives, or fails after its 90 s timeout.</span></li>
     <li><span class="glyph glyph-retry"></span><span><b>defuse</b> has a <code>Retry(limit=3, exponential)</code>: a failure goes round the return belt and comes back later — 8 s, 16 s, 32 s.</span></li>
-    <li><span class="glyph glyph-fail"></span><span><b>reject</b> accepts only <em>failed</em> parents (<code>on=…</code>, <code>need=1</code>): past the last retry, or when the squad never came, the brick goes there.</span></li>
-    <li><span class="glyph glyph-join"></span><span><b>pack</b> joins both routes: <code>omitted</code> satisfies it, so a sorted brick and a defused one both get packed.</span></li>
+    <li><span class="glyph glyph-fail"></span><span><b>reject</b> accepts only <em>failed</em> parents (<code>on=…</code>, <code>need=1</code>): past the last retry, or when the squad never came, the brick goes to waste.</span></li>
+    <li><span class="glyph glyph-join"></span><span><b>pack</b> joins both routes: <code>omitted</code> satisfies it, so a clean brick and a defused one both land in the tray of their colour.</span></li>
+    <li><span class="glyph glyph-queue"></span><span>The dashed pads on the wood are <b>waiting</b>: a brick sits there until its node is claimable and a worker is free. Inside a tray, it is being worked.</span></li>
   </ul>
 </section>
 

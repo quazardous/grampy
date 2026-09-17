@@ -11,13 +11,29 @@
   --hazard-ink: #1d2528;
   --reject: #d23a2c;
   --ok: #2e8b57;
-  --brick-red: #c9252c;
-  --brick-blue: #1560b8;
-  --brick-green: #237a3b;
+  --brick-red: #d42a2a;
+  --brick-orange: #f27c12;
+  --brick-yellow: #f6c20f;
+  --brick-green: #5aad2e;
+  --brick-blue: #1f6bd1;
+  --brick-pink: #d4358f;
+  --brick-unknown: #8f9498;
   --tnt: #22282b;
   --station: #ffffff;
   --station-edge: #2c3438;
   --focus: #1560b8;
+  --wood-a: #dcc29a;
+  --wood-b: #cfae80;
+  --wood-grain: rgba(112, 72, 34, 0.09);
+  --wood-ink: #4d3620;
+  --tray-rim: #ffffff;
+  --tray-floor: #f0eee9;
+  --tray-ink: #25221f;
+  --tray-muted: #7a746c;
+  --pad: rgba(77, 54, 32, 0.08);
+  --pad-edge: rgba(77, 54, 32, 0.38);
+  --bin-metal: #59616a;
+  --bin-floor: #3d444b;
   color-scheme: light;
 }
 
@@ -37,6 +53,14 @@
     --station: #202a2e;
     --station-edge: #aab4b7;
     --focus: #7fb3ff;
+    --wood-a: #5e4631;
+    --wood-b: #4f3a28;
+    --wood-grain: rgba(0, 0, 0, 0.16);
+    --wood-ink: #eadcc8;
+    --tray-rim: #e9e7e2;
+    --tray-floor: #d9d6cf;
+    --pad: rgba(255, 240, 220, 0.06);
+    --pad-edge: rgba(255, 240, 220, 0.35);
     color-scheme: dark;
   }
 }
@@ -56,6 +80,14 @@
   --station: #202a2e;
   --station-edge: #aab4b7;
   --focus: #7fb3ff;
+  --wood-a: #5e4631;
+  --wood-b: #4f3a28;
+  --wood-grain: rgba(0, 0, 0, 0.16);
+  --wood-ink: #eadcc8;
+  --tray-rim: #e9e7e2;
+  --tray-floor: #d9d6cf;
+  --pad: rgba(255, 240, 220, 0.06);
+  --pad-edge: rgba(255, 240, 220, 0.35);
   color-scheme: dark;
 }
 
@@ -201,43 +233,87 @@ select { padding: 7px 10px; }
 .calls .fn { color: var(--hazard); }
 .calls .note { color: #8a969b; }
 
-/* -- the floor itself ----------------------------------------------------------------- */
+/* -- the floor itself: a table seen from above ---------------------------------------- */
 
-.belt { fill: none; stroke: var(--belt); stroke-width: 16; stroke-linecap: round; }
+.floor-scroll {
+  background:
+    repeating-linear-gradient(0deg, var(--wood-grain) 0 1px, transparent 1px 7px, var(--wood-grain) 7px 9px, transparent 9px 23px),
+    linear-gradient(90deg, var(--wood-a), var(--wood-b) 35%, var(--wood-a) 60%, var(--wood-b));
+}
+
+.belt { fill: none; stroke: var(--belt); stroke-width: 16; stroke-linecap: round; opacity: 0.92; }
 .belt-marks { fill: none; stroke: var(--belt-mark); stroke-width: 2; stroke-dasharray: 3 11; animation: belt 1.4s linear infinite; }
 .belt-fail { stroke: color-mix(in srgb, var(--reject) 55%, var(--belt)); }
-.belt-return { stroke-dasharray: 2 0; }
 @keyframes belt { to { stroke-dashoffset: -28; } }
 
-.station rect.body { fill: var(--station); stroke: var(--station-edge); stroke-width: 2.5; }
-.station.choice rect.body { stroke-dasharray: none; }
-.station text.name { font-family: "Bungee", "Impact", sans-serif; font-size: 17px; fill: var(--ink); }
-.station text.role { font-family: "IBM Plex Mono", monospace; font-size: 11px; fill: var(--muted); }
-.station text.count { font-family: "IBM Plex Mono", monospace; font-size: 12px; fill: var(--ink); font-variant-numeric: tabular-nums; }
-.station .stripe { fill: url(#hazard); }
-.station.reject rect.body { stroke: var(--reject); }
-.station.pack rect.body { stroke: var(--ok); }
-.shelf { fill: url(#hazard); stroke: var(--station-edge); stroke-width: 1.5; }
-.return-label, .exit-label { font-family: "IBM Plex Mono", monospace; font-size: 11px; fill: var(--muted); }
+.queue-pad { fill: var(--pad); stroke: var(--pad-edge); stroke-width: 1.5; stroke-dasharray: 5 4; }
+.floor-label { font-family: "IBM Plex Mono", monospace; font-size: 11px; fill: var(--wood-ink); }
 
-.brick { cursor: pointer; transition: transform 0.7s cubic-bezier(0.3, 0.7, 0.2, 1), opacity 0.6s ease; }
-.brick rect { stroke: rgba(0, 0, 0, 0.35); stroke-width: 1; }
-.brick circle { stroke: rgba(0, 0, 0, 0.25); stroke-width: 1; }
-.brick.red rect, .brick.red circle { fill: var(--brick-red); }
-.brick.blue rect, .brick.blue circle { fill: var(--brick-blue); }
-.brick.green rect, .brick.green circle { fill: var(--brick-green); }
-.brick.tnt rect, .brick.tnt circle { fill: var(--tnt); }
-.brick .band { fill: var(--reject) !important; stroke: none; }
-.brick text { font: 700 7px "IBM Plex Mono", monospace; fill: #fff; pointer-events: none; }
-.brick.selected rect { stroke: var(--hazard); stroke-width: 3; }
-.brick.shipped { opacity: 0; }
-.brick.working rect:first-child { animation: work 0.5s ease-in-out infinite alternate; }
-@keyframes work { to { transform: translateY(-2px); } }
+.tray-rim { fill: var(--tray-rim); }
+.tray-floor { fill: var(--tray-floor); }
+.tray .name { font-family: "Bungee", "Impact", sans-serif; font-size: 16px; fill: var(--tray-ink); }
+.tray .role { font-family: "IBM Plex Mono", monospace; font-size: 10.5px; fill: var(--tray-muted); }
+.tray .count { font-family: "IBM Plex Mono", monospace; font-size: 12px; fill: var(--tray-ink); font-variant-numeric: tabular-nums; }
+.stripe { fill: url(#hazard); }
+.station.reject .tray-rim { stroke: var(--reject); stroke-width: 2.5; }
 
-.boom circle { fill: var(--hazard); }
-.boom circle.core { fill: var(--reject); }
-.boom { animation: boom 0.9s ease-out forwards; transform-box: fill-box; transform-origin: center; }
-@keyframes boom { from { transform: scale(0.2); opacity: 1; } to { transform: scale(2.4); opacity: 0; } }
+.tab.red { fill: var(--brick-red); }
+.tab.orange { fill: var(--brick-orange); }
+.tab.yellow { fill: var(--brick-yellow); }
+.tab.green { fill: var(--brick-green); }
+.tab.blue { fill: var(--brick-blue); }
+.tab.pink { fill: var(--brick-pink); }
+
+.waste-body { fill: var(--bin-metal); }
+.waste-floor { fill: var(--bin-floor); }
+
+/* A brick seen from above: a plate with eight studs. */
+.brick { --c: var(--brick-unknown); cursor: pointer; transition: transform 0.7s cubic-bezier(0.3, 0.7, 0.2, 1), opacity 0.6s ease; }
+.brick.red { --c: var(--brick-red); }
+.brick.orange { --c: var(--brick-orange); }
+.brick.yellow { --c: var(--brick-yellow); }
+.brick.green { --c: var(--brick-green); }
+.brick.blue { --c: var(--brick-blue); }
+.brick.pink { --c: var(--brick-pink); }
+.brick .plate { fill: var(--c); stroke: rgba(0, 0, 0, 0.3); stroke-width: 0.8; transition: fill 0.5s ease; }
+.brick .stud { fill: var(--c); stroke: rgba(255, 255, 255, 0.45); stroke-width: 0.7; transition: fill 0.5s ease; }
+.brick .band { fill: var(--reject); display: none; }
+.brick .stamp { font: 700 6.5px "IBM Plex Mono", monospace; fill: #fff; pointer-events: none; display: none; }
+.brick.tnt.unknown .band, .brick.tnt.unknown .stamp { display: inline; }
+.brick .debris { display: none; }
+.brick .debris path { fill: #2b2f33; stroke: #15181a; stroke-width: 0.6; }
+.brick .debris .ember { fill: #a8471c; }
+.brick.wasted .body { display: none; }
+.brick.wasted .debris { display: inline; }
+.brick.selected .plate { stroke: var(--focus); stroke-width: 2.5; }
+.brick:focus-visible { outline: none; }
+.brick:focus-visible .plate { stroke: var(--focus); stroke-width: 2.5; }
+.brick.working .body { animation: work 0.5s ease-in-out infinite alternate; }
+@keyframes work { to { transform: translateY(-1.5px); } }
+.brick.revealing .body { animation: glow 1.1s ease-out; }
+@keyframes glow {
+  0% { filter: brightness(2.2) drop-shadow(0 0 0 #fff6c2); }
+  40% { filter: brightness(1.4) drop-shadow(0 0 6px #fff1a8); }
+  100% { filter: none; }
+}
+
+/* The fairy touch when a defused brick shows its colour. */
+.sparkle .halo { fill: rgba(255, 236, 150, 0.35); stroke: #ffd84a; stroke-width: 2.5; animation: halo 0.9s ease-out forwards; transform-box: fill-box; transform-origin: center; }
+@keyframes halo { from { transform: scale(0.3); opacity: 0.95; } to { transform: scale(1.8); opacity: 0; } }
+.sparkle .spark { fill: #ffd84a; stroke: #fff8d8; stroke-width: 1; animation: spark 1.1s ease-out both; }
+.sparkle .spark.s1 { fill: #ff8fd6; }
+.sparkle .spark.s2 { fill: #8fe3ff; }
+@keyframes spark {
+  0% { transform: translateY(0) scale(0.2) rotate(0deg); opacity: 0; }
+  20% { opacity: 1; }
+  100% { transform: translateY(calc(-1 * var(--reach))) scale(1) rotate(90deg); opacity: 0; }
+}
+
+/* And the other ending: a flash, smoke, rubble. */
+.puff .flash { fill: #ffb347; animation: flash 0.45s ease-out forwards; transform-box: fill-box; transform-origin: center; }
+@keyframes flash { from { transform: scale(0.4); opacity: 1; } to { transform: scale(1.9); opacity: 0; } }
+.puff .smoke { fill: #7d858b; animation: smoke 1.1s ease-out both; transform-box: fill-box; transform-origin: center; }
+@keyframes smoke { from { transform: scale(0.4); opacity: 0.85; } to { transform: scale(2.2) translateY(-6px); opacity: 0; } }
 
 /* -- legend -------------------------------------------------------------------------- */
 
@@ -249,8 +325,10 @@ select { padding: 7px 10px; }
 .glyph-retry { border-radius: 50%; border-style: dashed; }
 .glyph-fail { border-color: var(--reject); background: var(--reject); }
 .glyph-join { border-color: var(--ok); }
+.glyph-queue { border-style: dashed; border-color: var(--muted); }
 
 @media (prefers-reduced-motion: reduce) {
-  .belt-marks, .brick.working rect:first-child, .boom { animation: none; }
-  .brick { transition: none; }
+  .belt-marks, .brick.working .body, .brick.revealing .body, .sparkle *, .puff * { animation: none; }
+  .sparkle, .puff { display: none; }
+  .brick, .brick .plate, .brick .stud { transition: none; }
 }

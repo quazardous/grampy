@@ -50,7 +50,8 @@ LAYOUT = {
     "defuse": (2, 2), "pack": (3, 0), "reject": (3, 2),
 }
 
-COLOURS = ("red", "blue", "green")
+#: One tray per colour at the end of the line; a TNT brick hides its colour until defused.
+COLOURS = ("red", "orange", "yellow", "green", "blue", "pink")
 EPOCH = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
@@ -96,6 +97,7 @@ class World:
         self.jobs: list[Job] = []
         self.calls: list[str] = []
         self.shipped = 0
+        self.sorted: dict[str, int] = {colour: 0 for colour in COLOURS}
         self.exploded = 0
         self._next_id = 1
         self._arrival_debt = 0.0
@@ -211,6 +213,7 @@ class World:
             if progress.get("pack") == NODE_DONE:
                 self.finished[brick_id] = ("shipped", self.elapsed)
                 self.shipped += 1
+                self.sorted[self.bricks[brick_id].colour] += 1
             elif progress.get("reject") == NODE_DONE:
                 self.finished[brick_id] = ("boom", self.elapsed)
                 self.exploded += 1
@@ -244,13 +247,18 @@ class World:
         failed = [n for n, s in progress.items() if s == NODE_FAILED]
         return ("queue", "reject") if failed else ("queue", "scan")
 
+    def _revealed(self, brick: Brick) -> bool:
+        """A clean brick shows its colour; a TNT brick only once defused."""
+        return not brick.tnt or self.journal.progress(brick.id).get("defuse") == NODE_DONE
+
     def state(self) -> dict[str, Any]:
         bricks = []
         for brick in self.bricks.values():
             place, node = self._where(brick.id)
+            revealed = self._revealed(brick)
             bricks.append({
-                "id": brick.id, "colour": brick.colour, "tnt": brick.tnt,
-                "place": place, "node": node,
+                "id": brick.id, "colour": brick.colour if revealed else None, "tnt": brick.tnt,
+                "revealed": revealed, "place": place, "node": node,
                 "retries": self.journal.retries(brick.id, "defuse") if brick.tnt else 0,
             })
         return {
@@ -259,6 +267,7 @@ class World:
             "counts": overlay(self.journal),
             "calls": self.calls[-25:],
             "shipped": self.shipped,
+            "sorted": self.sorted,
             "exploded": self.exploded,
             "settings": {
                 "arrivals_per_minute": self.settings.arrivals_per_minute,
@@ -273,7 +282,8 @@ class World:
         if brick is None:
             return json.dumps(None)
         return json.dumps({
-            "id": brick_id, "colour": brick.colour, "tnt": brick.tnt,
+            "id": brick_id, "colour": brick.colour if self._revealed(brick) else None,
+            "tnt": brick.tnt,
             "progress": self.journal.progress(brick_id),
             "history": self.journal.history(brick_id),
         })
@@ -281,4 +291,4 @@ class World:
 
 def static() -> str:
     """What does not move: the graph as a document, and the floor layout."""
-    return json.dumps({"graph": GRAPH.to_dict(), "layout": LAYOUT})
+    return json.dumps({"graph": GRAPH.to_dict(), "layout": LAYOUT, "colours": COLOURS})
