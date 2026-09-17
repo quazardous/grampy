@@ -36,7 +36,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-from .timing import Retry
+from .timing import Retry, seconds
 
 
 class DagError(ValueError):
@@ -142,6 +142,10 @@ class Node:
     is an edge the journal takes, bounded, and every pass is kept in the
     history.
 
+    `lease` is how long a worker may hold this node (`"10m"`): past it,
+    `journal.expire()` gives the row back as if the worker had died. A
+    fetch and an AI call do not deserve the same patience.
+
     `retry` declares what a failure does first (`timing.Retry`): archived,
     and the node scheduled again after a delay, a bounded number of times.
     Only past the retries does the failure stand — and a loop or a failure
@@ -159,6 +163,7 @@ class Node:
     choice: bool = False
     loop: Loop | None = None
     retry: Retry | None = None
+    lease: float | int | str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "parents", tuple(self.parents))
@@ -377,6 +382,12 @@ def check_dag(dag: tuple[Node, ...]) -> None:
                     f"got {list(n.loop.on)}")
             if n.choice:
                 raise DagError(f"node {n.name!r} is a choice and a loop: pick one")
+        if n.lease is not None:
+            try:
+                if seconds(n.lease) <= 0:
+                    raise ValueError("a lease must last")
+            except ValueError as exc:
+                raise DagError(f"node {n.name!r}: lease {n.lease!r} — {exc}") from exc
 
 
     # ── NO CYCLE, PROVEN BY A WALK ─────────────────────────────────

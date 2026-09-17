@@ -75,6 +75,9 @@ journal.claim("crop", 10, candidates=["s1", "s2"])            # ['s1'] — s2 st
   backoff="exponential", max_delay="5m", jitter=0.1))`: a failure is
   archived and the node `scheduled` again; the row becomes claimable when
   due. Past the limit the failure stands, for a loop or a failure edge.
+- **Leases per node.** `Node("fetch", lease="2m")`, `Node("ai_tag", lease="1h")`:
+  `journal.expire()`, called by the application's janitor, gives back every
+  row held longer than its node allows — archived, then claimable again.
 - **One clock.** The journal takes its time from the driver — the database
   server for PostgreSQL — so workers on several machines agree on what is
   due.

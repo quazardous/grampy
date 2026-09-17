@@ -354,3 +354,9 @@ def test_check_dag_refuses_a_loop_that_cannot_hold(nodes, message):
 
 def test_a_loop_may_go_back_to_the_node_itself():
     check_dag((Node("a"), Node("b", parents=("a",), loop=Loop(to="b", max=2))))
+
+
+@pytest.mark.parametrize("lease", ["soon", 0, "0s", -5])
+def test_check_dag_refuses_a_lease_that_does_not_last(lease):
+    with pytest.raises(DagError, match="lease"):
+        check_dag((Node("a", lease=lease),))

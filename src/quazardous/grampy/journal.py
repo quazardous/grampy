@@ -5,6 +5,7 @@
     adopt     record work already done that the journal does not know
     forget    erase it — "never started", the initial state
     release   give back the leases of a dead worker
+    expire    give back every lease held longer than its node allows
     history   every row forget, release or a loop took away, kept
     progress  what is recorded for ONE subject
     stages    what a BATCH went through, with durations
@@ -112,7 +113,7 @@ from .dag import (
     node,
     omitted_by,
 )
-from .timing import shift
+from .timing import seconds, shift
 
 #: HOW MANY CANDIDATES A CLAIM READS AT ONCE, at least — more when the
 #: limit is higher. A page is one read and at most one write.
@@ -461,6 +462,22 @@ class NodeJournal:
     def progress(self, subject: Any) -> dict[str, str]:
         """What is recorded for ONE subject — exactly what `dag.claimable` reads."""
         return self.driver.progress(subject)
+
+    def expire(self) -> dict[str, int]:
+        """Release, on every node declaring a `lease`, the rows held longer
+        than it allows. Return `{node: count}` for the nodes that released
+        something. Meant to be called on a schedule — a janitor — by the
+        application: grampy runs no thread of its own."""
+        now = self._clock()
+        released: dict[str, int] = {}
+        for n in self.dag:
+            if n.lease is None:
+                continue
+            count = self.driver.release(n.name, older_than=shift(now, -seconds(n.lease)),
+                                        now=now)
+            if count:
+                released[n.name] = count
+        return released
 
     def history(self, subject: Any) -> list[dict[str, Any]]:
         """Every row taken away from ONE subject — by `forget`, `release` or

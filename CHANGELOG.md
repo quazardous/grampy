@@ -39,6 +39,9 @@ First release, planned as 0.1.0. Installed as `grampy-q`, imported as
 - Declare retries: a failed node is scheduled again after a delay that
   grows (constant, linear or exponential, capped, with jitter), a limited
   number of times, before the failure counts.
+- Give each node its own lease: one call releases every claim held longer
+  than its node allows, so a slow step and a fast one need not share a
+  timeout.
 - The journal reads the time from the storage — the database server for
   PostgreSQL — so that workers on different machines agree on what is due.
 - Declare bounded loops: a node that fails (or ends another chosen way)

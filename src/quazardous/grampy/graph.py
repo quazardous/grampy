@@ -87,6 +87,8 @@ class Graph:
                 spec["need"] = n.need
             if n.loop is not None:
                 spec["loop"] = {"to": n.loop.to, "max": n.loop.max, "on": list(n.loop.on)}
+            if n.lease is not None:
+                spec["lease"] = n.lease
             if n.retry is not None:
                 spec["retry"] = {"limit": n.retry.limit, "delay": n.retry.delay,
                                  "backoff": n.retry.backoff}
@@ -131,7 +133,7 @@ class Graph:
         for name, raw in specs.items():
             path = f"$.nodes.{name}"
             spec = _mapping(raw, path, required=(),
-                            allowed=("parents", "on", "need", "loop", "retry",
+                            allowed=("parents", "on", "need", "loop", "retry", "lease",
                                      *_NODE_LABELS, *_NODE_FLAGS))
             parents = spec.get("parents", [])
             if not isinstance(parents, list):
@@ -177,7 +179,11 @@ class Graph:
                     retry = Retry(**raw_retry)
                 except (TypeError, ValueError) as exc:
                     raise GraphFormatError(f"{path}.retry: {exc}") from exc
-            nodes.append(Node(name, parents=tuple(parents), loop=loop, retry=retry,
+            lease = spec.get("lease")
+            if lease is not None and (isinstance(lease, bool)
+                                      or not isinstance(lease, (int, float, str))):
+                raise GraphFormatError(f"{path}.lease: expected a duration (30s, 10m, 2h)")
+            nodes.append(Node(name, parents=tuple(parents), loop=loop, retry=retry, lease=lease,
                               working=spec.get("working"), state=spec.get("state"),
                               optional=spec.get("optional", False),
                               once=spec.get("once", False),

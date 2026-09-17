@@ -108,7 +108,7 @@ REVIEW = (
 
 #: A call to a flaky service, retried twice with a doubling delay, then an alert.
 FLAKY = (
-    Node("prepare"),
+    Node("prepare", lease="1h"),
     Node("call", parents=("prepare",), retry=Retry(limit=2, delay="10s")),
     Node("alert", parents=("call",), on={"call": ("failed",)}),
 )
@@ -399,6 +399,19 @@ class JournalContract:
         assert journal.retries("s1", "call") == 2
         assert [e["reason"] for e in journal.history("s1")] == ["retry", "retry"]
         assert self._claim(harness, journal, "alert", ["s1"]) == ["s1"]
+
+    def test_expire_releases_what_each_node_allows_no_longer(self, harness, clock):
+        journal = harness.journal(FLAKY, clock)
+        clock.now = "2026-01-01T00:00:00+00:00"
+        self._claim(harness, journal, "prepare", ["old"])
+        clock.now = "2026-01-01T00:59:00+00:00"
+        self._claim(harness, journal, "prepare", ["young"])
+        assert journal.expire() == {}, "nothing held an hour yet"
+        clock.now = "2026-01-01T01:00:01+00:00"
+        assert journal.expire() == {"prepare": 1}
+        assert journal.progress("old") == {}
+        assert journal.progress("young") == {"prepare": NODE_RUNNING}
+        assert [e["reason"] for e in journal.history("old")] == ["release"]
 
     def test_a_scheduled_row_closes_what_it_guards(self, harness, clock):
         journal = harness.journal(FLAKY, clock)

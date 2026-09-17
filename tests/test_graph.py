@@ -47,7 +47,7 @@ def test_joins_and_choices_are_written_as_data():
         Node("cancel", parents=("order",)),
         Node("refund", parents=("pay",), on={"pay": ("failed",)}),
         Node("end", parents=("pay", "cancel"), need=1),
-        Node("check", parents=("end",), loop=Loop(to="pay", max=3),
+        Node("check", parents=("end",), loop=Loop(to="pay", max=3), lease="10m",
              retry=Retry(limit=2, delay="30s", max_delay="5m", jitter=0.1)),
     ))
     nodes = graph.to_dict()["nodes"]
@@ -55,7 +55,7 @@ def test_joins_and_choices_are_written_as_data():
     assert nodes["refund"] == {"parents": ["pay"], "on": {"pay": ["failed"]}}
     assert nodes["end"] == {"parents": ["pay", "cancel"], "need": 1}
     assert nodes["check"] == {
-        "parents": ["end"], "loop": {"to": "pay", "max": 3, "on": ["failed"]},
+        "parents": ["end"], "loop": {"to": "pay", "max": 3, "on": ["failed"]}, "lease": "10m",
         "retry": {"limit": 2, "delay": "30s", "backoff": "exponential",
                   "max_delay": "5m", "jitter": 0.1}}
     assert Graph.from_json(graph.to_json()) == graph
@@ -103,6 +103,7 @@ def test_a_graph_that_does_not_hold_together_is_refused_on_construction():
      "$.nodes.a.retry"),
     ({"document": {"name": "x"}, "nodes": {"a": {"retry": {"limit": 1, "delay": "soon"}}}},
      "$.nodes.a.retry"),
+    ({"document": {"name": "x"}, "nodes": {"a": {"lease": [10]}}}, "$.nodes.a.lease"),
 ])
 def test_a_document_that_lies_is_refused_with_its_path(data, path):
     with pytest.raises(GraphFormatError) as caught:
