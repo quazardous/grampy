@@ -40,7 +40,9 @@ class Docs(Adapter):                       # how grampy reads YOUR object
         return node != "crop" or doc.scanned
 
 items = Items(NodeJournal(MemoryDriver(), DAG), Docs())
-lease = items.claim("fetch", 10, candidates=["s1", "s2"])   # your objects
+lease = items.claim("fetch", 10, candidates=my_loader())    # objects in…
+for doc in lease:                                           # …and objects out
+    ...
 items.conclude("fetch", lease)
 ```
 

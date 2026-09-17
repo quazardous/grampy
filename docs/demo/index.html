@@ -125,8 +125,9 @@ items.arrive("inbox", new_bricks)
 # understanding it, in the same transaction as the claim.
 waiting = Query("SELECT id FROM bricks WHERE state <> 'shipped' ORDER BY dropped_at")
 
-# A worker takes bricks — the objects, loaded in one query. A salvage brick
-# at the polisher is given up here, because the adapter said so.
+# A worker takes bricks. Candidates are bricks too, or a query like this one
+# for a hot path. A salvage brick at the polisher is given up here, because
+# the adapter said so.
 lease = items.claim("polish", 10, candidates=waiting)
 for brick in lease:
     ...  # your work, on your own object

@@ -40,15 +40,22 @@ Then the application stops handling ids:
 items.admit(new_bricks)                # channel read off each brick, once
 items.arrive("inbox", new_bricks)      # ref too
 
-lease = items.claim("sort", 10, candidates=waiting)   # OBJECTS, one query
-for brick in lease:
+lease = items.claim("sort", 10, candidates=my_loader())   # BRICKS in…
+for brick in lease:                                       # …and bricks out
     ...                                # your work, on your own object
 items.conclude("sort", lease)          # the token travels with the lease
 ```
 
-A claim loads the batch in **one** call to `load`. Ids nothing loaded for —
-a row deleted meanwhile — come back as `lease.missing` rather than
-disappearing quietly, and the rest of the lease still concludes.
+**Nothing here asks you to hold ids.** Candidates are your objects too: a
+list or tuple of them, whose ids are read with `id_of`. They are reused as
+they are, so a batch you already loaded is never loaded twice.
+
+Anything else is handed to the journal untouched — a driver's own query,
+read *inside* the claim's transaction, which is what keeps a hot path
+atomic. Then the layer loads the lease in **one** call to `load`, and ids
+nothing loaded for — a row deleted meanwhile — come back as
+`lease.missing` rather than disappearing quietly, the rest of the lease
+still concluding.
 
 `conclude` takes `token=` when the lease did not travel with the work: a
 worker that took its job off a queue and holds only the proof.
@@ -100,7 +107,7 @@ right choice when you already hold ids and no objects.
 |---|---|
 | `admit(items)` | record each item's channel, once |
 | `arrive(node, items, urgent=False)` | a lane, each item bringing its `ref_of` |
-| `claim(node, limit, candidates=…)` | an `ItemLease`: your objects, a `token`, `missing` |
+| `claim(node, limit, candidates=…)` | items in (reused) or a driver query; an `ItemLease` out |
 | `conclude(node, items, token=None, status=…)` | asks `branch` for a choice |
 | `fail(node, items, token=None)` | |
 | `signal(items, event)` · `progress(item)` · `history(item)` | in items' terms |

@@ -294,7 +294,8 @@ class World:
         busy: dict[str, int] = {}
         for job in self.jobs:
             busy[job.node] = busy.get(job.node, 0) + 1
-        candidates = self._active()
+        # CANDIDATES ARE BRICKS, not ids: the factory never handles an id.
+        candidates = [self.bricks[b] for b in self._active()]
         for node, workers in self.settings.workers.items():
             free = workers - busy.get(node, 0)
             if free <= 0 or not candidates:

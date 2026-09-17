@@ -67,18 +67,29 @@ def world():
     return bricks, adapter, Items(journal, adapter)
 
 
-def test_a_claim_hands_back_objects_loaded_in_one_call(world):
+def test_candidates_are_items_too_and_are_not_loaded_twice(world):
+    """Nothing here asks the caller to hold ids: what goes in is what comes
+    out, and a batch already in hand is never fetched again."""
     bricks, adapter, items = world
-    lease = items.claim("scan", 10, candidates=[1, 2, 3])
+    lease = items.claim("scan", 10, candidates=bricks)
     assert [b.id for b in lease] == [1, 2, 3]
-    assert all(isinstance(b, Brick) for b in lease)
-    assert adapter.calls.count("load([1, 2, 3])") == 1, "one query for the batch"
+    assert all(b is bricks[b.id - 1] for b in lease), "the very objects given"
+    assert adapter.calls == [f"applies({i},scan)" for i in (1, 2, 3)], "no load"
     assert lease.token, "the lease still carries its proof"
+
+
+def test_an_opaque_query_is_handed_to_the_journal_and_the_lease_is_loaded(world):
+    """A hot path keeps its driver query, read inside the claim's
+    transaction; then the layer loads the batch, in one call."""
+    bricks, adapter, items = world
+    lease = items.claim("scan", 10, candidates=(i for i in (1, 2, 3)))
+    assert [b.id for b in lease] == [1, 2, 3]
+    assert adapter.calls.count("load([1, 2, 3])") == 1, "one query for the batch"
 
 
 def test_a_choice_takes_the_branch_the_handler_names(world):
     bricks, adapter, items = world
-    lease = items.claim("scan", 10, candidates=[1, 2, 3])
+    lease = items.claim("scan", 10, candidates=bricks)
     assert items.conclude("scan", lease) == 3
 
     # Brick 3 is scrap: it burns, so `sort` is omitted for it alone. The
@@ -89,23 +100,23 @@ def test_a_choice_takes_the_branch_the_handler_names(world):
     assert "sort" not in items.progress(bricks[0])
 
     # One call, two branches: each item went where its handler said.
-    assert [b.id for b in items.claim("burn", 10, candidates=[1, 2, 3])] == [3]
-    assert [b.id for b in items.claim("sort", 10, candidates=[1, 2, 3])] == [1, 2]
+    assert [b.id for b in items.claim("burn", 10, candidates=bricks)] == [3]
+    assert [b.id for b in items.claim("sort", 10, candidates=bricks)] == [1, 2]
 
 
 def test_an_optional_node_is_given_up_on_the_items_that_refuse_it(world):
     bricks, adapter, items = world
-    items.conclude("scan", items.claim("scan", 10, candidates=[1, 2]))
-    items.conclude("sort", items.claim("sort", 10, candidates=[1, 2]))
+    items.conclude("scan", items.claim("scan", 10, candidates=bricks[:2]))
+    items.conclude("sort", items.claim("sort", 10, candidates=bricks[:2]))
 
-    lease = items.claim("polish", 10, candidates=[1, 2])
+    lease = items.claim("polish", 10, candidates=bricks[:2])
     assert [b.id for b in lease] == [1], "the salvage brick is not in the lease"
     assert items.progress(bricks[1])["polish"] == NODE_SKIPPED, (
         "and the journal records that the decision was taken")
 
     items.conclude("polish", lease)
     # Nothing downstream waits for a step that was given up.
-    assert [b.id for b in items.claim("pack", 10, candidates=[1, 2])] == [1, 2]
+    assert [b.id for b in items.claim("pack", 10, candidates=bricks[:2])] == [1, 2]
 
 
 def test_the_channel_and_the_ref_are_read_from_the_item(world):
@@ -116,9 +127,11 @@ def test_the_channel_and_the_ref_are_read_from_the_item(world):
 
 
 def test_an_item_that_no_longer_loads_does_not_lose_the_claim(world):
+    """On the query path, a row deleted between the claim and the load is
+    named rather than dropped, and the rest of the lease still concludes."""
     bricks, adapter, items = world
-    del adapter.bricks[2]                      # deleted between claim and load
-    lease = items.claim("scan", 10, candidates=[1, 2, 3])
+    del adapter.bricks[2]
+    lease = items.claim("scan", 10, candidates=(i for i in (1, 2, 3)))
     assert [b.id for b in lease] == [1, 3]
     assert lease.missing == (2,), "named, not silently dropped"
     assert items.conclude("scan", lease) == 2, "the others still conclude"
@@ -126,7 +139,7 @@ def test_an_item_that_no_longer_loads_does_not_lose_the_claim(world):
 
 def test_the_adapter_is_asked_once_per_item_per_call(world):
     bricks, adapter, items = world
-    items.claim("scan", 10, candidates=[1, 2, 3])
+    items.claim("scan", 10, candidates=bricks)
     for brick in (1, 2, 3):
         assert adapter.calls.count(f"applies({brick},scan)") == 1
 

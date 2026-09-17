@@ -149,12 +149,26 @@ class Items:
     def claim(self, name: str, limit: int, *, candidates: Any) -> ItemLease:
         """Take up to `limit` candidates and HAND BACK THE OBJECTS.
 
+        `candidates` ARE ITEMS TOO — a list or a tuple of your own objects,
+        which is the point of this layer: nothing here asks you to hold ids.
+        Their ids are read with `id_of`, and the objects are reused, so a
+        batch you already loaded is not loaded twice.
+
+        Anything else — a driver's own query, read inside the claim's
+        transaction, which is what keeps a hot path atomic — is handed to the
+        journal untouched, and the lease is loaded with `load`.
+
         The items this node does not apply to are concluded `skipped` in the
         same call and left out of the lease, so what comes back is what there
         is work to do on.
         """
+        given: dict[Any, Any] = {}
+        if isinstance(candidates, (list, tuple)):
+            given = {self.adapter.id_of(i): i for i in candidates}
+            candidates = list(given)
         lease = self.journal.claim(name, limit, candidates=candidates)
-        loaded = self._loaded(lease)
+        loaded = ({s: given[s] for s in lease if s in given} if given
+                  else self._loaded(lease))
         keep, give_up = [], []
         for item in loaded.values():
             (keep if self.adapter.applies(item, name) else give_up).append(item)
