@@ -20,16 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- The PostgreSQL driver's subject column now defaults to `subject`, like the
-  SQLite one. An application whose column has another name passes it, as
-  before: `PostgresDriver(..., subject="record_id")`.
-
-## [0.1.0] - 2026-09-17
-
-First release. Installed as `grampy-q`, imported as
-`from quazardous import grampy`.
+The first release, once the API has settled. Installed as `grampy-q`,
+imported as `from quazardous import grampy`.
 
 ### Added
 
@@ -123,5 +115,4 @@ First release. Installed as `grampy-q`, imported as
   claimers, claims racing a requeue) and random sequences of operations on
   random graphs checked step by step against the rule.
 
-[Unreleased]: https://github.com/quazardous/grampy/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/quazardous/grampy/releases/tag/v0.1.0
+[Unreleased]: https://github.com/quazardous/grampy/commits/main
