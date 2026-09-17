@@ -147,6 +147,9 @@ journal.claim("crop", 10, candidates=["s1", "s2"])            # ['s1'] — s2 st
   mirror on its subjects; nothing in grampy reads them to decide. They
   are what `allowed_transitions` and the replay helpers are derived from.
 
+Coming from Graphile Worker, BullMQ, Hatchet, Inngest, Temporal or Oban? See
+[the same notions under their names](docs/concepts.md).
+
 ## Drawing a graph
 
 ```python
