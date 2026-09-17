@@ -93,6 +93,7 @@ Any other storage: implement the driver protocol and pass the shared contract
 - [The rules](https://github.com/quazardous/grampy/blob/main/docs/rules.md) — every mechanism, spelled out.
 - [Items](https://github.com/quazardous/grampy/blob/main/docs/items.md) — objects instead of ids, the canonical way.
 - [Drivers and candidates](https://github.com/quazardous/grampy/blob/main/docs/drivers.md) — tables, queries, your own data.
+- [grampy's tables next to yours](https://github.com/quazardous/grampy/blob/main/docs/your-data.md) — what to read, what never to write.
 - [Drawings](https://github.com/quazardous/grampy/blob/main/docs/drawings.md) — diagrams from a graph.
 - [The same notions in other tools](https://github.com/quazardous/grampy/blob/main/docs/concepts.md) — Graphile Worker,
   BullMQ, Hatchet, Inngest, Temporal, Oban.

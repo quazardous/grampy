@@ -50,6 +50,10 @@ journal.conclude("ai_tag", list(lease), token=lease.token)
 Half the journal's work — `expire`, `settle`, counts, diagrams — never needs
 the data at all.
 
+Reading grampy's own tables — to see where a subject stands, what is stuck,
+what went out in one batch — is expected, and
+[has a page of its own](your-data.md). Writing to them is not.
+
 **Written once, in [the items layer](items.md).** That loading line, and the
 handlers that go with it — which branch a choice takes, whether an optional
 step is for this item — belong in an adapter rather than at every call site:

@@ -4,6 +4,8 @@
   and choices, history and loops, time, lanes, policies, limits, versions.
 - [Items](items.md) — the canonical way in: hand grampy your own objects and
   let handlers answer what needs the data.
+- [grampy's tables next to yours](your-data.md) — what you may read, what
+  you must not write, and what the columns mean.
 - [Drivers and candidates](drivers.md) — the tables you declare, how
   eligibility is passed, and how ids become your own objects.
 - [Drawings](drawings.md) — Mermaid flowchart, Mermaid state diagram, Graphviz,
