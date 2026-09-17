@@ -50,6 +50,20 @@ journal.conclude("ai_tag", list(lease), token=lease.token)
 Half the journal's work — `expire`, `settle`, counts, diagrams — never needs
 the data at all.
 
+**Written once, in [the items layer](items.md).** That loading line, and the
+handlers that go with it — which branch a choice takes, whether an optional
+step is for this item — belong in an adapter rather than at every call site:
+
+```python
+lease = items.claim("ai_tag", 10, candidates=offers)   # objects in and out
+for offer in lease:
+    ...
+items.conclude("ai_tag", lease)
+```
+
+It is the canonical way to use grampy. The id-based calls above stay exactly
+as they are, and stay the right choice when you already hold ids.
+
 ## The drivers that ship
 
 | driver | needs | for |

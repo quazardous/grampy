@@ -13,6 +13,7 @@
     for brick in lease:                          # OBJECTS, loaded in one call
         ...
     items.conclude("sort", lease)
+    items.settle(candidates=waiting)             # the janitor, in items' terms
 
 ────────────────────────────────────────────────────────────────────────
 WHERE THE LINE IS
@@ -177,10 +178,7 @@ class Items:
         same call and left out of the lease, so what comes back is what there
         is work to do on.
         """
-        given: dict[Any, Any] = {}
-        if _are_items(candidates):
-            given = {self.adapter.id_of(i): i for i in candidates}
-            candidates = list(given)
+        given, candidates = self._subjects(candidates)
         lease = self.journal.claim(name, limit, candidates=candidates)
         loaded = ({s: given[s] for s in lease if s in given} if given
                   else self._loaded(lease))
@@ -237,6 +235,26 @@ class Items:
     def history(self, item: Any) -> list[dict[str, Any]]:
         """Every row forget, release or a loop took away from this item."""
         return self.journal.history(self.adapter.id_of(item))
+
+    def skip(self, name: str, *, candidates: Any) -> int:
+        """Give up this OPTIONAL node on the candidates that are at it — for
+        items you already know refuse it, without claiming them first."""
+        _, candidates = self._subjects(candidates)
+        return self.journal.skip(name, candidates=candidates)
+
+    def settle(self, candidates: Any) -> dict[str, dict[str, int]]:
+        """The janitor's pass, in items' terms: waits concluded, due arrivals
+        let through their lane, optional nodes past their grace skipped."""
+        _, candidates = self._subjects(candidates)
+        return self.journal.settle(candidates)
+
+    def _subjects(self, candidates: Any) -> tuple[dict[Any, Any], Any]:
+        """`({id: item}, what the journal gets)`. Items become their ids and
+        stay in hand; a driver's query travels on untouched."""
+        if not _are_items(candidates):
+            return {}, candidates
+        given = {self.adapter.id_of(i): i for i in candidates}
+        return given, list(given)
 
     def _loaded(self, lease: Lease) -> dict[Any, Any]:
         """`{id: item}` for a lease, in the lease's order, in ONE load."""

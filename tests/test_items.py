@@ -215,3 +215,18 @@ def test_a_duration_may_be_a_timedelta():
     assert graph.nodes[2].grace == "30s"
     written = graph.to_json()
     assert Graph.from_json(written).to_json() == written, "still round-trips"
+
+
+def test_the_janitor_pass_speaks_items_too(world):
+    """`settle` and `skip` take items like everything else here."""
+    bricks, adapter, items = world
+    items.conclude("scan", items.claim("scan", 10, candidates=bricks[:2]))
+    items.conclude("sort", items.claim("sort", 10, candidates=bricks[:2]))
+
+    # `skip` gives up an optional node without claiming it first.
+    assert items.skip("polish", candidates=bricks[1:2]) == 1
+    assert items.progress(bricks[1])["polish"] == NODE_SKIPPED
+
+    # `settle` reports per node, and takes items rather than ids.
+    assert isinstance(items.settle(bricks), dict)
+    assert [b.id for b in items.claim("pack", 10, candidates=bricks[:2])] == [2]

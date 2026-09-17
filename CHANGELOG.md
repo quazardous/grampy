@@ -33,6 +33,8 @@ imported as `from quazardous import grampy`.
   choice takes, whether an optional step is for this item at all. A claim
   then loads the batch in one query and gives the objects back. It is the
   canonical way to use grampy; the id-based API underneath is unchanged.
+  The janitor's pass speaks items too, so an application need never hold
+  an id of its own.
 - Declare a workflow as a graph of nodes, with forks that run in parallel,
   joins that wait for all their parents, and optional nodes that can be
   skipped without blocking their children.
