@@ -91,7 +91,7 @@ a new version of the subject in it, and `journal.settle(candidates)` lets it
 through once due — archiving the previous pass through what follows, in the
 same write.
 
-A version arriving while one waits is merged; `cooldown` holds a subject back
+A ref arriving while one waits is merged; `cooldown` holds a subject back
 that long after its last pass ended, `delay` waits for quiet, `max_wait` caps
 both, an `urgent=True` arrival skips them, and a pass still running is never
 cut short (`while_running="queue"|"skip"`). A `rate` on the lane lets arrivals
@@ -99,15 +99,24 @@ out in the order they came.
 
 ### What a merge keeps
 
+**A version is the same subject coming back with a changed business
+state** — the same id, new content. What names that content is the `ref`: a
+hash, a scrape id, whatever the application wants. grampy compares refs and
+never reads them.
+
+Not to be confused with `document.version`, which names the **graph** a
+subject is pinned to. A subject has one graph version and as many refs as
+it has comebacks.
+
 | `merge` | |
 |---|---|
-| `"last"` | the latest version wins (`Lane.throttle`, `Lane.debounce`) |
+| `"last"` | the latest ref wins (`Lane.throttle`, `Lane.debounce`) |
 | `"first"` | the one waiting stays, later ones are dropped (`Lane.dedupe`) |
-| `"all"` | every version, oldest first, at most `max_size` (`Lane.batch`) |
+| `"all"` | every ref, oldest first, at most `max_size` (`Lane.batch`) |
 | `"fn:<name>"` | a function you give the journal decides |
 
-`journal.refs(subject, "arrive")` reads what waits — one version, or the
-whole batch in the order it came. Past `max_size` the oldest is let go, and
+`journal.refs(subject, "arrive")` reads what waits — one ref, or the whole
+batch in the order it came. Past `max_size` the oldest is let go, and
 the history says so.
 
 **A named function, and the graph stays data.** The document holds the

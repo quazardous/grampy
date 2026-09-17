@@ -133,7 +133,7 @@ PAGE = 200
 
 def _encode_refs(refs: tuple[str, ...]) -> str | None:
     """The refs a lane keeps, as the text a driver stores. `None` when there
-    is nothing to keep, so a lane that keeps one version stores no list."""
+    is nothing to keep, so a lane that keeps one ref stores no list."""
     return json.dumps(list(refs)) if refs else None
 
 
@@ -177,11 +177,12 @@ class Entry(NamedTuple):
 
 
 class Arrival(NamedTuple):
-    """A subject waiting in a lane: the version it brings (`ref`, opaque),
+    """A subject waiting in a lane: what it brings (`ref`, opaque —
+    what came back, NOT the graph's `document.version`),
     its `place` in the lane, when it FIRST arrived, and whether it is
     urgent.
 
-    `refs` holds EVERY version still waiting, for a lane that keeps them —
+    `refs` holds EVERY ref still waiting, for a lane that keeps them —
     text the journal encodes and decodes, stored by the driver as it is.
     `journal.refs(subject, node)` gives it back as a tuple.
     """

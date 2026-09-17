@@ -6,7 +6,7 @@
     joined           are enough parents concluded the way this node accepts?
     omitted_by       what a choice leaves dead when it takes one branch
     Loop             a declared way back: which statuses send the subject where
-    Lane             a declared way in: how returning versions of a subject wait
+    Lane             a declared way in: how a subject coming back waits
     descendants      everything downstream of a node
     ancestors        everything upstream of a node
     claimable        can this node be taken, given what is recorded?
@@ -120,7 +120,9 @@ class Lane:
                        are dropped; last: the latest `ref` wins; all: every
                        `ref` is kept, in the order they arrived, at most
                        `max_size` of them; `fn:<name>`: a function decides,
-                       given to the journal as `mergers={"<name>": fn}`
+                       given to the journal as `mergers={"<name>": fn}`.
+                       A `ref` NAMES WHAT CAME BACK — opaque to grampy, and
+                       nothing to do with `document.version`, the graph's
         max_size       with `all`, how many refs are kept — beyond it the
                        OLDEST is let go, and noted in the history
         position       first: a merged arrival keeps the place of the first;
@@ -136,12 +138,12 @@ class Lane:
 
     Presets under the names other tools gave them:
 
-        Lane.throttle(cooldown)   last version, place of the first
+        Lane.throttle(cooldown)   last ref, place of the first
                                   (Graphile Worker `preserve_run_at`)
-        Lane.debounce(delay)      last version, to the back (Lodash debounce,
+        Lane.debounce(delay)      last ref, to the back (Lodash debounce,
                                   Graphile Worker `replace`)
-        Lane.dedupe()             first version, the rest dropped
-        Lane.batch(max_size)      every version, in order (the aggregator of
+        Lane.dedupe()             first ref, the rest dropped
+        Lane.batch(max_size)      every ref, in order (the aggregator of
                                   Enterprise Integration Patterns)
     """
 
