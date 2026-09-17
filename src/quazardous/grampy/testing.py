@@ -1315,7 +1315,7 @@ def _model_machine(harness: Any, subject_type: type = str, lane_root: bool = Fal
                             position=draw(st.sampled_from(("first", "last"))),
                             cooldown=draw(st.one_of(st.none(), st.integers(5, 30))),
                             delay=draw(st.one_of(st.none(), st.integers(1, 4))),
-                            max_wait=draw(st.one_of(st.none(), st.integers(3, 12))),
+                            max_wait=draw(st.one_of(st.none(), st.integers(2, 6))),
                             while_running=draw(st.sampled_from(("queue", "skip"))))
             optional = not choice and lane is None and draw(st.booleans())
             if optional and draw(st.integers(0, 3)) > 0:
@@ -1520,6 +1520,16 @@ def _model_machine(harness: Any, subject_type: type = str, lane_root: bool = Fal
                     self.archived[s].append((now, n.name, "merged", "lane"))
                     expected["merged"] += 1
             assert self.journal.arrive(n.name, candidates, ref=ref, urgent=urgent) == expected
+
+        @rule(data=st.data(), subject=st.sampled_from(_SUBJECTS),
+              times=st.integers(4, 12))
+        def keep_coming_back(self, data: Any, subject: Any, times: int) -> None:
+            """One subject arriving again and again, a tick apart, then the
+            janitor: where a moving place outruns its delay and only
+            `max_wait` lets it through."""
+            for _ in range(times):
+                self.arrive(data, [subject], "r1", False)
+            self.settle([subject], 0)
 
         def _let_in(self, n: Node, candidates: list[Any], now: str) -> int:
             lane = n.lane
