@@ -184,3 +184,43 @@ def test_any_graph_survives_a_round_trip_through_json(graph):
     text = graph.to_json()
     assert Graph.from_json(text) == graph
     assert Graph.from_json(text).to_dict() == json.loads(text)
+
+
+def test_channels_change_settings_and_round_trip():
+    graph = Graph(Document("offers"), (
+        Node("scrape", lease="2m"),
+        Node("call", parents=("scrape",), retry=Retry(limit=1)),
+    ), channels={"slow": {"scrape": {"lease": "10m"},
+                          "call": {"retry": Retry(limit=4, delay="1m")}}})
+    assert graph.variant("slow")[0].lease == "10m"
+    assert graph.variant("other")[0].lease == "2m"
+    assert graph.variant(None)[1].retry == Retry(limit=1)
+    data = graph.to_dict()
+    assert data["channels"] == {"slow": {
+        "scrape": {"lease": "10m"},
+        "call": {"retry": {"limit": 4, "delay": "1m", "backoff": "exponential"}}}}
+    assert Graph.from_json(graph.to_json()) == graph
+
+
+@pytest.mark.parametrize("channels, message", [
+    ({"x": {"ghost": {"lease": "1m"}}}, "does not exist"),
+    ({"x": {"a": {"parents": []}}}, "never the structure"),
+    ({"x": {"a": {"grace": "1m"}}}, "not"),
+    ({"x": {"a": {"lease": "0s"}}}, "lease"),
+])
+def test_a_channel_that_would_break_the_graph_is_refused(channels, message):
+    with pytest.raises(DagError, match=message):
+        Graph(Document("x"), (Node("a"),), channels=channels)
+
+
+@pytest.mark.parametrize("data, path", [
+    ({"document": {"name": "x"}, "nodes": {"a": {}}, "channels": []}, "$.channels"),
+    ({"document": {"name": "x"}, "nodes": {"a": {}}, "channels": {"c": {"a": {"need": 1}}}},
+     "$.channels.c.a: unknown key(s) ['need']"),
+    ({"document": {"name": "x"}, "nodes": {"a": {}}, "channels": {"c": {"a": {"lease": []}}}},
+     "$.channels.c.a.lease"),
+])
+def test_a_channels_document_that_lies_is_refused(data, path):
+    with pytest.raises(GraphFormatError) as caught:
+        Graph.from_dict(data)
+    assert path in str(caught.value)

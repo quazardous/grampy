@@ -1,7 +1,8 @@
 """THE GRAPH AS DATA — a workflow that can be written, read, stored, drawn.
 
     Document   who the graph is: dsl, namespace, name, version
-    Graph      a document and its nodes, checked on construction
+    Graph      a document, its nodes, and per-channel settings, all checked
+    OVERRIDABLE  the node settings a channel may change
     to_dict / from_dict, to_json / from_json
 
 ────────────────────────────────────────────────────────────────────────
@@ -30,16 +31,22 @@ format this version does not know is refused rather than half read.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import Any
 
-from .dag import Loop, Node, check_dag
+from .dag import DagError, Loop, Node, check_dag
 from .timing import Retry
 
 #: THE FORMAT THIS VERSION READS AND WRITES.
 DSL = "grampy/1"
 
 _NODE_FLAGS = ("optional", "once", "choice")
+
+#: WHAT A CHANNEL MAY CHANGE ON A NODE: its settings, never its structure.
+#: Parents, joins, choices, loops and waits are the workflow; how long to
+#: wait, how often to retry, how long a lease lasts are how a source is
+#: treated.
+OVERRIDABLE = ("retry", "lease", "timeout", "grace")
 _NODE_LABELS = ("working", "state")
 
 
@@ -60,15 +67,38 @@ class Document:
 
 @dataclass(frozen=True)
 class Graph:
-    """A document and its nodes. `check_dag` runs on construction: a Graph
-    that exists holds together."""
+    """A document, its nodes, and the settings some CHANNELS change.
+    `check_dag` runs on construction, on the nodes and on every channel's
+    variant: a Graph that exists holds together for every source.
+
+        Graph(doc, nodes, channels={"partner-a": {"call": {"retry": Retry(5, "1m")}}})
+    """
 
     document: Document
     nodes: tuple[Node, ...]
+    channels: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "nodes", tuple(self.nodes))
         check_dag(self.nodes)
+        names = {n.name for n in self.nodes}
+        for channel, overrides in self.channels.items():
+            for name, settings in overrides.items():
+                if name not in names:
+                    raise DagError(f"channel {channel!r} changes {name!r}, which does not exist")
+                refused = sorted(set(settings) - set(OVERRIDABLE))
+                if refused:
+                    raise DagError(
+                        f"channel {channel!r} changes {refused} on {name!r} — a channel "
+                        f"changes only {list(OVERRIDABLE)}, never the structure")
+            check_dag(self.variant(channel))
+
+    def variant(self, channel: str | None) -> tuple[Node, ...]:
+        """The nodes as `channel` sees them: its settings over the defaults.
+        An unknown channel, or none, sees the defaults."""
+        overrides = self.channels.get(channel, {}) if channel is not None else {}
+        return tuple(replace(n, **overrides[n.name]) if n.name in overrides else n
+                     for n in self.nodes)
 
     # -- write ---------------------------------------------------------------
 
@@ -91,20 +121,22 @@ class Graph:
                 if getattr(n, key) is not None:
                     spec[key] = getattr(n, key)
             if n.retry is not None:
-                spec["retry"] = {"limit": n.retry.limit, "delay": n.retry.delay,
-                                 "backoff": n.retry.backoff}
-                if n.retry.max_delay is not None:
-                    spec["retry"]["max_delay"] = n.retry.max_delay
-                if n.retry.jitter:
-                    spec["retry"]["jitter"] = n.retry.jitter
+                spec["retry"] = _retry_to_dict(n.retry)
             for flag in _NODE_FLAGS:
                 if getattr(n, flag):
                     spec[flag] = True
             nodes[n.name] = spec
         d = self.document
-        return {"document": {"dsl": d.dsl, "namespace": d.namespace,
-                             "name": d.name, "version": d.version},
-                "nodes": nodes}
+        out: dict[str, Any] = {"document": {"dsl": d.dsl, "namespace": d.namespace,
+                                            "name": d.name, "version": d.version},
+                               "nodes": nodes}
+        if self.channels:
+            out["channels"] = {
+                channel: {name: {key: _retry_to_dict(value) if key == "retry" else value
+                                 for key, value in settings.items()}
+                          for name, settings in overrides.items()}
+                for channel, overrides in self.channels.items()}
+        return out
 
     def to_json(self, **kwargs: Any) -> str:
         kwargs.setdefault("indent", 2)
@@ -115,7 +147,7 @@ class Graph:
     @classmethod
     def from_dict(cls, data: Any) -> Graph:
         top = _mapping(data, "$", required=("document", "nodes"),
-                       allowed=("document", "nodes"))
+                       allowed=("document", "nodes", "channels"))
         head = _mapping(top["document"], "$.document", required=("name",),
                         allowed=("dsl", "namespace", "name", "version"))
         for key in head:
@@ -172,20 +204,9 @@ class Graph:
                 for i, status in enumerate(loop_on):
                     _string(status, f"{path}.loop.on[{i}]")
                 loop = Loop(to=raw_loop["to"], max=raw_loop["max"], on=tuple(loop_on))
-            retry = None
-            if "retry" in spec:
-                raw_retry = _mapping(spec["retry"], f"{path}.retry", required=("limit",),
-                                     allowed=("limit", "delay", "backoff", "max_delay",
-                                              "jitter"))
-                try:
-                    retry = Retry(**raw_retry)
-                except (TypeError, ValueError) as exc:
-                    raise GraphFormatError(f"{path}.retry: {exc}") from exc
+            retry = _retry_from(spec["retry"], f"{path}.retry") if "retry" in spec else None
             for key in ("lease", "timeout", "grace"):
-                value = spec.get(key)
-                if value is not None and (isinstance(value, bool)
-                                          or not isinstance(value, (int, float, str))):
-                    raise GraphFormatError(f"{path}.{key}: expected a duration (30s, 10m, 2h)")
+                _duration(spec.get(key), f"{path}.{key}")
             if "wait" in spec:
                 _string(spec["wait"], f"{path}.wait")
             nodes.append(Node(name, parents=tuple(parents), loop=loop, retry=retry,
@@ -196,7 +217,25 @@ class Graph:
                               once=spec.get("once", False),
                               on={p: tuple(v) for p, v in on.items()}, need=need,
                               choice=spec.get("choice", False)))
-        return cls(document, tuple(nodes))
+        channels: dict[str, dict[str, dict[str, Any]]] = {}
+        raw_channels = top.get("channels", {})
+        if not isinstance(raw_channels, dict):
+            raise GraphFormatError("$.channels: expected an object of channels by name")
+        for channel, raw_overrides in raw_channels.items():
+            if not isinstance(raw_overrides, dict):
+                raise GraphFormatError(f"$.channels.{channel}: expected an object of nodes")
+            for name, raw_settings in raw_overrides.items():
+                path = f"$.channels.{channel}.{name}"
+                settings = _mapping(raw_settings, path, required=(), allowed=OVERRIDABLE)
+                parsed: dict[str, Any] = {}
+                for key, value in settings.items():
+                    if key == "retry":
+                        parsed[key] = _retry_from(value, f"{path}.retry")
+                    else:
+                        _duration(value, f"{path}.{key}")
+                        parsed[key] = value
+                channels.setdefault(channel, {})[name] = parsed
+        return cls(document, tuple(nodes), channels)
 
     @classmethod
     def from_json(cls, text: str) -> Graph:
@@ -205,6 +244,30 @@ class Graph:
         except json.JSONDecodeError as exc:
             raise GraphFormatError(f"$: not JSON — {exc}") from exc
         return cls.from_dict(data)
+
+
+def _retry_to_dict(retry: Retry) -> dict[str, Any]:
+    out: dict[str, Any] = {"limit": retry.limit, "delay": retry.delay, "backoff": retry.backoff}
+    if retry.max_delay is not None:
+        out["max_delay"] = retry.max_delay
+    if retry.jitter:
+        out["jitter"] = retry.jitter
+    return out
+
+
+def _retry_from(value: Any, path: str) -> Retry:
+    raw = _mapping(value, path, required=("limit",),
+                   allowed=("limit", "delay", "backoff", "max_delay", "jitter"))
+    try:
+        return Retry(**raw)
+    except (TypeError, ValueError) as exc:
+        raise GraphFormatError(f"{path}: {exc}") from exc
+
+
+def _duration(value: Any, path: str) -> None:
+    if value is not None and (isinstance(value, bool)
+                              or not isinstance(value, (int, float, str))):
+        raise GraphFormatError(f"{path}: expected a duration (30s, 10m, 2h)")
 
 
 def _no_duplicate(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

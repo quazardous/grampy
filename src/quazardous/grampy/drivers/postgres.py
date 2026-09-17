@@ -14,7 +14,8 @@ none. It needs two `sqlalchemy.Table`s sharing a subject column (named by
                 `lease` — all text, `(subject, node)` as primary key,
                 `finished_at` and `lease` nullable. Timestamps are ISO-8601
                 text, compared lexically.
-    revisions   one row per subject: `revision`, an integer, the subject as
+    revisions   the subject registry, one row per subject: `revision`, an
+                integer, and `channel`, nullable text; the subject as
                 primary key. Rows are created on demand.
     history     the rows taken away: the node table's columns, plus
                 `archived_at` and `reason` (text); append-only, no key
@@ -92,7 +93,7 @@ from ..journal import Entry
 #: THE COLUMNS THE NODE TABLE MUST CARRY, besides the subject.
 REQUIRED_COLUMNS = ("node", "status", "started_at", "finished_at", "lease")
 #: THE COLUMNS THE REVISIONS TABLE MUST CARRY, besides the subject.
-REVISION_COLUMNS = ("revision",)
+REVISION_COLUMNS = ("revision", "channel")
 #: THE COLUMNS THE HISTORY TABLE MUST CARRY, besides the subject.
 HISTORY_COLUMNS = (*REQUIRED_COLUMNS, "archived_at", "reason")
 
@@ -159,7 +160,7 @@ class PostgresDriver:
         held = t.alias("d")
         query = (
             sa.select(candidate, c.c.grampy_rank,
-                      sa.func.coalesce(r.c.revision, 0))
+                      sa.func.coalesce(r.c.revision, 0), r.c.channel)
             .select_from(c.outerjoin(r, self._rev_subject == candidate))
             .where(~sa.exists().where(
                 held.c[self._subject.key] == candidate, held.c.node == name,
@@ -188,7 +189,7 @@ class PostgresDriver:
                     due[subject][n] = started
                 if ended is not None:
                     finished[subject][n] = ended
-            yield [Entry(f[0], int(f[2]), rows[f[0]], due[f[0]], finished[f[0]])
+            yield [Entry(f[0], int(f[2]), rows[f[0]], due[f[0]], finished[f[0]], f[3])
                    for f in found]
             if len(found) < page:
                 return
@@ -281,11 +282,35 @@ class PostgresDriver:
         return self._take_away(sa.and_(t.c.node == name, self._subject.in_(subjects)),
                                now=now, reason="forget")
 
-    def release(self, name: str, *, older_than: str, now: str) -> int:
-        t = self.table
-        return self._take_away(
-            sa.and_(t.c.node == name, t.c.status == NODE_RUNNING,
-                    t.c.started_at < older_than), now=now, reason="release")
+    def release(self, name: str, *, older_than: str, now: str,
+                only: tuple[str, ...] | None = None, exclude: tuple[str, ...] = ()) -> int:
+        t, r = self.table, self.revisions
+        where = sa.and_(t.c.node == name, t.c.status == NODE_RUNNING,
+                        t.c.started_at < older_than)
+        if only is not None:
+            where = sa.and_(where, self._subject.in_(
+                sa.select(self._rev_subject).where(r.c.channel.in_(list(only)))))
+        if exclude:
+            where = sa.and_(where, self._subject.not_in(
+                sa.select(self._rev_subject).where(r.c.channel.in_(list(exclude)))))
+        return self._take_away(where, now=now, reason="release")
+
+    def enroll(self, subjects: list[Any], channel: str | None) -> int:
+        r = self.revisions
+        rows = self._execute(
+            postgresql.insert(r)
+            .values([{self._rev_subject.key: s, "revision": 0, "channel": channel}
+                     for s in sorted(subjects)])
+            .on_conflict_do_update(index_elements=[self._rev_subject.key],
+                                   set_={"channel": channel})
+            .returning(self._rev_subject)).fetchall()
+        return len(rows)
+
+    def channels(self, subjects: list[Any]) -> dict[Any, str]:
+        r = self.revisions
+        return {row[0]: row[1] for row in self._execute(
+            sa.select(self._rev_subject, r.c.channel)
+            .where(self._rev_subject.in_(list(subjects)), r.c.channel.is_not(None))).fetchall()}
 
     def _raise_revisions(self, subjects: list[Any]) -> None:
         r = self.revisions

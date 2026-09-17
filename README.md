@@ -85,6 +85,10 @@ journal.claim("crop", 10, candidates=["s1", "s2"])            # ['s1'] — s2 st
   the wait `done`, or `failed` once the timeout has passed since its parents
   concluded. `Node(optional=True, grace="1d")` is skipped by `settle` when
   nobody took it in time.
+- **Channels: one workflow, several sources.** `journal.enroll(subjects,
+  "partner-a")` records a subject's channel; a `Graph(..., channels={"partner-a":
+  {"call": {"retry": Retry(5, "1m")}}})` changes, for that channel only, a
+  node's `retry`, `lease`, `timeout` or `grace` — never the structure.
 - **One clock.** The journal takes its time from the driver — the database
   server for PostgreSQL — so workers on several machines agree on what is
   due.
@@ -131,7 +135,8 @@ nodes = sa.Table("job_nodes", metadata,
     sa.Column("lease", sa.Text))
 revisions = sa.Table("job_revisions", metadata,
     sa.Column("job_id", sa.Text, primary_key=True),
-    sa.Column("revision", sa.Integer, nullable=False))
+    sa.Column("revision", sa.Integer, nullable=False),
+    sa.Column("channel", sa.Text))
 history = sa.Table("job_node_history", metadata,
     *[sa.Column(c.name, c.type) for c in nodes.columns],
     sa.Column("archived_at", sa.Text, nullable=False),

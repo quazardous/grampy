@@ -48,6 +48,7 @@ class MemoryDriver:
     def __init__(self) -> None:
         self.rows: dict[tuple[Any, str], Row] = {}
         self.revisions: dict[Any, int] = {}
+        self.channel_of: dict[Any, str] = {}
         self.archive: list[tuple[Any, dict[str, Any]]] = []
         self._lock = threading.RLock()
 
@@ -83,7 +84,8 @@ class MemoryDriver:
                         {n: row.started_at for n, row in held.items()
                          if row.status == NODE_SCHEDULED},
                         {n: row.finished_at for n, row in held.items()
-                         if row.finished_at is not None}))
+                         if row.finished_at is not None},
+                        self.channel_of.get(subject)))
             yield entries
 
     def insert_if_unchanged(self, name: str, entries: list[tuple[Any, int]], *,
@@ -143,14 +145,30 @@ class MemoryDriver:
             return sum(1 for subject in subjects
                        if self._take_away(subject, name, now=now, reason="forget"))
 
-    def release(self, name: str, *, older_than: str, now: str) -> int:
+    def release(self, name: str, *, older_than: str, now: str,
+                only: tuple[str, ...] | None = None, exclude: tuple[str, ...] = ()) -> int:
         with self._lock:
             stale = [key for key, row in self.rows.items()
                      if key[1] == name and row.status == NODE_RUNNING
-                     and row.started_at < older_than]
+                     and row.started_at < older_than
+                     and (only is None or self.channel_of.get(key[0]) in only)
+                     and self.channel_of.get(key[0]) not in exclude]
             for subject, n in stale:
                 self._take_away(subject, n, now=now, reason="release")
             return len(stale)
+
+    def enroll(self, subjects: list[Any], channel: str | None) -> int:
+        with self._lock:
+            for subject in subjects:
+                if channel is None:
+                    self.channel_of.pop(subject, None)
+                else:
+                    self.channel_of[subject] = channel
+        return len(subjects)
+
+    def channels(self, subjects: list[Any]) -> dict[Any, str]:
+        with self._lock:
+            return {s: self.channel_of[s] for s in subjects if s in self.channel_of}
 
     # -- read --------------------------------------------------------------
 

@@ -6,6 +6,7 @@
     forget    erase it — "never started", the initial state
     release   give back the leases of a dead worker
     expire    give back every lease held longer than its node allows
+    enroll    give subjects a channel, whose settings then apply to them
     signal    record that an awaited event happened, for subjects
     settle    conclude waits and skip optional nodes past their grace
     history   every row forget, release or a loop took away, kept
@@ -116,6 +117,7 @@ from .dag import (
     node,
     omitted_by,
 )
+from .graph import Graph
 from .timing import seconds, shift
 
 #: HOW MANY CANDIDATES A CLAIM READS AT ONCE, at least — more when the
@@ -152,6 +154,8 @@ class Entry(NamedTuple):
     due: dict[str, str] = {}
     #: `{node: finished_at}` for the concluded rows among `rows`.
     finished: dict[str, str] = {}
+    #: The subject's channel, None when it has none.
+    channel: str | None = None
 
 
 class JournalDriver(Protocol):
@@ -207,9 +211,19 @@ class JournalDriver(Protocol):
         subject's revision, atomically: no `insert_if_unchanged` that read
         the old revision may succeed afterwards. Return the count deleted."""
 
-    def release(self, name: str, *, older_than: str, now: str) -> int:
+    def release(self, name: str, *, older_than: str, now: str,
+                only: tuple[str, ...] | None = None, exclude: tuple[str, ...] = ()) -> int:
         """ARCHIVE with reason `release` and delete the RUNNING rows started
-        before `older_than`."""
+        before `older_than` — of subjects whose channel is in `only` when
+        given, and not in `exclude` (a subject without channel is never in
+        either)."""
+
+    def enroll(self, subjects: list[Any], channel: str | None) -> int:
+        """Record each subject's channel in the registry (the revisions),
+        creating its entry when needed. Return the count written."""
+
+    def channels(self, subjects: list[Any]) -> dict[Any, str]:
+        """`{subject: channel}` for the subjects that have one."""
 
     def history(self, subject: Any) -> list[dict[str, Any]]:
         """The archived rows of one subject, oldest archive first (ties by
@@ -253,13 +267,16 @@ class JournalDriver(Protocol):
 class NodeJournal:
     """Progress per node, validated against ONE graph, stored by a driver."""
 
-    def __init__(self, driver: JournalDriver, dag: tuple[Node, ...], *,
+    def __init__(self, driver: JournalDriver, dag: tuple[Node, ...] | Graph, *,
                  clock: Callable[[], str] | None = None,
                  rng: random.Random | None = None) -> None:
-        """`clock` defaults to the driver's (`JournalDriver.now`): workers on
-        several machines then share one time. `rng` spreads retry jitter."""
+        """`dag` is a tuple of nodes, or a `Graph` whose channels change some
+        settings per source. `clock` defaults to the driver's
+        (`JournalDriver.now`): workers on several machines then share one
+        time. `rng` spreads retry jitter."""
         self.driver = driver
-        self.dag = dag
+        self.graph = dag if isinstance(dag, Graph) else None
+        self.dag = dag.nodes if isinstance(dag, Graph) else dag
         self._clock = clock or driver.now
         self._rng = rng or random.Random()
 
@@ -362,14 +379,18 @@ class NodeJournal:
         subjects = _unique(subjects)
         now = self._clock()
         touched = 0
-        if n.retry is not None and status == NODE_FAILED and branch is None:
-            # FIRST, THE RETRIES: under the limit, the failure is archived and
-            # the node scheduled again — later for later attempts.
+        retry_of = self._per_channel(name, "retry", subjects)
+        if any(r is not None for r in retry_of.values()) and status == NODE_FAILED \
+                and branch is None:
+            # FIRST, THE RETRIES — each subject under its channel's policy: under
+            # the limit, the failure is archived and the node scheduled again,
+            # later for later attempts.
             tries = self.driver.archived(subjects, name, "retry")
             by_due: dict[str, list[Any]] = {}
             for s in subjects:
-                if tries.get(s, 0) < n.retry.limit:
-                    wait = n.retry.wait(tries.get(s, 0) + 1, self._rng)
+                policy = retry_of[s]
+                if policy is not None and tries.get(s, 0) < policy.limit:
+                    wait = policy.wait(tries.get(s, 0) + 1, self._rng)
                     by_due.setdefault(shift(now, wait), []).append(s)
             for due, group in by_due.items():
                 touched += self.driver.conclude(name, group, status=status, now=now,
@@ -492,13 +513,56 @@ class NodeJournal:
         now = self._clock()
         released: dict[str, int] = {}
         for n in self.dag:
-            if n.lease is None:
-                continue
-            count = self.driver.release(n.name, older_than=shift(now, -seconds(n.lease)),
-                                        now=now)
+            special = {channel: variant.lease for channel, variant in self._variants(n.name)
+                       if variant.lease != n.lease}
+            count = 0
+            if n.lease is not None:
+                count += self.driver.release(
+                    n.name, older_than=shift(now, -seconds(n.lease)), now=now,
+                    exclude=tuple(sorted(special)))
+            for channel, lease in special.items():
+                if lease is not None:
+                    count += self.driver.release(
+                        n.name, older_than=shift(now, -seconds(lease)), now=now,
+                        only=(channel,))
             if count:
                 released[n.name] = count
         return released
+
+    def enroll(self, subjects: list[Any], channel: str | None) -> int:
+        """Give these subjects a CHANNEL — their source. The graph's settings
+        for that channel (retries, leases, timeouts, graces) then apply to
+        them; the structure of the workflow stays the same for all."""
+        if not subjects:
+            return 0
+        return self.driver.enroll(_unique(subjects), channel)
+
+    def channel(self, subject: Any) -> str | None:
+        """The subject's channel, None when it has none."""
+        return self.driver.channels([subject]).get(subject)
+
+    def settings(self, name: str, channel: str | None) -> Node:
+        """The node as a subject of `channel` sees it."""
+        node(name, self.dag)
+        if self.graph is None:
+            return node(name, self.dag)
+        return node(name, self.graph.variant(channel))
+
+    def _variants(self, name: str) -> list[tuple[str, Node]]:
+        if self.graph is None:
+            return []
+        return [(channel, node(name, self.graph.variant(channel)))
+                for channel in self.graph.channels]
+
+    def _per_channel(self, name: str, setting: str, subjects: list[Any]) -> dict[Any, Any]:
+        """`{subject: value of `setting` on `name` for its channel}`."""
+        default = getattr(node(name, self.dag), setting)
+        if self.graph is None or not any(
+                name in overrides and setting in overrides[name]
+                for overrides in self.graph.channels.values()):
+            return dict.fromkeys(subjects, default)
+        channels = self.driver.channels(subjects)
+        return {s: getattr(self.settings(name, channels.get(s)), setting) for s in subjects}
 
     def signal(self, subjects: list[Any], event: str, ref: str | None = None) -> int:
         """Record that `event` happened for these subjects — DURABLY, before
@@ -524,7 +588,8 @@ class NodeJournal:
         now = self._clock()
         out: dict[str, dict[str, int]] = {}
         for n in self.dag:
-            if n.wait is None and n.grace is None:
+            if n.wait is None and n.grace is None and all(
+                    v.grace is None for _, v in self._variants(n.name)):
                 continue
             after = tuple(sorted(descendants(n.name, self.dag)))
             entries = [e for page in self.driver.scan(
@@ -544,16 +609,17 @@ class NodeJournal:
                 went_back = self.driver.latest(subjects, n.name, None)
             for e in ready:
                 since = _joined_since(n, e)
+                seen_by = self.settings(n.name, e.channel)
                 if n.wait is not None:
                     at = heard.get(e.subject)
                     if at is not None and at >= went_back.get(e.subject, ""):
                         decided.setdefault(NODE_DONE, []).append((e.subject, e.revision))
                         continue
-                    if (n.timeout is not None and since is not None
-                            and shift(since, seconds(n.timeout)) <= now):
+                    if (seen_by.timeout is not None and since is not None
+                            and shift(since, seconds(seen_by.timeout)) <= now):
                         decided.setdefault(NODE_FAILED, []).append((e.subject, e.revision))
-                elif (since is not None and n.grace is not None
-                      and shift(since, seconds(n.grace)) <= now):
+                elif (since is not None and seen_by.grace is not None
+                      and shift(since, seconds(seen_by.grace)) <= now):
                     decided.setdefault(NODE_SKIPPED, []).append((e.subject, e.revision))
             for status, chosen in decided.items():
                 written = self.driver.insert_if_unchanged(n.name, chosen, status=status,

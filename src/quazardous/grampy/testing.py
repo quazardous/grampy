@@ -58,6 +58,7 @@ from .dag import (
     node,
     omitted_by,
 )
+from .graph import Document, Graph
 from .timing import Retry, seconds, shift
 
 #: A fork, a join, an optional branch — the diamond.
@@ -501,6 +502,63 @@ class JournalContract:
         clock.now = "2026-01-01T00:03:00+00:00"
         journal.signal(["s1"], "email.clicked")
         assert journal.settle(harness.candidates(["s1"]))["clicked"] == {NODE_DONE: 1}
+
+    # -- channels ----------------------------------------------------------------
+
+    def _channelled(self):
+        """ONBOARDING and FLAKY in one graph, where `slow` waits longer, retries
+        more and gets a longer lease than the defaults."""
+        nodes = (
+            Node("send"),
+            Node("clicked", parents=("send",), wait="email.clicked", timeout="7d"),
+            Node("call", parents=("send",), retry=Retry(limit=1, delay="10s"), lease="1h"),
+            Node("survey", parents=("send",), optional=True, grace="1d"),
+        )
+        return Graph(Document("channels"), nodes, channels={"slow": {
+            "clicked": {"timeout": "30d"},
+            "call": {"retry": Retry(limit=3, delay="1m"), "lease": "5h"},
+            "survey": {"grace": "10d"},
+        }})
+
+    def test_a_subject_carries_its_channel(self, harness, clock):
+        journal = harness.journal(self._channelled(), clock)
+        assert journal.enroll(["a", "b"], "slow") == 2
+        assert journal.channel("a") == "slow"
+        assert journal.channel("c") is None
+        journal.enroll(["b"], None)
+        assert journal.channel("b") is None
+        assert journal.settings("call", "slow").lease == "5h"
+        assert journal.settings("call", None).lease == "1h"
+
+    def test_a_channel_changes_retries_leases_timeouts_and_graces(self, harness, clock):
+        journal = harness.journal(self._channelled(), clock)
+        journal.enroll(["slow"], "slow")
+        clock.now = "2026-01-01T00:00:00+00:00"
+        self._run(harness, journal, "send", ["slow", "fast"])
+
+        # retries: one for the default, three for `slow`
+        for _ in range(2):
+            lease = self._claim(harness, journal, "call", ["slow", "fast"])
+            journal.fail("call", list(lease), token=lease.token)
+            clock.now = shift(clock.now, 3600)
+        assert journal.progress("fast")["call"] == NODE_FAILED
+        assert journal.progress("slow")["call"] == NODE_SCHEDULED
+
+        # leases: 1h by default, 5h for `slow`
+        lease = self._claim(harness, journal, "call", ["slow"])
+        assert lease == ["slow"]
+        clock.now = shift(clock.now, 2 * 3600)
+        assert journal.expire() == {}, "two hours is within the `slow` lease"
+        clock.now = shift(clock.now, 4 * 3600)
+        assert journal.expire() == {"call": 1}
+
+        # timeouts and graces, measured from `send` concluding
+        clock.now = "2026-01-08T00:00:00+00:00"
+        settled = journal.settle(harness.candidates(["slow", "fast"]))
+        assert settled["clicked"] == {NODE_FAILED: 1}
+        assert settled["survey"] == {NODE_SKIPPED: 1}
+        assert "clicked" not in journal.progress("slow")
+        assert "survey" not in journal.progress("slow")
 
     # -- skip ----------------------------------------------------------------
 

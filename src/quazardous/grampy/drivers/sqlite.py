@@ -21,7 +21,7 @@ two tables it expects, for an application that wants them as they are:
 
     table       subject, node, status, started_at, finished_at, lease —
                 `(subject, node)` as primary key; timestamps ISO-8601 text
-    revisions   subject (primary key), revision (integer)
+    revisions   subject (primary key), revision (integer), channel (text)
     history     the node table's columns, plus archived_at and reason
 
 Names are identifiers checked against `[A-Za-z_][A-Za-z0-9_]*`: they are
@@ -90,7 +90,7 @@ def schema(table: str = "grampy_nodes", revisions: str = "grampy_revisions",
         f"started_at TEXT NOT NULL, finished_at TEXT, lease TEXT, "
         f"PRIMARY KEY ({subject}, node))",
         f"CREATE TABLE IF NOT EXISTS {revisions} ("
-        f"{subject} NOT NULL PRIMARY KEY, revision INTEGER NOT NULL)",
+        f"{subject} NOT NULL PRIMARY KEY, revision INTEGER NOT NULL, channel TEXT)",
         f"CREATE TABLE IF NOT EXISTS {history} ("
         f"{subject} NOT NULL, node TEXT NOT NULL, status TEXT NOT NULL, "
         f"started_at TEXT NOT NULL, finished_at TEXT, lease TEXT, "
@@ -201,9 +201,36 @@ class SqliteDriver:
                                      now=now, reason="forget")
         return count
 
-    def release(self, name: str, *, older_than: str, now: str) -> int:
-        return self._take_away("node = ? AND status = ? AND started_at < ?",
-                               (name, NODE_RUNNING, older_than), now=now, reason="release")
+    def release(self, name: str, *, older_than: str, now: str,
+                only: tuple[str, ...] | None = None, exclude: tuple[str, ...] = ()) -> int:
+        where = "node = ? AND status = ? AND started_at < ?"
+        params: list[Any] = [name, NODE_RUNNING, older_than]
+        registry = f"SELECT {{s}} FROM {self.revisions} WHERE channel IN ({{marks}})"
+        if only is not None:
+            where += " AND {s} IN (" + registry.replace("{marks}", ", ".join("?" * len(only))) + ")"
+            params += list(only)
+        if exclude:
+            where += (" AND {s} NOT IN ("
+                      + registry.replace("{marks}", ", ".join("?" * len(exclude))) + ")")
+            params += list(exclude)
+        return self._take_away(where, tuple(params), now=now, reason="release")
+
+    def enroll(self, subjects: list[Any], channel: str | None) -> int:
+        for subject in subjects:
+            self.conn.execute(
+                f"INSERT INTO {self.revisions} ({self.subject}, revision, channel) "
+                f"VALUES (?, 0, ?) ON CONFLICT ({self.subject}) DO UPDATE SET channel = ?",
+                (subject, channel, channel))
+        return len(subjects)
+
+    def channels(self, subjects: list[Any]) -> dict[Any, str]:
+        out: dict[Any, str] = {}
+        for chunk in _chunks(subjects):
+            marks = ", ".join("?" * len(chunk))
+            out.update(self.conn.execute(
+                f"SELECT {self.subject}, channel FROM {self.revisions} "
+                f"WHERE {self.subject} IN ({marks}) AND channel IS NOT NULL", chunk).fetchall())
+        return out
 
     def _raise_revision(self, subject: Any) -> None:
         self.conn.execute(
@@ -320,6 +347,7 @@ class SqliteDriver:
         due: dict[Any, dict[str, str]] = {s: {} for s in batch}
         finished: dict[Any, dict[str, str]] = {s: {} for s in batch}
         revisions: dict[Any, int] = {}
+        channel_of: dict[Any, str] = {}
         for chunk in _chunks(list(rows)):
             marks = ", ".join("?" * len(chunk))
             node_marks = ", ".join("?" * len(nodes))
@@ -333,11 +361,14 @@ class SqliteDriver:
                     due[subject][n] = started
                 if ended is not None:
                     finished[subject][n] = ended
-            revisions.update(self.conn.execute(
-                f"SELECT {self.subject}, revision FROM {self.revisions} "
-                f"WHERE {self.subject} IN ({marks})", chunk).fetchall())
-        return [Entry(s, int(revisions.get(s, 0)), rows[s], due[s], finished[s])
-                for s in batch]
+            for subject, revision, channel in self.conn.execute(
+                    f"SELECT {self.subject}, revision, channel FROM {self.revisions} "
+                    f"WHERE {self.subject} IN ({marks})", chunk).fetchall():
+                revisions[subject] = revision
+                if channel is not None:
+                    channel_of[subject] = channel
+        return [Entry(s, int(revisions.get(s, 0)), rows[s], due[s], finished[s],
+                      channel_of.get(s)) for s in batch]
 
 
 def _check(name: str) -> None:
