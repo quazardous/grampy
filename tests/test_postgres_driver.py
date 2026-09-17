@@ -32,7 +32,8 @@ def node_table(metadata, name):
         sa.Column("node", sa.Text, primary_key=True),
         sa.Column("status", sa.Text, nullable=False),
         sa.Column("started_at", sa.Text, nullable=False),
-        sa.Column("finished_at", sa.Text))
+        sa.Column("finished_at", sa.Text),
+        sa.Column("lease", sa.Text))
 
 
 def revision_table(metadata, name):

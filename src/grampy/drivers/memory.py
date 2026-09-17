@@ -31,6 +31,7 @@ class Row:
     status: str
     started_at: str
     finished_at: str | None = None
+    lease: str | None = None
 
 
 class MemoryDriver:
@@ -56,7 +57,7 @@ class MemoryDriver:
                        for subject in subjects[start:start + page]]
 
     def insert_if_unchanged(self, name: str, entries: list[tuple[Any, int]], *,
-                            status: str, now: str) -> list[Any]:
+                            status: str, now: str, lease: str | None) -> list[Any]:
         taken: list[Any] = []
         with self._lock:
             for subject, revision in entries:
@@ -65,17 +66,19 @@ class MemoryDriver:
                 if self.revisions.get(subject, 0) != revision:
                     continue
                 self.rows[(subject, name)] = Row(
-                    status, now, now if status == NODE_SKIPPED else None)
+                    status, now, now if status == NODE_SKIPPED else None, lease)
                 taken.append(subject)
         return taken
 
     def conclude(self, name: str, subjects: list[Any], *, status: str,
-                 now: str) -> int:
+                 now: str, lease: str | None) -> int:
         count = 0
         with self._lock:
             for subject in subjects:
                 row = self.rows.get((subject, name))
                 if row is None or row.status != NODE_RUNNING:
+                    continue
+                if lease is not None and row.lease != lease:
                     continue
                 row.status, row.finished_at = status, now
                 count += 1

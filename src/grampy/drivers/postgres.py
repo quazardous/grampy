@@ -10,9 +10,10 @@ The application owns its schema and its migrations; this driver owns
 none. It needs two `sqlalchemy.Table`s sharing a subject column (named by
 `subject`):
 
-    table       node rows: `node`, `status`, `started_at`, `finished_at` —
-                all text, `(subject, node)` as primary key. Timestamps are
-                ISO-8601 text, compared lexically.
+    table       node rows: `node`, `status`, `started_at`, `finished_at`,
+                `lease` — all text, `(subject, node)` as primary key,
+                `finished_at` and `lease` nullable. Timestamps are ISO-8601
+                text, compared lexically.
     revisions   one row per subject: `revision`, an integer, the subject as
                 primary key. Rows are created on demand.
 
@@ -47,8 +48,11 @@ re-read at its latest version. So:
              read. A claim meeting a forget in flight waits for it, then
              finds the revision raised and inserts nothing.
 
-Subjects are written in sorted order, so that two transactions touching
-the same subjects take their locks in the same order.
+Subjects are written in sorted order, and the journal writes once per
+claim, so that two claiming transactions take their locks in the same
+order. A transaction mixing several claims and forgets on the same
+subjects can still meet a deadlock: PostgreSQL reports it as an error,
+and the caller retries the transaction.
 
 ────────────────────────────────────────────────────────────────────────
 THE PRIORITY SURVIVES THE NESTING, BECAUSE IT IS MADE A COLUMN
@@ -76,7 +80,7 @@ from ..dag import NODE_DONE, NODE_RUNNING, NODE_SATISFYING, NODE_SKIPPED
 from ..journal import Entry
 
 #: THE COLUMNS THE NODE TABLE MUST CARRY, besides the subject.
-REQUIRED_COLUMNS = ("node", "status", "started_at", "finished_at")
+REQUIRED_COLUMNS = ("node", "status", "started_at", "finished_at", "lease")
 #: THE COLUMNS THE REVISIONS TABLE MUST CARRY, besides the subject.
 REVISION_COLUMNS = ("revision",)
 
@@ -160,7 +164,7 @@ class PostgresDriver:
                 return
 
     def insert_if_unchanged(self, name: str, entries: list[tuple[Any, int]], *,
-                            status: str, now: str) -> list[Any]:
+                            status: str, now: str, lease: str | None) -> list[Any]:
         if not entries:
             return []
         t, r = self.table, self.revisions
@@ -178,9 +182,10 @@ class PostgresDriver:
                                 r.c.revision == read.c.revision))
             .with_for_update(read=True, of=r)
             .cte("unchanged"))
-        columns = [self._subject.key, "node", "status", "started_at"]
+        columns = [self._subject.key, "node", "status", "started_at", "lease"]
         values = [unchanged.c[self._rev_subject.key], sa.literal(name),
-                  sa.literal(status), sa.literal(now)]
+                  sa.literal(status), sa.literal(now),
+                  sa.cast(sa.literal(lease), t.c.lease.type)]
         if status == NODE_SKIPPED:
             columns.append("finished_at")
             values.append(sa.literal(now))
@@ -193,13 +198,13 @@ class PostgresDriver:
         return [row[0] for row in rows]
 
     def conclude(self, name: str, subjects: list[Any], *, status: str,
-                 now: str) -> int:
+                 now: str, lease: str | None) -> int:
         t = self.table
-        cur = self._execute(
-            sa.update(t)
-            .where(t.c.node == name, t.c.status == NODE_RUNNING,
-                   self._subject.in_(list(subjects)))
-            .values(status=status, finished_at=now))
+        update = sa.update(t).where(t.c.node == name, t.c.status == NODE_RUNNING,
+                                    self._subject.in_(list(subjects)))
+        if lease is not None:
+            update = update.where(t.c.lease == lease)
+        cur = self._execute(update.values(status=status, finished_at=now))
         return cur.rowcount
 
     def adopt(self, name: str, subjects: list[Any], *, now: str) -> int:

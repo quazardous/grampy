@@ -128,14 +128,14 @@ class JournalContract:
         assert self._claim(harness, journal, "start", ["s1"]) == []
 
     def test_a_child_waits_for_its_parent_to_conclude(self, harness, journal):
-        self._claim(harness, journal, "start", ["s1"])
+        lease = self._claim(harness, journal, "start", ["s1"])
         assert self._claim(harness, journal, "left", ["s1"]) == []
-        journal.conclude("start", ["s1"])
+        journal.conclude("start", lease, token=lease.token)
         assert self._claim(harness, journal, "left", ["s1"]) == ["s1"]
 
     def test_a_failed_parent_satisfies_nobody(self, harness, journal):
-        self._claim(harness, journal, "start", ["s1"])
-        assert journal.fail("start", ["s1"]) == 1
+        lease = self._claim(harness, journal, "start", ["s1"])
+        assert journal.fail("start", ["s1"], token=lease.token) == 1
         assert self._claim(harness, journal, "left", ["s1"]) == []
 
     def test_a_started_descendant_closes_the_node(self, harness, journal):
@@ -158,17 +158,49 @@ class JournalContract:
     # -- conclude ------------------------------------------------------------
 
     def test_only_running_rows_are_concluded(self, harness, journal):
-        self._claim(harness, journal, "start", ["s1"])
-        assert journal.conclude("start", ["s1", "s1", "ghost"]) == 1
-        assert journal.conclude("start", ["s1"]) == 0, "a duplicate report rewrites nothing"
+        lease = self._claim(harness, journal, "start", ["s1"])
+        assert journal.conclude("start", ["s1", "s1", "ghost"], token=lease.token) == 1
+        assert journal.conclude("start", ["s1"], token=lease.token) == 0, (
+            "a duplicate report rewrites nothing")
         assert journal.progress("s1") == {"start": NODE_DONE}
 
     def test_an_unknown_status_raises(self, harness, journal):
         with pytest.raises(ValueError):
-            journal.conclude("start", ["s1"], status=NODE_RUNNING)
+            journal.conclude("start", ["s1"], token=None, status=NODE_RUNNING)
 
     def test_concluding_nobody_is_zero(self, harness, journal):
-        assert journal.conclude("nope", []) == 0
+        assert journal.conclude("nope", [], token=None) == 0
+
+    # -- lease -----------------------------------------------------------------
+
+    def test_every_claim_issues_its_own_token(self, harness, journal):
+        first = self._claim(harness, journal, "start", ["s1"])
+        second = self._claim(harness, journal, "start", ["s2"])
+        empty = self._claim(harness, journal, "start", ["s1"])
+        assert len({first.token, second.token, empty.token}) == 3
+
+    def test_a_conclusion_needs_the_token_of_the_claim(self, harness, journal):
+        first = self._claim(harness, journal, "start", ["s1"])
+        second = self._claim(harness, journal, "start", ["s2"])
+        assert journal.conclude("start", ["s1", "s2"], token=first.token) == 1
+        assert journal.progress("s2") == {"start": NODE_RUNNING}
+        assert journal.fail("start", ["s2"], token="forged") == 0
+        assert journal.fail("start", ["s2"], token=second.token) == 1
+
+    def test_a_released_lease_cannot_conclude_the_next_one(self, harness, journal, clock):
+        clock.now = "2026-01-01T00:00:00+00:00"
+        slow = self._claim(harness, journal, "start", ["s1"])
+        clock.now = "2026-01-01T01:00:00+00:00"
+        assert journal.release("start", "2026-01-01T00:30:00+00:00") == 1
+        fresh = self._claim(harness, journal, "start", ["s1"])
+        assert journal.conclude("start", ["s1"], token=slow.token) == 0, (
+            "the slow worker came back after its lease went to another")
+        assert journal.progress("s1") == {"start": NODE_RUNNING}
+        assert journal.conclude("start", ["s1"], token=fresh.token) == 1
+
+    def test_no_token_is_the_operators_override(self, harness, journal):
+        self._claim(harness, journal, "start", ["s1"])
+        assert journal.fail("start", ["s1"], token=None) == 1
 
     # -- skip ----------------------------------------------------------------
 
@@ -209,8 +241,8 @@ class JournalContract:
 
     def test_release_drops_only_old_running_leases(self, harness, journal, clock):
         clock.now = "2026-01-01T00:00:00+00:00"
-        self._claim(harness, journal, "start", ["old", "done"])
-        journal.conclude("start", ["done"])
+        lease = self._claim(harness, journal, "start", ["old", "done"])
+        journal.conclude("start", ["done"], token=lease.token)
         clock.now = "2026-01-01T01:00:00+00:00"
         self._claim(harness, journal, "start", ["young"])
         assert journal.release("start", "2026-01-01T00:30:00+00:00") == 1
@@ -229,9 +261,9 @@ class JournalContract:
 
     def test_stages_measure_what_worked_in_order(self, harness, journal, clock):
         clock.now = "2026-01-01T00:00:00+00:00"
-        self._claim(harness, journal, "start", ["s1"])
+        lease = self._claim(harness, journal, "start", ["s1"])
         clock.now = "2026-01-01T00:00:10+00:00"
-        journal.conclude("start", ["s1"])
+        journal.conclude("start", ["s1"], token=lease.token)
         journal.skip("right", candidates=harness.candidates(["s1"]))
         self._claim(harness, journal, "left", ["s1"])
         stages = journal.stages(["s1", "ghost"], at="2026-01-01T00:00:15+00:00")
@@ -288,8 +320,8 @@ class JournalContract:
         store = harness.store(DIAMOND, clock)
         try:
             setup = store.session()
-            setup.journal.claim("start", 1, candidates=setup.candidates(["s1"]))
-            setup.journal.conclude("start", ["s1"])
+            lease = setup.journal.claim("start", 1, candidates=setup.candidates(["s1"]))
+            setup.journal.conclude("start", lease, token=lease.token)
             setup.commit()
 
             requeue = store.session()
@@ -344,7 +376,7 @@ class JournalContract:
                         session = store.session()
                         got = session.journal.claim(
                             name, 3, candidates=session.candidates(subjects))
-                        session.journal.conclude(name, got)
+                        session.journal.conclude(name, got, token=got.token)
                         session.commit()
 
             def janitor() -> None:
@@ -370,8 +402,8 @@ _SUBJECTS = ("s0", "s1", "s2", "s3")
 
 def _model_machine(harness: Any) -> Any:
     """A Hypothesis state machine: one random graph per run, one journal on
-    it, and the MODEL — `{subject: {node: (status, started_at)}}` — moved by
-    the rule written as plainly as possible."""
+    it, and the MODEL — `{subject: {node: (status, started_at, lease)}}` —
+    moved by the rule written as plainly as possible."""
     from hypothesis import strategies as st
     from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, rule
 
@@ -396,7 +428,9 @@ def _model_machine(harness: Any) -> Any:
             self.clock = Clock("2026-01-01T00:00:00+00:00")
             self.ticks = 0
             self.journal = harness.journal(dag, self.clock)
-            self.model: dict[str, dict[str, tuple[str, str]]] = {s: {} for s in _SUBJECTS}
+            self.model: dict[str, dict[str, tuple[str, str, Any]]] = {
+                s: {} for s in _SUBJECTS}
+            self.tokens: list[str] = []
 
         def _tick(self) -> None:
             self.ticks += 1
@@ -413,26 +447,30 @@ def _model_machine(harness: Any) -> Any:
         def claim(self, data: Any, candidates: list[str], limit: int) -> None:
             n = self._node(data)
             self._tick()
+            got = self.journal.claim(n.name, limit, candidates=harness.candidates(candidates))
+            assert got.token not in self.tokens, "a token is never issued twice"
+            self.tokens.append(got.token)
             expected: list[str] = []
             for s in candidates:
                 if len(expected) < limit and claimable(n.name, self.dag, self._statuses(s)):
-                    self.model[s][n.name] = (NODE_RUNNING, self.clock.now)
+                    self.model[s][n.name] = (NODE_RUNNING, self.clock.now, got.token)
                     expected.append(s)
-            got = self.journal.claim(n.name, limit, candidates=harness.candidates(candidates))
             assert sorted(got) == sorted(expected), f"claim {n.name} {candidates}"
 
         @rule(data=st.data(), candidates=subjects,
               status=st.sampled_from((NODE_DONE, NODE_SKIPPED, NODE_FAILED)))
         def conclude(self, data: Any, candidates: list[str], status: str) -> None:
             n = self._node(data)
+            token = data.draw(st.sampled_from([None, "forged", *self.tokens]))
             self._tick()
             expected = 0
             for s in dict.fromkeys(candidates):
                 row = self.model[s].get(n.name)
-                if row and row[0] == NODE_RUNNING:
-                    self.model[s][n.name] = (status, row[1])
+                if row and row[0] == NODE_RUNNING and token in (None, row[2]):
+                    self.model[s][n.name] = (status, row[1], row[2])
                     expected += 1
-            assert self.journal.conclude(n.name, candidates, status=status) == expected
+            got = self.journal.conclude(n.name, candidates, token=token, status=status)
+            assert got == expected, f"conclude {n.name} {candidates} token={token}"
 
         @rule(data=st.data(), candidates=subjects)
         def skip(self, data: Any, candidates: list[str]) -> None:
@@ -445,7 +483,7 @@ def _model_machine(harness: Any) -> Any:
                 statuses = self._statuses(s)
                 if n.name not in statuses and all(
                         statuses.get(p) in NODE_SATISFYING for p in n.parents):
-                    self.model[s][n.name] = (NODE_SKIPPED, self.clock.now)
+                    self.model[s][n.name] = (NODE_SKIPPED, self.clock.now, None)
                     expected += 1
             got = self.journal.skip(n.name, candidates=harness.candidates(candidates))
             assert got == expected, f"skip {n.name} {candidates}"
@@ -457,7 +495,7 @@ def _model_machine(harness: Any) -> Any:
             expected = 0
             for s in dict.fromkeys(candidates):
                 if n.name not in self.model[s]:
-                    self.model[s][n.name] = (NODE_DONE, self.clock.now)
+                    self.model[s][n.name] = (NODE_DONE, self.clock.now, None)
                     expected += 1
             assert self.journal.adopt(n.name, candidates) == expected
 

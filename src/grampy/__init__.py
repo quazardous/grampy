@@ -27,7 +27,7 @@ from .dag import (
     descendants,
     node,
 )
-from .journal import JournalDriver, NodeJournal, utc_now
+from .journal import JournalDriver, Lease, NodeJournal, utc_now
 from .states import (
     allowed_transitions,
     replay_targets,
@@ -40,7 +40,7 @@ __version__ = "0.1.0"
 
 __all__ = [
     "NODE_CONCLUDED", "NODE_DONE", "NODE_FAILED", "NODE_RUNNING",
-    "NODE_SATISFYING", "NODE_SKIPPED", "DagError", "JournalDriver", "Node",
+    "NODE_SATISFYING", "NODE_SKIPPED", "DagError", "JournalDriver", "Lease", "Node",
     "NodeJournal", "allowed_transitions", "ancestors", "check_dag", "claimable",
     "claimable_nodes", "descendants", "node", "replay_targets", "replayed_after",
     "source_state", "to_undo", "utc_now",

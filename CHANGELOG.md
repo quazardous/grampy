@@ -35,7 +35,9 @@ First release, planned as 0.1.0.
 - Claim a node for a batch of subjects on behalf of remote workers, then
   conclude, fail or skip it; a subject is never handed out twice for the
   same node, nor started on a parent another worker is forgetting at the
-  same moment.
+  same moment. Each claim returns a token, and only the holder of that
+  token can conclude or fail what it took: a slow worker whose lease was
+  released and handed to another cannot overwrite the newcomer's work.
 - Go back in a workflow: forget a node to run it again, list what must be
   undone when a subject returns to an earlier state, and find where a
   replay can start.

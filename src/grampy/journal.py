@@ -1,7 +1,7 @@
 """THE NODE JOURNAL — who started what, and where it stands.
 
-    claim     take a node for eligible subjects
-    conclude  finish it, skip it, or declare it failed
+    claim     take a node for eligible subjects — a `Lease`, with its token
+    conclude  finish it, or declare it failed — with the lease's token
     adopt     record work already done that the journal does not know
     forget    erase it — "never started", the initial state
     release   give back the leases of a dead worker
@@ -45,7 +45,18 @@ concurrency tests (`grampy.testing`) hold every driver to the same
 outcome, whatever it blocks on.
 
 ────────────────────────────────────────────────────────────────────────
-ELIGIBILITY COMES FROM OUTSIDE, AND THE JOURNAL DOES NOT READ IT
+A CONCLUSION PROVES IT HOLDS THE LEASE
+────────────────────────────────────────────────────────────────────────
+
+A worker can be slow rather than dead. Its lease released, the node
+claimed again by another worker, the first one comes back and reports:
+without a proof, it would conclude the SECOND worker's row. Every claim
+therefore issues a token, unique to that claim, stored on the rows it
+took; `conclude` and `fail` touch only the rows holding the token they
+bring (a fencing token). `token=None` is the operator's override, written
+on purpose, never a default.
+
+, AND THE JOURNAL DOES NOT READ IT
 ────────────────────────────────────────────────────────────────────────
 
 A claim must stay ATOMIC across two things: the node rows and the
@@ -68,6 +79,7 @@ decides where the transaction ends, because it knows what it put in it.
 """
 from __future__ import annotations
 
+import secrets
 from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime, timezone
 from typing import Any, NamedTuple, Protocol
@@ -99,6 +111,15 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+class Lease(list):
+    """The subjects a claim took — a plain list — and `token`, the proof a
+    worker brings back to `conclude` or `fail` them."""
+
+    def __init__(self, subjects: Iterable[Any], token: str) -> None:
+        super().__init__(subjects)
+        self.token = token
+
+
 class Entry(NamedTuple):
     """A candidate as a driver read it: its revision, and its rows on the
     nodes the decision needs — `{node: status}`, absent nodes left out."""
@@ -127,15 +148,16 @@ class JournalDriver(Protocol):
         `done`/`skipped`. It must not leave out anything else."""
 
     def insert_if_unchanged(self, name: str, entries: list[tuple[Any, int]], *,
-                            status: str, now: str) -> list[Any]:
+                            status: str, now: str, lease: str | None) -> list[Any]:
         """ATOMICALLY, for each `(subject, revision)`: insert a `status` row
-        for `name` if the subject has no row for `name` AND its revision is
-        still `revision`. A `skipped` row is finished at `now`. Return the
-        subjects inserted."""
+        for `name`, holding `lease`, if the subject has no row for `name` AND
+        its revision is still `revision`. A `skipped` row is finished at
+        `now`. Return the subjects inserted."""
 
     def conclude(self, name: str, subjects: list[Any], *, status: str,
-                 now: str) -> int:
-        """Set `status` and `finished_at` on RUNNING rows only."""
+                 now: str, lease: str | None) -> int:
+        """Set `status` and `finished_at` on RUNNING rows only — and, unless
+        `lease` is None, only on rows holding that lease."""
 
     def adopt(self, name: str, subjects: list[Any], *, now: str) -> int:
         """Insert `done` rows, never overwriting an existing row."""
@@ -175,8 +197,9 @@ class NodeJournal:
     # -- take --------------------------------------------------------------
 
     def claim(self, name: str, limit: int, *, candidates: Any,
-              require_parents: bool = True) -> list[Any]:
-        """Take up to `limit` candidates for this node. Return their subjects.
+              require_parents: bool = True) -> Lease:
+        """Take up to `limit` candidates for this node. Return their subjects,
+        as a `Lease` whose `token` the worker brings back to conclude them.
 
         THE RULE IS `dag.claimable` — parents concluded, nobody holding, no
         descendant started — decided here on the rows the driver read, and
@@ -190,24 +213,38 @@ class NodeJournal:
         """
         n = node(name, self.dag)
         limit = int(limit)
+        token = secrets.token_hex(16)
         if limit <= 0:
-            return []
+            return Lease([], token)
         after = tuple(sorted(descendants(name, self.dag)))
         parents = n.parents if require_parents else ()
         now = self._clock()
-        taken: list[Any] = []
+        chosen: list[tuple[Any, int]] = []
+        seen: set[Any] = set()
         for page in self.driver.scan(candidates, name=name,
                                      nodes=(name, *n.parents, *after),
                                      parents=parents, page=max(limit, PAGE)):
-            chosen = [(e.subject, e.revision) for e in page
-                      if self._takable(n, after, e.rows, require_parents)]
-            chosen = chosen[:limit - len(taken)]
-            if chosen:
-                taken += self.driver.insert_if_unchanged(
-                    name, chosen, status=NODE_RUNNING, now=now)
-            if len(taken) >= limit:
+            for e in page:
+                # A SUBJECT LISTED TWICE COUNTS ONCE: it would otherwise take
+                # a place in the limit and be refused by the write.
+                if e.subject in seen:
+                    continue
+                seen.add(e.subject)
+                if self._takable(n, after, e.rows, require_parents):
+                    chosen.append((e.subject, e.revision))
+                    if len(chosen) >= limit:
+                        break
+            if len(chosen) >= limit:
                 break
-        return taken
+        # ONE WRITE PER CLAIM. A storage that locks while writing takes its
+        # locks in one go, in one order, and two claimers cannot hold each
+        # other. The price: a subject refused by the write (another claimer
+        # took it, a revision moved) is not replaced — under contention a
+        # claim may take fewer than `limit`, never a wrong one.
+        taken = (self.driver.insert_if_unchanged(
+                     name, chosen, status=NODE_RUNNING, now=now, lease=token)
+                 if chosen else [])
+        return Lease(taken, token)
 
     def _takable(self, n: Node, after: tuple[str, ...], rows: dict[str, str],
                  require_parents: bool) -> bool:
@@ -226,12 +263,14 @@ class NodeJournal:
 
     # -- conclude ----------------------------------------------------------
 
-    def conclude(self, name: str, subjects: list[Any], *,
+    def conclude(self, name: str, subjects: list[Any], *, token: str | None,
                  status: str = NODE_DONE) -> int:
         """Finish this node on these subjects. Return the count touched.
 
-        ONLY RUNNING ROWS ARE TOUCHED: a duplicate report — a worker retrying
-        after a network timeout — recounts nothing and rewrites nothing.
+        ONLY RUNNING ROWS HOLDING `token` ARE TOUCHED: a duplicate report — a
+        worker retrying after a network timeout — recounts nothing, and a
+        worker whose lease went to someone else rewrites nothing. `token` is
+        required; `None` concludes whoever holds the rows (an operator's act).
         """
         if not subjects:
             return 0
@@ -241,11 +280,11 @@ class NodeJournal:
                 f"{NODE_DONE}, {NODE_SKIPPED} or {NODE_FAILED}")
         node(name, self.dag)
         return self.driver.conclude(name, _unique(subjects), status=status,
-                                    now=self._clock())
+                                    now=self._clock(), lease=token)
 
-    def fail(self, name: str, subjects: list[Any]) -> int:
+    def fail(self, name: str, subjects: list[Any], *, token: str | None) -> int:
         """This node did not produce. `failed` DOES NOT satisfy its children."""
-        return self.conclude(name, subjects, status=NODE_FAILED)
+        return self.conclude(name, subjects, token=token, status=NODE_FAILED)
 
     def skip(self, name: str, *, candidates: Any) -> int:
         """Mark this OPTIONAL node as given up, on the candidates.
@@ -260,17 +299,17 @@ class NodeJournal:
                 f"node {name!r} is not optional — skipping it would move "
                 f"the graph forward without its work")
         now = self._clock()
-        count = 0
+        chosen: dict[tuple[Any, int], None] = {}
         for page in self.driver.scan(candidates, name=name,
                                      nodes=(name, *n.parents),
                                      parents=n.parents, page=PAGE):
-            chosen = [(e.subject, e.revision) for e in page
-                      if name not in e.rows
-                      and all(e.rows.get(p) in NODE_SATISFYING for p in n.parents)]
-            if chosen:
-                count += len(self.driver.insert_if_unchanged(
-                    name, chosen, status=NODE_SKIPPED, now=now))
-        return count
+            chosen.update(dict.fromkeys(
+                (e.subject, e.revision) for e in page
+                if name not in e.rows
+                and all(e.rows.get(p) in NODE_SATISFYING for p in n.parents)))
+        # One write, as for a claim.
+        return len(self.driver.insert_if_unchanged(
+            name, list(chosen), status=NODE_SKIPPED, now=now, lease=None)) if chosen else 0
 
     def adopt(self, name: str, subjects: list[Any]) -> int:
         """Record work ALREADY DONE that the journal does not know.

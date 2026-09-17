@@ -23,9 +23,9 @@ DAG = (
 check_dag(DAG)
 
 journal = NodeJournal(MemoryDriver(), DAG)
-journal.claim("fetch", 10, candidates=["s1", "s2"])   # ['s1', 's2']
-journal.conclude("fetch", ["s1"])
-journal.claim("crop", 10, candidates=["s1", "s2"])    # ['s1'] — s2 still fetching
+lease = journal.claim("fetch", 10, candidates=["s1", "s2"])   # ['s1', 's2']
+journal.conclude("fetch", ["s1"], token=lease.token)
+journal.claim("crop", 10, candidates=["s1", "s2"])            # ['s1'] — s2 still fetching
 ```
 
 ## What is in the box
@@ -48,6 +48,11 @@ journal.claim("crop", 10, candidates=["s1", "s2"])    # ['s1'] — s2 still fetc
 - Only an **optional** node can be `skip`ped, and only when it is itself
   claimable (its parents concluded).
 - `adopt` records work done outside the journal and never overwrites.
+- **A conclusion proves it holds the lease.** Every claim returns a `Lease`
+  — the subjects taken, and a `token` unique to that claim. `conclude` and
+  `fail` only touch rows holding the token they bring, so a slow worker
+  whose lease was released and taken by another rewrites nothing.
+  `token=None` is an explicit operator override.
 - **The journal decides, the driver stores.** A claim reads the candidates'
   rows, applies the rule in Python, and writes only if nothing was
   forgotten in between: every subject carries a revision that `forget`
@@ -74,7 +79,8 @@ nodes = sa.Table("job_nodes", metadata,
     sa.Column("node", sa.Text, primary_key=True),
     sa.Column("status", sa.Text, nullable=False),
     sa.Column("started_at", sa.Text, nullable=False),
-    sa.Column("finished_at", sa.Text))
+    sa.Column("finished_at", sa.Text),
+    sa.Column("lease", sa.Text))
 revisions = sa.Table("job_revisions", metadata,
     sa.Column("job_id", sa.Text, primary_key=True),
     sa.Column("revision", sa.Integer, nullable=False))
