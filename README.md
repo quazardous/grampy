@@ -23,6 +23,7 @@ their parents.
 ```python
 from quazardous.grampy import Node, NodeJournal, check_dag
 from quazardous.grampy.drivers.memory import MemoryDriver
+from quazardous.grampy.items import Adapter, Items
 
 DAG = (
     Node("fetch", working="fetching", state="fetched"),
@@ -32,11 +33,21 @@ DAG = (
 )
 check_dag(DAG)
 
-journal = NodeJournal(MemoryDriver(), DAG)
-lease = journal.claim("fetch", 10, candidates=["s1", "s2"])   # ['s1', 's2']
-journal.conclude("fetch", ["s1"], token=lease.token)
-journal.claim("crop", 10, candidates=["s1", "s2"])            # ['s1'] — s2 still fetching
+class Docs(Adapter):                       # how grampy reads YOUR object
+    def id_of(self, doc):  return doc.id
+    def load(self, ids):   return [LIBRARY[i] for i in ids]
+    def applies(self, doc, node):          # one graph, subjects that differ
+        return node != "crop" or doc.scanned
+
+items = Items(NodeJournal(MemoryDriver(), DAG), Docs())
+lease = items.claim("fetch", 10, candidates=["s1", "s2"])   # your objects
+items.conclude("fetch", lease)
 ```
+
+Handing grampy your objects is the canonical way to use it — see
+[items](https://github.com/quazardous/grampy/blob/main/docs/items.md). The
+core underneath works on ids alone and stays available: `journal.claim("fetch",
+10, candidates=[…])` returns subjects, and never reads your data.
 
 The package lives in the `quazardous` namespace; the distribution is `grampy-q`
 (`grampy` was already taken on PyPI; the *q* is for queue).
@@ -57,6 +68,7 @@ Each line links to [the rules](https://github.com/quazardous/grampy/blob/main/do
 | [channels](https://github.com/quazardous/grampy/blob/main/docs/rules.md#channels-one-workflow-several-sources) | one workflow, several sources, each with its own retries, leases and lanes |
 | [rate and concurrency](https://github.com/quazardous/grampy/blob/main/docs/rules.md#rate-limits-and-concurrency) | several bands at once (GCRA, with bursts), a cap per node, per channel |
 | [versions](https://github.com/quazardous/grampy/blob/main/docs/rules.md#versions-and-migration) | subjects pinned to the graph they started on, migrated all or nothing |
+| [items](https://github.com/quazardous/grampy/blob/main/docs/items.md) | speak your objects: handlers name a branch, or give up a step one kind skips |
 | [drawings](https://github.com/quazardous/grampy/blob/main/docs/drawings.md) | Mermaid flowchart, Mermaid state diagram, Graphviz, with live counts |
 
 ## Storage
@@ -77,6 +89,7 @@ Any other storage: implement the driver protocol and pass the shared contract
 ## Documentation
 
 - [The rules](https://github.com/quazardous/grampy/blob/main/docs/rules.md) — every mechanism, spelled out.
+- [Items](https://github.com/quazardous/grampy/blob/main/docs/items.md) — objects instead of ids, the canonical way.
 - [Drivers and candidates](https://github.com/quazardous/grampy/blob/main/docs/drivers.md) — tables, queries, your own data.
 - [Drawings](https://github.com/quazardous/grampy/blob/main/docs/drawings.md) — diagrams from a graph.
 - [The same notions in other tools](https://github.com/quazardous/grampy/blob/main/docs/concepts.md) — Graphile Worker,

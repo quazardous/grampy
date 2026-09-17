@@ -25,6 +25,11 @@ imported as `from quazardous import grampy`.
 
 ### Added
 
+- Hand grampy your own objects instead of ids: an adapter says how to read
+  one, and handlers answer the questions that need the data — which branch a
+  choice takes, whether an optional step is for this item at all. A claim
+  then loads the batch in one query and gives the objects back. It is the
+  canonical way to use grampy; the id-based API underneath is unchanged.
 - Declare a workflow as a graph of nodes, with forks that run in parallel,
   joins that wait for all their parents, and optional nodes that can be
   skipped without blocking their children.

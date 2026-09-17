@@ -95,35 +95,42 @@
 
 <section class="code" id="code" aria-labelledby="code-title">
   <h2 id="code-title" class="section-title">The code behind the line</h2>
-  <p class="code-lead">This is the whole workflow — eight nodes as data, read from <a href="https://github.com/quazardous/grampy/blob/main/docs/demo/scenario.py">scenario.py</a>, the file running above. Everything else is a handful of calls.</p>
+  <p class="code-lead">The whole workflow, read from <a href="https://github.com/quazardous/grampy/blob/main/docs/demo/scenario.py">scenario.py</a> — the file running above. Eight nodes as data, one small class that teaches grampy to read a brick, and a handful of calls. Bricks come from two crates and take <em>the same</em> line: the factory ones are polished, the salvage ones are not, and that difference is stated once.</p>
   <div class="code-panels">
     <figure class="code-panel">
       <figcaption>1 · Declare the graph</figcaption>
       <pre><code id="graph-source" class="python">Loading scenario.py…</code></pre>
     </figure>
     <figure class="code-panel">
-      <figcaption>2 · Run it on your storage</figcaption>
+      <figcaption>2 · Teach it to read your objects</figcaption>
+      <pre><code id="adapter-source" class="python">Loading scenario.py…</code></pre>
+    </figure>
+    <figure class="code-panel">
+      <figcaption>3 · Run it on your storage</figcaption>
       <pre><code class="python" data-static>from quazardous.grampy import NodeJournal
 from quazardous.grampy.drivers.sqlite import Query, SqliteDriver, schema
+from quazardous.grampy.items import Items
 
 for statement in schema():
     conn.execute(statement)
 journal = NodeJournal(SqliteDriver(conn), GRAPH)
+items = Items(journal, Bricks())      # the adapter from panel 2
 
-# A brick arrives — or comes back as a new version.
-journal.arrive("inbox", ["brick-12"], ref="v2")
+# Bricks arrive. Their crate and their version are read off them.
+items.admit(new_bricks)
+items.arrive("inbox", new_bricks)
 
 # WHICH bricks may be worked is YOUR sentence, in your storage's own terms:
 # first column the subject, ORDER BY the priority. grampy reads it without
 # understanding it, in the same transaction as the claim.
 waiting = Query("SELECT id FROM bricks WHERE state <> 'shipped' ORDER BY dropped_at")
 
-# A worker: take up to 10 bricks the sort station can work on…
-lease = journal.claim("sort", 10, candidates=waiting)
+# A worker takes bricks — the objects, loaded in one query. A salvage brick
+# at the polisher is given up here, because the adapter said so.
+lease = items.claim("polish", 10, candidates=waiting)
 for brick in lease:
-    ...  # your work
-# …and report, with the lease's token.
-journal.conclude("sort", lease, token=lease.token)
+    ...  # your work, on your own object
+items.conclude("polish", lease)
 
 # A janitor, every few seconds: lanes, waits, timeouts, dead workers.
 journal.settle(candidates=waiting)

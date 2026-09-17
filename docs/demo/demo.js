@@ -418,6 +418,8 @@ async function main() {
   Lab.showSource($("graph-source"), "scenario.py", "graph",
                  "from quazardous.grampy import Document, Graph, Lane, Node\n" +
                  "from quazardous.grampy.timing import Retry\n\n");
+  Lab.showSource($("adapter-source"), "scenario.py", "adapter",
+                 "from quazardous.grampy.items import Adapter\n\n");
   try {
     const pyodide = await loadPyodide();
     status.textContent = "Loading grampy…";

@@ -32,6 +32,7 @@ from quazardous.grampy import (
 )
 from quazardous.grampy.diagram import overlay
 from quazardous.grampy.drivers.memory import MemoryDriver
+from quazardous.grampy.items import Adapter, Items
 from quazardous.grampy.timing import Retry
 
 # --8<-- [start:graph]
@@ -45,13 +46,51 @@ GRAPH = Graph(Document("brick-sorter", version="1", namespace="demo"), (
          retry=Retry(limit=3, delay="8s", backoff="exponential")),
     Node("reject", parents=("quarantine", "defuse"), need=1,
          on={"quarantine": ("failed",), "defuse": ("failed",)}),
-    # One crate needs an extra step: `polish` belongs to everyone and is
-    # OPTIONAL, and the crate that does not want it gives it a grace, so
-    # `settle` skips it. A channel changes settings, never the structure.
+    # TWO KINDS OF BRICK, ONE WORKFLOW. `polish` belongs to everyone and is
+    # OPTIONAL: the adapter below says it is not for salvage bricks. The
+    # channel's grace is the safety net, for a line running no polisher at
+    # all. A channel changes settings, never the structure.
     Node("polish", parents=("sort",), optional=True),
     Node("pack", parents=("polish", "defuse")),
-), channels={"salvage": {"polish": {"grace": "2s"}}})
+), channels={"salvage": {"polish": {"grace": "20s"}}})
 # --8<-- [end:graph]
+
+
+# --8<-- [start:adapter]
+class Bricks(Adapter):
+    """WHAT THE WORKFLOW NEEDS TO KNOW ABOUT A BRICK, and nothing more.
+
+    grampy never looks inside a brick. It asks these questions, and the
+    factory — which alone knows what a brick is — answers them.
+    """
+
+    def __init__(self, bricks):
+        self.bricks = bricks
+
+    def id_of(self, brick):
+        return brick.id
+
+    def load(self, ids):
+        """Your storage, your query — here, a dict."""
+        return [self.bricks[i] for i in ids if i in self.bricks]
+
+    def channel_of(self, brick):
+        """Which crate it came from: the settings under that name apply."""
+        return brick.crate
+
+    def ref_of(self, brick):
+        """Which version of the brick arrives in the lane."""
+        return f"v{brick.version}"
+
+    def branch(self, brick, node):
+        """A TNT brick goes to quarantine; the others go straight to sorting."""
+        return "quarantine" if brick.tnt else "sort"
+
+    def applies(self, brick, node):
+        """SALVAGE BRICKS ARE NOT POLISHED — the one difference between the
+        two kinds, said once, here, instead of in every worker."""
+        return node != "polish" or brick.crate == "factory"
+# --8<-- [end:adapter]
 
 #: Where each station stands on the floor, in layers left to right.
 LAYOUT = {
@@ -114,6 +153,8 @@ class World:
         self.elapsed = 0.0
         self.journal = NodeJournal(MemoryDriver(), GRAPH, clock=self._now, rng=self.rng)
         self.bricks: dict[int, Brick] = {}
+        #: THE CANONICAL WAY IN: the factory talks in bricks, not in ids.
+        self.items = Items(self.journal, Bricks(self.bricks))
         self.finished: dict[int, tuple[str, float]] = {}
         self.jobs: list[Job] = []
         self.calls: list[str] = []
@@ -140,23 +181,22 @@ class World:
     # -- what visitors do -------------------------------------------------------
 
     def add_bricks(self, count: int, tnt: bool | None = None) -> None:
-        added, salvage = [], []
+        added = []
         for _ in range(count):
             is_tnt = self.rng.random() < self.settings.tnt_share if tnt is None else tnt
             colour = self.rng.choice(COLOURS)
             crate = "salvage" if self.rng.random() < self.settings.salvage_share else "factory"
-            self.bricks[self._next_id] = Brick(self._next_id, colour, is_tnt, self.elapsed,
-                                               crate=crate)
-            added.append(self._next_id)
-            if crate == "salvage":
-                salvage.append(self._next_id)
+            brick = Brick(self._next_id, colour, is_tnt, self.elapsed, crate=crate)
+            self.bricks[brick.id] = brick
+            added.append(brick)
             self._next_id += 1
-        if salvage:
-            self.journal.enroll(salvage, "salvage")
-            self._log(f'journal.enroll({salvage}, "salvage")')
         if added:
-            self.journal.arrive("inbox", added, ref="v1")
-            self._log(f'journal.arrive("inbox", {added}, ref="v1")')
+            # The crate and the version are read off each brick, not passed.
+            self.items.admit(added)
+            self.items.arrive("inbox", added)
+            self._log(f"items.admit({[b.id for b in added]})  # crates: "
+                      f"{sorted({b.crate for b in added})}")
+            self._log('items.arrive("inbox", bricks)')
 
     def send_back(self, brick_id: int) -> bool:
         """A sorted brick comes back as a new version: it waits in the inbox
@@ -226,17 +266,16 @@ class World:
         self.jobs = [j for j in self.jobs if j.done_at > self.elapsed]
         for job in due:
             brick = self.bricks[job.subject]
-            if job.node == "scan":
-                branch = "quarantine" if brick.tnt else "sort"
-                self.journal.conclude("scan", [job.subject], token=job.token, branch=branch)
-                self._log(f'journal.conclude("scan", [{job.subject}], token=…, branch="{branch}")')
-            elif job.node == "defuse" and self.rng.random() < self.settings.defuse_failure:
-                self.journal.fail("defuse", [job.subject], token=job.token)
-                self._log(f'journal.fail("defuse", [{job.subject}], token=…)  # retries: '
+            if job.node == "defuse" and self.rng.random() < self.settings.defuse_failure:
+                self.items.fail("defuse", [brick], token=job.token)
+                self._log(f'items.fail("defuse", [{job.subject}])  # retries: '
                           f'{self.journal.retries(job.subject, "defuse")}')
             else:
-                self.journal.conclude(job.node, [job.subject], token=job.token)
-                self._log(f'journal.conclude("{job.node}", [{job.subject}], token=…)')
+                # No `branch=` by hand: for a choice, the adapter is asked.
+                self.items.conclude(job.node, [brick], token=job.token)
+                self._log(f'items.conclude("{job.node}", [{job.subject}])'
+                          + (f'  # branch: {self.items.adapter.branch(brick, job.node)}'
+                             if job.node == "scan" else ""))
 
     def _squad(self) -> None:
         if not self.settings.squad_auto:
@@ -258,21 +297,19 @@ class World:
         candidates = self._active()
         for node, workers in self.settings.workers.items():
             free = workers - busy.get(node, 0)
-            # The polisher only takes factory bricks: WHICH subjects a worker
-            # offers is the application's own sentence. The salvage channel's
-            # grace is the safety net — the janitor skips the node for them,
-            # so nothing waits forever.
-            eligible = ([b for b in candidates if self.bricks[b].crate == "factory"]
-                        if node == "polish" else candidates)
-            if free <= 0 or not eligible:
+            if free <= 0 or not candidates:
                 continue
-            lease = self.journal.claim(node, free, candidates=eligible)
+            # ONE CALL FOR BOTH KINDS OF BRICK. The claim hands back bricks,
+            # not ids, and the ones this station is not for — a salvage brick
+            # at the polisher — are given up inside it, on the adapter's word.
+            lease = self.items.claim(node, free, candidates=candidates)
             if not lease:
                 continue
-            self._log(f'journal.claim("{node}", {free}, candidates=…)  # {list(lease)}')
-            for subject in lease:
+            self._log(f'items.claim("{node}", {free}, candidates=…)'
+                      f'  # {[b.id for b in lease]}')
+            for brick in lease:
                 jitter = self.rng.uniform(0.7, 1.4)
-                self.jobs.append(Job(node, subject, lease.token,
+                self.jobs.append(Job(node, brick.id, lease.token,
                                      self.elapsed + self.settings.durations[node] * jitter))
 
     def _retire(self) -> None:

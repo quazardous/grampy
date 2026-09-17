@@ -1,0 +1,217 @@
+"""SPEAK OBJECTS, NOT IDS — the canonical way to use grampy.
+
+    class Bricks(Adapter):
+        def id_of(self, brick):      return brick.id
+        def load(self, ids):         return [BRICKS[i] for i in ids]
+        def channel_of(self, brick): return brick.crate
+        def applies(self, brick, node):
+            return node != "polish" or brick.crate == "factory"
+
+    items = Items(journal, Bricks())
+    items.admit(bricks)                          # channel read from the item
+    lease = items.claim("sort", 10, candidates=query)
+    for brick in lease:                          # OBJECTS, loaded in one call
+        ...
+    items.conclude("sort", lease)
+
+────────────────────────────────────────────────────────────────────────
+WHERE THE LINE IS
+────────────────────────────────────────────────────────────────────────
+
+The core takes DECISIONS, never CRITERIA. It is given an id, a label, the
+name of a branch — never a rule to evaluate, never a payload to look
+inside. That is what keeps a workflow from learning what "source" means.
+
+This layer is the translator: it holds the handlers that read the
+application's own objects and turns their answers into the calls the
+journal already understands. It runs in the application's process, where
+the data is. The core never calls a handler, `dag` stays pure, and the
+drivers are untouched.
+
+It translates, it does not become a framework: no retry loop, no logging,
+no worker lifecycle. Everything here is a call the id-based API could have
+made by hand — the layer only spares the application from making it.
+
+────────────────────────────────────────────────────────────────────────
+ONE WORKFLOW, SEVERAL KINDS OF SUBJECT
+────────────────────────────────────────────────────────────────────────
+
+`applies(item, node)` is how one graph serves subjects that differ
+slightly. An OPTIONAL node the item refuses is claimed and concluded
+`skipped` in the same call, so nothing downstream waits for it and the
+journal records that the decision was taken, rather than the step
+silently never happening.
+
+That spends a claim on a step not done. A hot path may prefer to leave
+those subjects out of `candidates` in the first place — which subjects a
+worker offers has always been the application's sentence — and keep a
+channel `grace` as the safety net for the ones nobody takes.
+"""
+from __future__ import annotations
+
+from collections.abc import Iterable, Sequence
+from typing import Any
+
+from .dag import NODE_DONE, NODE_FAILED, NODE_SKIPPED, node
+from .journal import Lease, NodeJournal
+
+
+class Adapter:
+    """HOW GRAMPY HOOKS ONTO ONE OF YOUR OBJECTS.
+
+    Two methods are yours to write; the rest have answers that suit an
+    application with nothing special to say.
+    """
+
+    # -- required ----------------------------------------------------------
+
+    def id_of(self, item: Any) -> Any:
+        """The subject id of this item — unique, stable, int or str."""
+        raise NotImplementedError
+
+    def load(self, ids: Sequence[Any]) -> Iterable[Any]:
+        """The items for these ids, IN ONE CALL — your query, your storage.
+
+        Order does not matter, and an id with nothing behind it may be left
+        out: it comes back as `ItemLease.missing`.
+        """
+        raise NotImplementedError
+
+    # -- optional ----------------------------------------------------------
+
+    def channel_of(self, item: Any) -> str | None:
+        """Which source this item came from, as a label. The graph's settings
+        for that channel then apply to it. `None` means no channel."""
+        return None
+
+    def ref_of(self, item: Any) -> str | None:
+        """What version of the item arrives in a lane — opaque to grampy,
+        compared to nothing, handed back as it was given."""
+        return None
+
+    def branch(self, item: Any, node: str) -> str | None:
+        """Which branch this item takes out of a `choice` node."""
+        return None
+
+    def applies(self, item: Any, node: str) -> bool:
+        """Whether this OPTIONAL node is for this item at all. `False` gives
+        it up rather than doing it — see the module docstring."""
+        return True
+
+
+class ItemLease(list):
+    """The items a claim took — a plain list of YOUR objects — with the
+    `token` to conclude them, and `missing`, the ids nothing loaded for."""
+
+    def __init__(self, items: Iterable[Any], token: str,
+                 missing: Sequence[Any] = ()) -> None:
+        super().__init__(items)
+        self.token = token
+        self.missing = tuple(missing)
+
+
+class Items:
+    """A journal that speaks in your objects. Every call ends up in the
+    id-based API, which stays exactly as it is."""
+
+    def __init__(self, journal: NodeJournal, adapter: Adapter) -> None:
+        self.journal = journal
+        self.adapter = adapter
+
+    # -- the door ----------------------------------------------------------
+
+    def admit(self, items: Sequence[Any]) -> int:
+        """Take these items in: record each one's channel, once. Items
+        sharing a channel are enrolled together. Return the count."""
+        by_channel: dict[str | None, list[Any]] = {}
+        for item in items:
+            by_channel.setdefault(self.adapter.channel_of(item), []).append(
+                self.adapter.id_of(item))
+        written = 0
+        for channel, ids in by_channel.items():
+            written += self.journal.enroll(ids, channel)
+        return written
+
+    def arrive(self, name: str, items: Sequence[Any], *,
+               urgent: bool = False) -> dict[Any, str]:
+        """These items arrive in a lane, each bringing its own `ref_of`."""
+        by_ref: dict[str | None, list[Any]] = {}
+        for item in items:
+            by_ref.setdefault(self.adapter.ref_of(item), []).append(
+                self.adapter.id_of(item))
+        outcome: dict[Any, str] = {}
+        for ref, ids in by_ref.items():
+            outcome.update(self.journal.arrive(name, ids, ref=ref, urgent=urgent))
+        return outcome
+
+    # -- take and finish ---------------------------------------------------
+
+    def claim(self, name: str, limit: int, *, candidates: Any) -> ItemLease:
+        """Take up to `limit` candidates and HAND BACK THE OBJECTS.
+
+        The items this node does not apply to are concluded `skipped` in the
+        same call and left out of the lease, so what comes back is what there
+        is work to do on.
+        """
+        lease = self.journal.claim(name, limit, candidates=candidates)
+        loaded = self._loaded(lease)
+        keep, give_up = [], []
+        for item in loaded.values():
+            (keep if self.adapter.applies(item, name) else give_up).append(item)
+        if give_up:
+            self.journal.conclude(name, [self.adapter.id_of(i) for i in give_up],
+                                  token=lease.token, status=NODE_SKIPPED)
+        missing = [s for s in lease if s not in loaded]
+        return ItemLease(keep, lease.token, missing)
+
+    def conclude(self, name: str, items: Sequence[Any], *,
+                 token: str | None = None, status: str = NODE_DONE) -> int:
+        """Finish this node on these items, asking `branch` for a choice.
+
+        `items` is usually the `ItemLease` a claim gave back, and the token
+        travels with it. Pass `token=` when the lease did not come along —
+        a worker that took its job off a queue and holds only the proof.
+        """
+        return self._finish(name, items, token=token, status=status)
+
+    def fail(self, name: str, items: Sequence[Any], *,
+             token: str | None = None) -> int:
+        """This node did not produce, on these items."""
+        return self._finish(name, items, token=token, status=NODE_FAILED)
+
+    def _finish(self, name: str, items: Sequence[Any], *,
+                token: str | None, status: str) -> int:
+        token = token if token is not None else getattr(items, "token", None)
+        # ONLY A CHOICE IS ASKED FOR A BRANCH. Anywhere else the core refuses
+        # one, and rightly: there would be nothing to omit.
+        asking = node(name, self.journal.dag).choice and status != NODE_FAILED
+        by_branch: dict[str | None, list[Any]] = {}
+        for item in items:
+            branch = self.adapter.branch(item, name) if asking else None
+            by_branch.setdefault(branch, []).append(self.adapter.id_of(item))
+        touched = 0
+        for branch, ids in by_branch.items():
+            touched += self.journal.conclude(name, ids, token=token,
+                                             status=status, branch=branch)
+        return touched
+
+    # -- pass through, in items' terms -------------------------------------
+
+    def signal(self, items: Sequence[Any], event: str, ref: str | None = None) -> int:
+        """Record that `event` happened for these items."""
+        return self.journal.signal([self.adapter.id_of(i) for i in items], event, ref)
+
+    def progress(self, item: Any) -> dict[str, str]:
+        """`{node: status}` for one item."""
+        return self.journal.progress(self.adapter.id_of(item))
+
+    def history(self, item: Any) -> list[dict[str, Any]]:
+        """Every row forget, release or a loop took away from this item."""
+        return self.journal.history(self.adapter.id_of(item))
+
+    def _loaded(self, lease: Lease) -> dict[Any, Any]:
+        """`{id: item}` for a lease, in the lease's order, in ONE load."""
+        if not lease:
+            return {}
+        found = {self.adapter.id_of(i): i for i in self.adapter.load(list(lease))}
+        return {s: found[s] for s in lease if s in found}

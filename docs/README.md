@@ -2,6 +2,8 @@
 
 - [The rules](rules.md) — every mechanism, spelled out: the claim rule, joins
   and choices, history and loops, time, lanes, channels, limits, versions.
+- [Items](items.md) — the canonical way in: hand grampy your own objects and
+  let handlers answer what needs the data.
 - [Drivers and candidates](drivers.md) — the tables you declare, how
   eligibility is passed, and how ids become your own objects.
 - [Drawings](drawings.md) — Mermaid flowchart, Mermaid state diagram, Graphviz,
