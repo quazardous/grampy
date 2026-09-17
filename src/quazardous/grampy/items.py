@@ -82,11 +82,17 @@ class Adapter:
         """The subject id of this item — unique, stable, int or str."""
         raise NotImplementedError
 
+    # -- required only when a driver's query names the candidates -----------
+
     def load(self, ids: Sequence[Any]) -> Iterable[Any]:
         """The items for these ids, IN ONE CALL — your query, your storage.
 
         Order does not matter, and an id with nothing behind it may be left
         out: it comes back as `ItemLease.missing`.
+
+        ONLY NEEDED ON THE QUERY PATH. When candidates are your own objects
+        they travel with the claim and are handed straight back, so an
+        application that never passes a driver query never needs this.
         """
         raise NotImplementedError
 
@@ -279,5 +285,13 @@ class Items:
         """`{id: item}` for a lease, in the lease's order, in ONE load."""
         if not lease:
             return {}
-        found = {self.adapter.id_of(i): i for i in self.adapter.load(list(lease))}
+        try:
+            got = self.adapter.load(list(lease))
+        except NotImplementedError:
+            raise NotImplementedError(
+                f"{type(self.adapter).__name__}.load is needed here: the claim "
+                f"named candidates a driver produced, so it came back as ids "
+                f"with no objects attached. Write `load`, or pass your items "
+                f"as candidates and they travel with the claim") from None
+        found = {self.adapter.id_of(i): i for i in got}
         return {s: found[s] for s in lease if s in found}

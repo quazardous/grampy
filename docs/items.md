@@ -14,8 +14,10 @@ never imports it, and never calls a handler.
 
 ## The adapter
 
-Two methods are yours to write. The rest have answers that suit an
-application with nothing special to say.
+One method is yours to write — `id_of`. `load` is needed only when a
+driver's query names the candidates, since ids come back with no objects
+attached; pass your items instead and it is never called. The rest have
+answers that suit an application with nothing special to say.
 
 ```python
 from quazardous.grampy.items import Adapter, Items
@@ -123,6 +125,7 @@ right choice when you already hold ids and no objects.
 | | |
 |---|---|
 | `admit(items)` | record each item's policy, once |
+| `skip(node, candidates=…)` · `settle(candidates)` | the janitor, in items' terms |
 | `arrive(node, items, urgent=False)` | a lane, each item bringing its `ref_of` |
 | `claim(node, limit, candidates=…)` | items in (reused) or a driver query; an `ItemLease` out |
 | `conclude(node, items, token=None, status=…)` | asks `branch` for a choice |

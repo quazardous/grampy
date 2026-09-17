@@ -257,3 +257,31 @@ def test_passing_ids_where_items_go_says_so(world):
         items.claim("scan", 10, candidates=[1, 2, 3])
     with pytest.raises(TypeError, match="items.journal.claim"):
         items.settle([1, 2, 3])
+
+
+def test_load_is_only_needed_when_a_query_names_the_candidates():
+    """Items travel with the claim, so an adapter that never meets a driver
+    query never needs `load` — and is told plainly when it does."""
+
+    class NoLoad(Adapter):
+        def id_of(self, brick):
+            return brick.id
+
+    import sqlite3
+
+    from quazardous.grampy.drivers.sqlite import Query, SqliteDriver, schema
+
+    conn = sqlite3.connect(":memory:")
+    for statement in schema():
+        conn.execute(statement)
+    conn.execute("CREATE TABLE docs (id INTEGER PRIMARY KEY)")
+    conn.executemany("INSERT INTO docs VALUES (?)", [(1,), (2,)])
+
+    bricks = [Brick(1), Brick(2)]
+    items = Items(NodeJournal(SqliteDriver(conn), (Node("a"), Node("b")), ), NoLoad())
+    assert [b.id for b in items.claim("a", 10, candidates=bricks)] == [1, 2]
+
+    # A driver query hands back ids, and there is nothing to turn them into.
+    fresh = Items(NodeJournal(SqliteDriver(conn), (Node("b"),)), NoLoad())
+    with pytest.raises(NotImplementedError, match="NoLoad.load is needed here"):
+        fresh.claim("b", 10, candidates=Query("SELECT id FROM docs ORDER BY id"))
