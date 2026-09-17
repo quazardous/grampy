@@ -6,6 +6,8 @@
     forget    erase it — "never started", the initial state
     release   give back the leases of a dead worker
     expire    give back every lease held longer than its node allows
+    signal    record that an awaited event happened, for subjects
+    settle    conclude waits and skip optional nodes past their grace
     history   every row forget, release or a loop took away, kept
     progress  what is recorded for ONE subject
     stages    what a BATCH went through, with durations
@@ -107,6 +109,7 @@ from .dag import (
     NODE_SCHEDULED,
     NODE_SKIPPED,
     Node,
+    accepts,
     claimable,
     descendants,
     joined,
@@ -147,6 +150,8 @@ class Entry(NamedTuple):
     rows: dict[str, str]
     #: `{node: due}` for the `scheduled` rows among `rows`.
     due: dict[str, str] = {}
+    #: `{node: finished_at}` for the concluded rows among `rows`.
+    finished: dict[str, str] = {}
 
 
 class JournalDriver(Protocol):
@@ -177,8 +182,9 @@ class JournalDriver(Protocol):
         """ATOMICALLY, for each `(subject, revision)`: write a `status` row
         for `name`, holding `lease`, started at `now`, if the subject's
         revision is still `revision` AND it has no row for `name` — or only a
-        `scheduled` row due by `now`, which the new row replaces. A
-        `skipped` row is finished at `now`. Return the subjects written."""
+        `scheduled` row due by `now`, which the new row replaces. Any row
+        but a `running` one is finished at `now`. Return the subjects
+        written."""
 
     def conclude(self, name: str, subjects: list[Any], *, status: str,
                  now: str, lease: str | None, omit: tuple[str, ...],
@@ -213,6 +219,17 @@ class JournalDriver(Protocol):
     def archived(self, subjects: list[Any], name: str, reason: str) -> dict[Any, int]:
         """`{subject: rows of `name` archived with `reason`}`, subjects
         without any left out."""
+
+    def signal(self, subjects: list[Any], event: str, *, now: str, ref: str | None) -> int:
+        """Append to each subject's history a row `node=event`,
+        `status="received"`, `reason="signal"`, archived at `now`, `ref` in
+        `lease`. Return the count written."""
+
+    def latest(self, subjects: list[Any], name: str,
+               reason: str | None) -> dict[Any, str]:
+        """`{subject: latest archived_at}` of the history rows of `name` —
+        with `reason` when given, any reason otherwise; subjects without any
+        left out."""
 
     def now(self) -> str:
         """The storage's clock, in the journal's format (`utc_now`): ONE
@@ -264,6 +281,10 @@ class NodeJournal:
         the graph. The two other guards still hold, and so does the write.
         """
         n = node(name, self.dag)
+        if n.wait is not None:
+            raise ValueError(
+                f"node {name!r} waits for {n.wait!r}: it is settled (`settle`), "
+                f"never claimed")
         limit = int(limit)
         token = secrets.token_hex(16)
         if limit <= 0:
@@ -479,6 +500,68 @@ class NodeJournal:
                 released[n.name] = count
         return released
 
+    def signal(self, subjects: list[Any], event: str, ref: str | None = None) -> int:
+        """Record that `event` happened for these subjects — DURABLY, before
+        any wait for it may have begun: a wait settles on a signal received
+        since it last went back (a loop, a forget), however early."""
+        if not subjects:
+            return 0
+        return self.driver.signal(_unique(subjects), event, now=self._clock(), ref=ref)
+
+    def settle(self, candidates: Any) -> dict[str, dict[str, int]]:
+        """CONCLUDE WHAT NO WORKER DOES, on the candidates, for every node:
+
+            wait      `done` when a signal was received since the node last
+                      went back; `failed` once `timeout` has passed since
+                      its parents concluded
+            grace     an optional node still untaken `grace` after its
+                      parents concluded is `skipped`
+
+        Time runs from the LATEST accepted parent's conclusion; a node
+        without parents has no clock and never times out. Return
+        `{node: {status: count}}` for what was written. Meant for the
+        application's janitor, like `expire`."""
+        now = self._clock()
+        out: dict[str, dict[str, int]] = {}
+        for n in self.dag:
+            if n.wait is None and n.grace is None:
+                continue
+            after = tuple(sorted(descendants(n.name, self.dag)))
+            entries = [e for page in self.driver.scan(
+                           candidates, name=n.name, nodes=(n.name, *n.parents, *after),
+                           parents=() if n.custom_join else n.parents, page=PAGE, now=now)
+                       for e in page]
+            ready = list({e.subject: e for e in entries
+                          if claimable(n.name, self.dag, _due_away(n.name, e, now))}.values())
+            if not ready:
+                continue
+            decided: dict[str, list[tuple[Any, int]]] = {}
+            subjects = [e.subject for e in ready]
+            heard: dict[Any, str] = {}
+            went_back: dict[Any, str] = {}
+            if n.wait is not None:
+                heard = self.driver.latest(subjects, n.wait, "signal")
+                went_back = self.driver.latest(subjects, n.name, None)
+            for e in ready:
+                since = _joined_since(n, e)
+                if n.wait is not None:
+                    at = heard.get(e.subject)
+                    if at is not None and at >= went_back.get(e.subject, ""):
+                        decided.setdefault(NODE_DONE, []).append((e.subject, e.revision))
+                        continue
+                    if (n.timeout is not None and since is not None
+                            and shift(since, seconds(n.timeout)) <= now):
+                        decided.setdefault(NODE_FAILED, []).append((e.subject, e.revision))
+                elif (since is not None and n.grace is not None
+                      and shift(since, seconds(n.grace)) <= now):
+                    decided.setdefault(NODE_SKIPPED, []).append((e.subject, e.revision))
+            for status, chosen in decided.items():
+                written = self.driver.insert_if_unchanged(n.name, chosen, status=status,
+                                                          now=now, lease=None)
+                if written:
+                    out.setdefault(n.name, {})[status] = len(written)
+        return out
+
     def history(self, subject: Any) -> list[dict[str, Any]]:
         """Every row taken away from ONE subject — by `forget`, `release` or
         a loop — oldest first, each with `archived_at` and `reason`."""
@@ -522,6 +605,14 @@ class NodeJournal:
             if n.working == state:
                 return n.name
         return None
+
+
+def _joined_since(n: Node, entry: Entry) -> str | None:
+    """When the node became joined: the latest conclusion among the parents
+    it accepts. None for a root, or when no conclusion time is known."""
+    times = [entry.finished[p] for p in n.parents
+             if entry.rows.get(p) in accepts(n, p) and p in entry.finished]
+    return max(times) if times else None
 
 
 def _due_away(name: str, entry: Entry, now: str) -> dict[str, str]:

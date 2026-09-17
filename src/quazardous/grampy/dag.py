@@ -146,6 +146,14 @@ class Node:
     `journal.expire()` gives the row back as if the worker had died. A
     fetch and an AI call do not deserve the same patience.
 
+    `wait` makes the node an ATTENDED EVENT rather than work: no worker
+    claims it; `journal.settle` concludes it `done` once a signal of that
+    name was received for the subject — before the wait began included —
+    or `failed` when `timeout` has passed since its parents concluded.
+
+    `grace` gives an optional node that long, once its parents concluded,
+    before `journal.settle` skips it.
+
     `retry` declares what a failure does first (`timing.Retry`): archived,
     and the node scheduled again after a delay, a bounded number of times.
     Only past the retries does the failure stand — and a loop or a failure
@@ -164,6 +172,9 @@ class Node:
     loop: Loop | None = None
     retry: Retry | None = None
     lease: float | int | str | None = None
+    wait: str | None = None
+    timeout: float | int | str | None = None
+    grace: float | int | str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "parents", tuple(self.parents))
@@ -382,12 +393,28 @@ def check_dag(dag: tuple[Node, ...]) -> None:
                     f"got {list(n.loop.on)}")
             if n.choice:
                 raise DagError(f"node {n.name!r} is a choice and a loop: pick one")
-        if n.lease is not None:
+        for label in ("lease", "timeout", "grace"):
+            value = getattr(n, label)
+            if value is None:
+                continue
             try:
-                if seconds(n.lease) <= 0:
-                    raise ValueError("a lease must last")
+                if seconds(value) <= 0:
+                    raise ValueError("a duration must last")
             except ValueError as exc:
-                raise DagError(f"node {n.name!r}: lease {n.lease!r} — {exc}") from exc
+                raise DagError(f"node {n.name!r}: {label} {value!r} — {exc}") from exc
+        if n.wait is not None:
+            if not n.wait:
+                raise DagError(f"node {n.name!r}: wait needs an event name")
+            unfit = [label for label in ("choice", "loop", "retry", "lease")
+                     if getattr(n, label)]
+            if unfit:
+                raise DagError(
+                    f"node {n.name!r} waits for {n.wait!r}: it is settled, never "
+                    f"worked, so it cannot take {unfit}")
+        elif n.timeout is not None:
+            raise DagError(f"node {n.name!r}: a timeout needs a wait")
+        if n.grace is not None and not n.optional:
+            raise DagError(f"node {n.name!r}: grace skips an optional node — this one is not")
 
 
     # ── NO CYCLE, PROVEN BY A WALK ─────────────────────────────────

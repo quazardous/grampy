@@ -81,7 +81,9 @@ class MemoryDriver:
                         subject, self.revisions.get(subject, 0),
                         {n: row.status for n, row in held.items()},
                         {n: row.started_at for n, row in held.items()
-                         if row.status == NODE_SCHEDULED}))
+                         if row.status == NODE_SCHEDULED},
+                        {n: row.finished_at for n, row in held.items()
+                         if row.finished_at is not None}))
             yield entries
 
     def insert_if_unchanged(self, name: str, entries: list[tuple[Any, int]], *,
@@ -96,7 +98,7 @@ class MemoryDriver:
                 if self.revisions.get(subject, 0) != revision:
                     continue
                 self.rows[(subject, name)] = Row(
-                    status, now, now if status == NODE_SKIPPED else None, lease)
+                    status, now, None if status == NODE_RUNNING else now, lease)
                 taken.append(subject)
         return taken
 
@@ -169,6 +171,25 @@ class MemoryDriver:
                 if s in wanted and e["node"] == name and e["reason"] == reason:
                     counts[s] = counts.get(s, 0) + 1
         return counts
+
+    def signal(self, subjects: list[Any], event: str, *, now: str, ref: str | None) -> int:
+        with self._lock:
+            for subject in subjects:
+                self.archive.append((subject, {
+                    "node": event, "status": "received", "started_at": now,
+                    "finished_at": now, "lease": ref, "archived_at": now,
+                    "reason": "signal"}))
+        return len(subjects)
+
+    def latest(self, subjects: list[Any], name: str,
+               reason: str | None) -> dict[Any, str]:
+        wanted = set(subjects)
+        out: dict[Any, str] = {}
+        with self._lock:
+            for s, e in self.archive:
+                if s in wanted and e["node"] == name and reason in (None, e["reason"]):
+                    out[s] = max(out.get(s, ""), e["archived_at"])
+        return out
 
     def status_counts(self, name: str) -> dict[str, int]:
         counts: dict[str, int] = {}

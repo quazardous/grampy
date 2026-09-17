@@ -24,6 +24,7 @@ from quazardous.grampy import (
     node,
     omitted_by,
 )
+from quazardous.grampy.timing import Retry
 
 #: Three nodes in a row.
 LINE = (Node("a"), Node("b", parents=("a",)), Node("c", parents=("b",)))
@@ -360,3 +361,16 @@ def test_a_loop_may_go_back_to_the_node_itself():
 def test_check_dag_refuses_a_lease_that_does_not_last(lease):
     with pytest.raises(DagError, match="lease"):
         check_dag((Node("a", lease=lease),))
+
+
+@pytest.mark.parametrize("nodes, message", [
+    ((Node("a"), Node("b", parents=("a",), wait="x", retry=Retry(limit=1))), "settled, never"),
+    ((Node("a"), Node("b", parents=("a",), wait="x", lease="1m")), "settled, never"),
+    ((Node("a"), Node("b", parents=("a",), timeout="1h")), "a timeout needs a wait"),
+    ((Node("a"), Node("b", parents=("a",), grace="1h")), "not"),
+    ((Node("a"), Node("b", parents=("a",), wait="x", timeout="soon")), "timeout"),
+    ((Node("a"), Node("b", parents=("a",), wait="")), "event name"),
+])
+def test_check_dag_refuses_waits_and_graces_that_cannot_hold(nodes, message):
+    with pytest.raises(DagError, match=message):
+        check_dag(nodes)

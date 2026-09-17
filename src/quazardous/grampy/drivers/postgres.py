@@ -177,14 +177,19 @@ class PostgresDriver:
             last = found[-1][1]
             rows: dict[Any, dict[str, str]] = {f[0]: {} for f in found}
             due: dict[Any, dict[str, str]] = {f[0]: {} for f in found}
-            for subject, n, status, started in self._execute(
-                    sa.select(self._subject, t.c.node, t.c.status, t.c.started_at)
+            finished: dict[Any, dict[str, str]] = {f[0]: {} for f in found}
+            for subject, n, status, started, ended in self._execute(
+                    sa.select(self._subject, t.c.node, t.c.status, t.c.started_at,
+                              t.c.finished_at)
                     .where(self._subject.in_(list(rows)),
                            t.c.node.in_(list(nodes)))).fetchall():
                 rows[subject][n] = status
                 if status == NODE_SCHEDULED:
                     due[subject][n] = started
-            yield [Entry(f[0], int(f[2]), rows[f[0]], due[f[0]]) for f in found]
+                if ended is not None:
+                    finished[subject][n] = ended
+            yield [Entry(f[0], int(f[2]), rows[f[0]], due[f[0]], finished[f[0]])
+                   for f in found]
             if len(found) < page:
                 return
 
@@ -211,7 +216,7 @@ class PostgresDriver:
         values = [unchanged.c[self._rev_subject.key], sa.literal(name),
                   sa.literal(status), sa.literal(now),
                   sa.cast(sa.literal(lease), t.c.lease.type)]
-        if status == NODE_SKIPPED:
+        if status != NODE_RUNNING:
             columns.append("finished_at")
             values.append(sa.literal(now))
         insert = postgresql.insert(t).from_select(
@@ -318,6 +323,27 @@ class PostgresDriver:
             sa.select(*[h.c[k] for k in keys])
             .where(h.c[self._subject.key] == subject)
             .order_by(h.c.archived_at, h.c.node)).fetchall()]
+
+    def signal(self, subjects: list[Any], event: str, *, now: str, ref: str | None) -> int:
+        h = self.history_table
+        rows = self._execute(
+            sa.insert(h).values([{self._subject.key: s, "node": event, "status": "received",
+                                  "started_at": now, "finished_at": now, "lease": ref,
+                                  "archived_at": now, "reason": "signal"}
+                                 for s in subjects])
+            .returning(h.c[self._subject.key])).fetchall()
+        return len(rows)
+
+    def latest(self, subjects: list[Any], name: str,
+               reason: str | None) -> dict[Any, str]:
+        h = self.history_table
+        subject = h.c[self._subject.key]
+        query = (sa.select(subject, sa.func.max(h.c.archived_at))
+                 .where(subject.in_(list(subjects)), h.c.node == name)
+                 .group_by(subject))
+        if reason is not None:
+            query = query.where(h.c.reason == reason)
+        return {row[0]: row[1] for row in self._execute(query).fetchall()}
 
     def archived(self, subjects: list[Any], name: str, reason: str) -> dict[Any, int]:
         h = self.history_table

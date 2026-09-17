@@ -78,6 +78,13 @@ journal.claim("crop", 10, candidates=["s1", "s2"])            # ['s1'] — s2 st
 - **Leases per node.** `Node("fetch", lease="2m")`, `Node("ai_tag", lease="1h")`:
   `journal.expire()`, called by the application's janitor, gives back every
   row held longer than its node allows — archived, then claimable again.
+- **Waits, signals and grace.** `Node("clicked", parents=("send",),
+  wait="email.clicked", timeout="7d")` is not worked but settled:
+  `journal.signal(subjects, "email.clicked")` records the event durably —
+  even before the wait begins — and `journal.settle(candidates)` concludes
+  the wait `done`, or `failed` once the timeout has passed since its parents
+  concluded. `Node(optional=True, grace="1d")` is skipped by `settle` when
+  nobody took it in time.
 - **One clock.** The journal takes its time from the driver — the database
   server for PostgreSQL — so workers on several machines agree on what is
   due.

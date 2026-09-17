@@ -42,6 +42,11 @@ First release, planned as 0.1.0. Installed as `grampy-q`, imported as
 - Give each node its own lease: one call releases every claim held longer
   than its node allows, so a slow step and a fast one need not share a
   timeout.
+- Wait for external events: signals are recorded durably, even before the
+  wait begins, and a janitor call settles waiting steps as done — or failed
+  after a timeout, so that a reminder or an escalation can follow.
+- Give optional steps a grace period, after which they are skipped instead
+  of blocking the steps that follow them.
 - The journal reads the time from the storage — the database server for
   PostgreSQL — so that workers on different machines agree on what is due.
 - Declare bounded loops: a node that fails (or ends another chosen way)

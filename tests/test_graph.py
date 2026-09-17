@@ -61,6 +61,18 @@ def test_joins_and_choices_are_written_as_data():
     assert Graph.from_json(graph.to_json()) == graph
 
 
+def test_waits_and_graces_are_written_as_data():
+    graph = Graph(Document("onboarding"), (
+        Node("send"),
+        Node("clicked", parents=("send",), wait="email.clicked", timeout="7d"),
+        Node("survey", parents=("send",), optional=True, grace="1d"),
+    ))
+    nodes = graph.to_dict()["nodes"]
+    assert nodes["clicked"] == {"parents": ["send"], "wait": "email.clicked", "timeout": "7d"}
+    assert nodes["survey"] == {"parents": ["send"], "grace": "1d", "optional": True}
+    assert Graph.from_json(graph.to_json()) == graph
+
+
 def test_json_round_trips():
     graph = Graph(Document("orders"), DIAMOND)
     assert Graph.from_json(graph.to_json()) == graph
@@ -104,6 +116,8 @@ def test_a_graph_that_does_not_hold_together_is_refused_on_construction():
     ({"document": {"name": "x"}, "nodes": {"a": {"retry": {"limit": 1, "delay": "soon"}}}},
      "$.nodes.a.retry"),
     ({"document": {"name": "x"}, "nodes": {"a": {"lease": [10]}}}, "$.nodes.a.lease"),
+    ({"document": {"name": "x"}, "nodes": {"a": {"wait": 3}}}, "$.nodes.a.wait"),
+    ({"document": {"name": "x"}, "nodes": {"a": {"grace": True}}}, "$.nodes.a.grace"),
 ])
 def test_a_document_that_lies_is_refused_with_its_path(data, path):
     with pytest.raises(GraphFormatError) as caught:

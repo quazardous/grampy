@@ -130,7 +130,7 @@ class SqliteDriver:
 
     def insert_if_unchanged(self, name: str, entries: list[tuple[Any, int]], *,
                             status: str, now: str, lease: str | None) -> list[Any]:
-        finished = now if status == NODE_SKIPPED else None
+        finished = None if status == NODE_RUNNING else now
         taken: list[Any] = []
         for subject, revision in sorted(entries, key=lambda e: str(e[0])):
             cur = self.conn.execute(
@@ -238,6 +238,29 @@ class SqliteDriver:
             f"WHERE {self.subject} = ? ORDER BY archived_at, node, rowid",
             (subject,)).fetchall()]
 
+    def signal(self, subjects: list[Any], event: str, *, now: str, ref: str | None) -> int:
+        for subject in subjects:
+            self.conn.execute(
+                f"INSERT INTO {self.history_table} ({self.subject}, node, status, "
+                f"started_at, finished_at, lease, archived_at, reason) "
+                f"VALUES (?, ?, 'received', ?, ?, ?, ?, 'signal')",
+                (subject, event, now, now, ref, now))
+        return len(subjects)
+
+    def latest(self, subjects: list[Any], name: str,
+               reason: str | None) -> dict[Any, str]:
+        out: dict[Any, str] = {}
+        for chunk in _chunks(subjects):
+            marks = ", ".join("?" * len(chunk))
+            sql = (f"SELECT {self.subject}, MAX(archived_at) FROM {self.history_table} "
+                   f"WHERE node = ? AND {self.subject} IN ({marks})")
+            params: list[Any] = [name, *chunk]
+            if reason is not None:
+                sql += " AND reason = ?"
+                params.append(reason)
+            out.update(self.conn.execute(sql + f" GROUP BY {self.subject}", params).fetchall())
+        return out
+
     def archived(self, subjects: list[Any], name: str, reason: str) -> dict[Any, int]:
         counts: dict[Any, int] = {}
         for chunk in _chunks(subjects):
@@ -295,21 +318,26 @@ class SqliteDriver:
     def _entries(self, batch: list[Any], nodes: tuple[str, ...]) -> list[Entry]:
         rows: dict[Any, dict[str, str]] = {s: {} for s in batch}
         due: dict[Any, dict[str, str]] = {s: {} for s in batch}
+        finished: dict[Any, dict[str, str]] = {s: {} for s in batch}
         revisions: dict[Any, int] = {}
         for chunk in _chunks(list(rows)):
             marks = ", ".join("?" * len(chunk))
             node_marks = ", ".join("?" * len(nodes))
-            for subject, n, status, started in self.conn.execute(
-                    f"SELECT {self.subject}, node, status, started_at FROM {self.table} "
+            for subject, n, status, started, ended in self.conn.execute(
+                    f"SELECT {self.subject}, node, status, started_at, finished_at "
+                    f"FROM {self.table} "
                     f"WHERE {self.subject} IN ({marks}) AND node IN ({node_marks})",
                     (*chunk, *nodes)).fetchall():
                 rows[subject][n] = status
                 if status == NODE_SCHEDULED:
                     due[subject][n] = started
+                if ended is not None:
+                    finished[subject][n] = ended
             revisions.update(self.conn.execute(
                 f"SELECT {self.subject}, revision FROM {self.revisions} "
                 f"WHERE {self.subject} IN ({marks})", chunk).fetchall())
-        return [Entry(s, int(revisions.get(s, 0)), rows[s], due[s]) for s in batch]
+        return [Entry(s, int(revisions.get(s, 0)), rows[s], due[s], finished[s])
+                for s in batch]
 
 
 def _check(name: str) -> None:

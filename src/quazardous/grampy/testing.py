@@ -50,6 +50,7 @@ from .dag import (
     DagError,
     Loop,
     Node,
+    accepts,
     claimable,
     claimable_nodes,
     descendants,
@@ -57,7 +58,7 @@ from .dag import (
     node,
     omitted_by,
 )
-from .timing import Retry, shift
+from .timing import Retry, seconds, shift
 
 #: A fork, a join, an optional branch — the diamond.
 DIAMOND = (
@@ -111,6 +112,17 @@ FLAKY = (
     Node("prepare", lease="1h"),
     Node("call", parents=("prepare",), retry=Retry(limit=2, delay="10s")),
     Node("alert", parents=("call",), on={"call": ("failed",)}),
+)
+
+
+#: An onboarding: send, wait a week for the click, activate or remind; a
+#: survey that nobody minds being skipped after a day.
+ONBOARDING = (
+    Node("send"),
+    Node("clicked", parents=("send",), wait="email.clicked", timeout="7d"),
+    Node("activate", parents=("clicked",)),
+    Node("remind", parents=("clicked",), on={"clicked": ("failed",)}),
+    Node("survey", parents=("send",), optional=True, grace="1d"),
 )
 
 
@@ -433,6 +445,63 @@ class JournalContract:
         assert journal.progress("s1")["call"] == NODE_RUNNING
         assert journal.history("s1") == []
 
+    # -- waits, signals, grace -------------------------------------------------
+
+    def test_a_signal_received_before_the_wait_still_settles_it(self, harness, clock):
+        journal = harness.journal(ONBOARDING, clock)
+        clock.now = "2026-01-01T00:00:00+00:00"
+        assert journal.signal(["early"], "email.clicked", ref="click-1") == 1
+        self._run(harness, journal, "send", ["early", "late"])
+        with pytest.raises(ValueError, match="settled"):
+            self._claim(harness, journal, "clicked", ["early"])
+        assert journal.settle(harness.candidates(["early", "late"])) == {
+            "clicked": {NODE_DONE: 1}}
+        assert journal.progress("early")["clicked"] == NODE_DONE
+        assert "clicked" not in journal.progress("late")
+        assert self._claim(harness, journal, "activate", ["early", "late"]) == ["early"]
+        [received] = journal.history("early")
+        assert (received["node"], received["reason"], received["lease"]) == (
+            "email.clicked", "signal", "click-1")
+
+    def test_a_wait_fails_at_its_timeout_and_a_failure_edge_takes_over(self, harness, clock):
+        journal = harness.journal(ONBOARDING, clock)
+        clock.now = "2026-01-01T00:00:00+00:00"
+        self._run(harness, journal, "send", ["s1"])
+        clock.now = "2026-01-07T23:59:59+00:00"
+        assert "clicked" not in journal.settle(harness.candidates(["s1"])), "one second early"
+        clock.now = "2026-01-08T00:00:00+00:00"
+        assert journal.settle(harness.candidates(["s1"]))["clicked"] == {NODE_FAILED: 1}
+        assert self._claim(harness, journal, "remind", ["s1"]) == ["s1"]
+        journal.signal(["s1"], "email.clicked")
+        assert journal.settle(harness.candidates(["s1"])).get("clicked") is None, (
+            "too late: the wait has concluded")
+
+    def test_grace_skips_an_optional_node_left_untaken(self, harness, clock):
+        journal = harness.journal(ONBOARDING, clock)
+        clock.now = "2026-01-01T00:00:00+00:00"
+        self._run(harness, journal, "send", ["idle", "busy"])
+        self._claim(harness, journal, "survey", ["busy"])
+        clock.now = "2026-01-02T00:00:00+00:00"
+        assert journal.settle(harness.candidates(["idle", "busy"]))["survey"] == {
+            NODE_SKIPPED: 1}
+        assert journal.progress("idle")["survey"] == NODE_SKIPPED
+        assert journal.progress("busy")["survey"] == NODE_RUNNING
+
+    def test_a_signal_counts_again_only_after_the_wait_went_back(self, harness, clock):
+        journal = harness.journal(ONBOARDING, clock)
+        clock.now = "2026-01-01T00:00:00+00:00"
+        self._run(harness, journal, "send", ["s1"])
+        journal.signal(["s1"], "email.clicked")
+        clock.now = "2026-01-01T00:01:00+00:00"
+        journal.settle(harness.candidates(["s1"]))
+        clock.now = "2026-01-01T00:02:00+00:00"
+        journal.forget("clicked", ["s1"])
+        assert journal.settle(harness.candidates(["s1"])).get("clicked") is None, (
+            "the old click was spent before the node went back")
+        clock.now = "2026-01-01T00:03:00+00:00"
+        journal.signal(["s1"], "email.clicked")
+        assert journal.settle(harness.candidates(["s1"]))["clicked"] == {NODE_DONE: 1}
+
     # -- skip ----------------------------------------------------------------
 
     def test_only_an_optional_node_is_skipped(self, harness, journal):
@@ -535,7 +604,7 @@ class JournalContract:
 
         run_state_machine_as_test(
             _model_machine(harness, subject_type),
-            settings=settings(max_examples=40, stateful_step_count=25,
+            settings=settings(max_examples=50, stateful_step_count=50,
                               deadline=None, derandomize=True,
                               suppress_health_check=list(HealthCheck)))
 
@@ -700,10 +769,18 @@ def _model_machine(harness: Any, subject_type: type = str) -> Any:
                 retry = Retry(limit=draw(st.integers(1, 2)), delay=draw(st.integers(0, 3)),
                               backoff=draw(st.sampled_from(("constant", "linear",
                                                             "exponential"))))
+            wait = timeout = grace = None
+            if (not choice and loop is None and retry is None and spec["parents"]
+                    and draw(st.booleans())):
+                wait = draw(st.sampled_from(("ev1", "ev2")))
+                timeout = draw(st.one_of(st.none(), st.integers(1, 2), st.integers(1, 2)))
+            optional = not choice and draw(st.booleans())
+            if optional and draw(st.integers(0, 3)) > 0:
+                grace = draw(st.integers(1, 2))
             nodes.append(Node(spec["name"], parents=spec["parents"],
                               on=spec.get("on", {}), need=spec.get("need"),
-                              choice=choice, loop=loop, retry=retry,
-                              optional=not choice and draw(st.booleans())))
+                              choice=choice, loop=loop, retry=retry, wait=wait,
+                              timeout=timeout, grace=grace, optional=optional))
         return tuple(nodes)
 
     # Few subjects, so that they collide; ids given back EXACTLY as given.
@@ -718,7 +795,8 @@ def _model_machine(harness: Any, subject_type: type = str) -> Any:
             self.clock = Clock("2026-01-01T00:00:00+00:00")
             self.ticks = 0
             self.journal = harness.journal(dag, self.clock, subject_type=subject_type)
-            self.model: dict[str, dict[str, tuple[str, str, Any]]] = {
+            # (status, started_at, lease, finished_at)
+            self.model: dict[str, dict[str, tuple[str, str, Any, Any]]] = {
                 s: {} for s in _SUBJECTS}
             self.tokens: list[str] = []
             self.archived: dict[str, list[tuple[str, str, str, str]]] = {
@@ -746,8 +824,16 @@ def _model_machine(harness: Any, subject_type: type = str) -> Any:
         @rule(data=st.data(), candidates=subjects,
               limit=st.integers(min_value=0, max_value=4))
         def claim(self, data: Any, candidates: list[str], limit: int) -> None:
-            n = self._node(data)
+            self._claim(data, candidates, limit)
+
+        def _claim(self, data: Any, candidates: list[str], limit: int,
+                   node: Node | None = None) -> Any:
+            n = node or self._node(data)
             self._tick()
+            if n.wait is not None:
+                with pytest.raises(ValueError):
+                    self.journal.claim(n.name, limit, candidates=harness.candidates(candidates))
+                return None
             got = self.journal.claim(n.name, limit, candidates=harness.candidates(candidates))
             assert got.token not in self.tokens, "a token is never issued twice"
             self.tokens.append(got.token)
@@ -760,15 +846,18 @@ def _model_machine(harness: Any, subject_type: type = str) -> Any:
                 if len(expected) < limit and claimable(n.name, self.dag, statuses):
                     if row and row[0] == NODE_SCHEDULED:
                         del self.model[s][n.name]   # replaced, not archived
-                    self.model[s][n.name] = (NODE_RUNNING, self.clock.now, got.token)
+                    self.model[s][n.name] = (NODE_RUNNING, self.clock.now, got.token, None)
                     expected.append(s)
             assert sorted(got) == sorted(expected), f"claim {n.name} {candidates}"
+            return got
 
         @rule(data=st.data(), candidates=subjects,
               status=st.sampled_from((NODE_DONE, NODE_SKIPPED, NODE_FAILED)))
-        def conclude(self, data: Any, candidates: list[str], status: str) -> None:
-            n = self._node(data)
-            token = data.draw(st.sampled_from([None, "forged", *self.tokens]))
+        def conclude(self, data: Any, candidates: list[str], status: str,
+                     node: Node | None = None, token: Any = "draw") -> None:
+            n = node or self._node(data)
+            if token == "draw":
+                token = data.draw(st.sampled_from([None, "forged", *self.tokens]))
             branch = None
             omit: tuple[str, ...] = ()
             if n.choice and status != NODE_FAILED:
@@ -780,18 +869,19 @@ def _model_machine(harness: Any, subject_type: type = str) -> Any:
             for s in dict.fromkeys(candidates):
                 row = self.model[s].get(n.name)
                 if row and row[0] == NODE_RUNNING and token in (None, row[2]):
-                    self.model[s][n.name] = (status, row[1], row[2])
+                    self.model[s][n.name] = (status, row[1], row[2], self.clock.now)
                     retries = self.retried.get((s, n.name), 0)
                     if (n.retry is not None and status == NODE_FAILED
                             and retries < n.retry.limit):
                         self._archive(s, n.name, "retry")
                         due = shift(self.clock.now, n.retry.wait(retries + 1))
-                        self.model[s][n.name] = (NODE_SCHEDULED, due, None)
+                        self.model[s][n.name] = (NODE_SCHEDULED, due, None, None)
                         self.retried[(s, n.name)] = retries + 1
                         expected += 1
                         continue
                     for other in omit:
-                        self.model[s].setdefault(other, (NODE_OMITTED, self.clock.now, None))
+                        self.model[s].setdefault(
+                            other, (NODE_OMITTED, self.clock.now, None, self.clock.now))
                     loop = n.loop
                     if (loop is not None and status in loop.on
                             and self.passes.get((s, loop.to), 0) < loop.max):
@@ -804,6 +894,18 @@ def _model_machine(harness: Any, subject_type: type = str) -> Any:
                                         branch=branch)
             assert got == expected, f"conclude {n.name} {candidates} token={token}"
 
+        @rule(data=st.data())
+        def advance(self, data: Any) -> None:
+            """A worker's full turn on one node — claim then conclude done —
+            so that sequences reach deep states (joins, waits, timeouts)."""
+            workable = [x for x in self.dag if x.wait is None]
+            if not workable:
+                return
+            n = data.draw(st.sampled_from(workable))
+            got = self._claim(data, list(_SUBJECTS), 4, node=n)
+            if got:
+                self.conclude(data, list(got), NODE_DONE, node=n, token=got.token)
+
         @rule(data=st.data(), candidates=subjects)
         def skip(self, data: Any, candidates: list[str]) -> None:
             n = self._node(data)
@@ -814,7 +916,7 @@ def _model_machine(harness: Any, subject_type: type = str) -> Any:
             for s in dict.fromkeys(candidates):
                 statuses = self._statuses(s)
                 if n.name not in statuses and joined(n.name, self.dag, statuses):
-                    self.model[s][n.name] = (NODE_SKIPPED, self.clock.now, None)
+                    self.model[s][n.name] = (NODE_SKIPPED, self.clock.now, None, self.clock.now)
                     expected += 1
             got = self.journal.skip(n.name, candidates=harness.candidates(candidates))
             assert got == expected, f"skip {n.name} {candidates}"
@@ -826,9 +928,57 @@ def _model_machine(harness: Any, subject_type: type = str) -> Any:
             expected = 0
             for s in dict.fromkeys(candidates):
                 if n.name not in self.model[s]:
-                    self.model[s][n.name] = (NODE_DONE, self.clock.now, None)
+                    self.model[s][n.name] = (NODE_DONE, self.clock.now, None, self.clock.now)
                     expected += 1
             assert self.journal.adopt(n.name, candidates) == expected
+
+        @rule(candidates=subjects, event=st.sampled_from(("ev1", "ev2")))
+        def signal(self, candidates: list[Any], event: str) -> None:
+            self._tick()
+            unique = list(dict.fromkeys(candidates))
+            for s in unique:
+                self.archived[s].append((self.clock.now, event, "received", "signal"))
+            assert self.journal.signal(candidates, event) == len(unique)
+
+        @rule(candidates=subjects, wait=st.integers(0, 5))
+        def settle(self, candidates: list[Any], wait: int) -> None:
+            for _ in range(wait):
+                self._tick()
+            now = self.clock.now
+            expected: dict[str, dict[str, int]] = {}
+            for n in self.dag:
+                if n.wait is None and n.grace is None:
+                    continue
+                for s in dict.fromkeys(candidates):
+                    statuses = self._statuses(s)
+                    row = self.model[s].get(n.name)
+                    if row and row[0] == NODE_SCHEDULED and row[1] <= now:
+                        del statuses[n.name]
+                    if not claimable(n.name, self.dag, statuses):
+                        continue
+                    times = [self.model[s][p][3] for p in n.parents
+                             if statuses.get(p) in accepts(n, p)
+                             and self.model[s][p][3] is not None]
+                    since = max(times) if times else None
+                    status = None
+                    if n.wait is not None:
+                        heard = [a for a, name, _, reason in self.archived[s]
+                                 if name == n.wait and reason == "signal"]
+                        back = [a for a, name, _, _ in self.archived[s] if name == n.name]
+                        if heard and max(heard) >= max(back, default=""):
+                            status = NODE_DONE
+                        elif (n.timeout is not None and since is not None
+                              and shift(since, seconds(n.timeout)) <= now):
+                            status = NODE_FAILED
+                    elif (n.grace is not None and since is not None
+                          and shift(since, seconds(n.grace)) <= now):
+                        status = NODE_SKIPPED
+                    if status is None:
+                        continue
+                    self.model[s][n.name] = (status, now, None, now)
+                    counts = expected.setdefault(n.name, {})
+                    counts[status] = counts.get(status, 0) + 1
+            assert self.journal.settle(harness.candidates(candidates)) == expected
 
         @rule(data=st.data(), candidates=subjects)
         def forget(self, data: Any, candidates: list[str]) -> None:
