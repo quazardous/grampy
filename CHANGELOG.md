@@ -20,6 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The PostgreSQL driver's subject column now defaults to `subject`, like the
+  SQLite one. An application whose column has another name passes it, as
+  before: `PostgresDriver(..., subject="record_id")`.
+
 ## [0.1.0] - 2026-09-17
 
 First release. Installed as `grampy-q`, imported as

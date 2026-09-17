@@ -1,6 +1,6 @@
 """THE POSTGRESQL DRIVER — node rows in tables the application declares.
 
-    PostgresDriver(execute, table, revisions, history, subject="request_id",
+    PostgresDriver(execute, table, revisions, history, subject="subject",
                    limits=None, arrivals=None)
 
 ────────────────────────────────────────────────────────────────────────
@@ -136,7 +136,7 @@ class PostgresDriver:
 
     def __init__(self, execute: Callable[[Any], Any], table: sa.Table,
                  revisions: sa.Table, history: sa.Table, *,
-                 subject: str = "request_id", limits: sa.Table | None = None,
+                 subject: str = "subject", limits: sa.Table | None = None,
                  arrivals: sa.Table | None = None) -> None:
         for t, needed in ((table, REQUIRED_COLUMNS), (revisions, REVISION_COLUMNS),
                           (history, HISTORY_COLUMNS)):

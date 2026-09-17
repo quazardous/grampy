@@ -29,7 +29,7 @@ def _type(subject_type):
 
 
 def node_table(metadata, name, subject_type=str):
-    """A node table whose subject column is NOT called `request_id`."""
+    """A node table with the default subject column name."""
     return sa.Table(
         name, metadata,
         sa.Column("subject", _type(subject_type), primary_key=True),

@@ -111,3 +111,17 @@ def test_candidates_may_be_plain_subjects():
     from quazardous.grampy import Node
     journal = NodeJournal(SqliteDriver(conn), (Node("a"),))
     assert sorted(journal.claim("a", 5, candidates=["x", "y"])) == ["x", "y"]
+
+
+def test_the_subject_column_may_carry_the_application_s_own_name():
+    """The column is the application's: grampy must not impose `subject`."""
+    conn = sqlite3.connect(":memory:")
+    for statement in schema(subject="record_id"):
+        conn.execute(statement)
+    from quazardous.grampy import Node
+    journal = NodeJournal(SqliteDriver(conn, subject="record_id"),
+                          (Node("a"), Node("b", parents=("a",))))
+    lease = journal.claim("a", 5, candidates=["x"])
+    journal.conclude("a", ["x"], token=lease.token)
+    assert journal.claim("b", 5, candidates=["x"]) == ["x"]
+    assert [row[0] for row in conn.execute("SELECT record_id FROM grampy_nodes")] == ["x", "x"]
