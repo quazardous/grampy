@@ -632,11 +632,32 @@ class JournalContract:
         v1 = harness.journal(self.V1, clock)
         v2 = harness.journal_on(v1, self.V2, clock)
         self._run(harness, v1, "fetch", ["old"])
-        assert v1.pinned("old") == "1"
+        assert v1.pinned("old") == self.V1.document.identity
         assert self._claim(harness, v2, "fetch", ["old", "new"]) == ["new"]
-        assert v2.pinned("new") == "2"
+        assert v2.pinned("new") == self.V2.document.identity
         assert self._claim(harness, v1, "crop", ["old", "new"]) == ["old"], (
             "v1 never touches a subject of v2")
+
+    #: TWO WORKFLOWS, NOT TWO VERSIONS OF ONE: same version string, same node
+    #: names, different documents. Nothing may leak between them.
+    OFFERS = Graph(Document("offers", version="1"), (
+        Node("fetch"), Node("publish", parents=("fetch",))))
+    INVOICES = Graph(Document("invoices", version="1"), (
+        Node("fetch"), Node("publish", parents=("fetch",))))
+
+    def test_two_graphs_sharing_a_version_string_stay_strangers(self, harness, clock):
+        """THE PIN IS THE WHOLE DOCUMENT, not the version alone. Were it the
+        version, these two would each think the other's subjects were theirs."""
+        offers = harness.journal(self.OFFERS, clock)
+        invoices = harness.journal_on(offers, self.INVOICES, clock)
+        self._run(harness, offers, "fetch", ["s1"])
+        assert offers.pinned("s1") == "default/offers@1"
+
+        assert self._claim(harness, invoices, "fetch", ["s1"]) == [], (
+            "a subject of `offers` is none of `invoices`' business")
+        assert invoices.progress("s1") == {}, "nor does it see its rows"
+        assert self._claim(harness, offers, "publish", ["s1"]) == ["s1"], (
+            "and `offers` still owns it")
 
     def test_a_compliant_subject_migrates_renamed_and_repinned(self, harness, clock):
         v1 = harness.journal(self.V1, clock)
@@ -645,7 +666,7 @@ class JournalContract:
         self._run(harness, v1, "crop", ["s1"])
         self._run(harness, v1, "thumb", ["s1"])
         assert v2.migrate(["s1"], self.V1, {"crop": "trim"}) == 1
-        assert v2.pinned("s1") == "2"
+        assert v2.pinned("s1") == self.V2.document.identity
         assert v2.progress("s1") == {"fetch": NODE_DONE, "trim": NODE_DONE, "thumb": NODE_DONE}
         assert self._claim(harness, v2, "watermark", ["s1"]) == ["s1"], (
             "the new node is next, as if the subject had started on v2")
@@ -661,7 +682,8 @@ class JournalContract:
             v2.migrate(["early", "late"], self.V1, {"crop": "trim"})
         assert set(caught.value.problems) == {"late"}
         assert "publish" in caught.value.problems["late"]
-        assert v2.pinned("early") == "1", "the compliant one did not move either"
+        assert v2.pinned("early") == self.V1.document.identity, (
+            "the compliant one did not move either")
         assert v1.progress("early")["crop"] == NODE_DONE
 
     def test_a_dropped_node_is_archived_unless_someone_holds_it(self, harness, clock):

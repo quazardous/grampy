@@ -64,6 +64,16 @@ class Document:
     namespace: str = "default"
     dsl: str = DSL
 
+    @property
+    def identity(self) -> str:
+        """WHAT A SUBJECT IS PINNED TO — `namespace/name@version`.
+
+        The whole document names itself, not the version alone: two
+        workflows that happened to share a version string would otherwise
+        claim each other's subjects. Opaque to the drivers, which only ever
+        compare it."""
+        return f"{self.namespace}/{self.name}@{self.version}"
+
 
 @dataclass(frozen=True)
 class Graph:

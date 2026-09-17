@@ -160,11 +160,22 @@ overspend it.
 
 ## Versions and migration
 
-A journal on a `Graph` pins each subject to its `document.version` and leaves
-the subjects of other versions alone, so v1 and v2 run side by side.
+**A subject is pinned to the graph it started on, once.** The first write
+records `document.identity` — `namespace/name@version`, so `demo/offers@2` —
+and no later write moves it; only `migrate` does, on purpose. A journal
+leaves every other graph's subjects alone: it does not claim them, and
+`progress` reads empty for them. So v1 and v2 run side by side over the same
+tables.
+
+**It is the whole document, not the version alone.** Two workflows that
+happened to both call themselves version `1` would otherwise claim each
+other's subjects; named in full, they stay strangers.
+
 `journal_v2.migrate(subjects, V1, {"crop": "trim", "old_step": None})` moves the
 subjects whose rows could have been written on v2 — renamed, dropped nodes
 archived — or refuses them all, naming each one that is not compliant and why.
+Since the pin carries the name, renaming a workflow is a migration too, and
+says so.
 
 ## What holds it together
 

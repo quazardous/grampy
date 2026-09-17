@@ -7,7 +7,7 @@
     release   give back the leases of a dead worker
     expire    give back every lease held longer than its node allows
     enroll    give subjects a channel, whose settings then apply to them
-    migrate   move subjects pinned to one graph version onto this one
+    migrate   move subjects pinned to another graph onto this one
     signal    record that an awaited event happened, for subjects
     arrive    a subject comes back: it waits in a lane before running again
     settle    conclude waits, let due arrivals through their lane, and skip
@@ -161,7 +161,7 @@ class Entry(NamedTuple):
     finished: dict[str, str] = {}
     #: The subject's channel, None when it has none.
     channel: str | None = None
-    #: The graph version the subject is pinned to, None before its first write.
+    #: The graph the subject is pinned to, None before its first write.
     version: str | None = None
 
 
@@ -358,10 +358,12 @@ class NodeJournal:
         self.driver = driver
         self.graph = dag if isinstance(dag, Graph) else None
         self.dag = dag.nodes if isinstance(dag, Graph) else dag
-        #: SUBJECTS ARE PINNED TO THE VERSION THEY STARTED ON: a journal on a
-        #: `Graph` takes only subjects of its version, or not yet pinned, and
-        #: pins them on their first write. None for a tuple of nodes.
-        self.version = dag.document.version if isinstance(dag, Graph) else None
+        #: SUBJECTS ARE PINNED TO THE GRAPH THEY STARTED ON: a journal on a
+        #: `Graph` takes only subjects pinned to it, or not yet pinned, and
+        #: pins them on their first write — once, never again. It is the whole
+        #: `Document.identity`, so two workflows sharing a version string stay
+        #: strangers. None for a tuple of nodes.
+        self.version = dag.document.identity if isinstance(dag, Graph) else None
         self._clock = clock or driver.now
         self._rng = rng or random.Random()
 
@@ -662,7 +664,15 @@ class NodeJournal:
     # -- read --------------------------------------------------------------
 
     def progress(self, subject: Any) -> dict[str, str]:
-        """What is recorded for ONE subject — exactly what `dag.claimable` reads."""
+        """What is recorded for ONE subject — exactly what `dag.claimable` reads.
+
+        A JOURNAL ONLY SPEAKS ABOUT ITS OWN SUBJECTS: one pinned to another
+        graph reads empty, as it claims empty. `migrate` deliberately looks
+        past that, through the driver, since crossing is its whole job."""
+        if self.version is not None:
+            pinned = self.driver.versions([subject]).get(subject)
+            if pinned is not None and pinned != self.version:
+                return {}
         return self.driver.progress(subject)
 
     def expire(self) -> dict[str, int]:
@@ -700,8 +710,11 @@ class NodeJournal:
         return count
 
     def pinned(self, subject: Any) -> str | None:
-        """The graph version the subject is pinned to, None before its first
-        write."""
+        """The graph the subject is pinned to — a `Document.identity` — or
+        None before its first write.
+
+        IT IS WRITTEN ONCE. The first write pins the subject, and no later
+        one moves it: only `migrate` changes it, on purpose."""
         return self.driver.versions([subject]).get(subject)
 
     def migrate(self, subjects: list[Any], source: Graph,
@@ -727,8 +740,8 @@ class NodeJournal:
         migrated."""
         if self.graph is None or self.version is None:
             raise ValueError("migrate needs a journal built on a versioned Graph")
-        if source.document.version == self.version:
-            raise ValueError(f"the source is already version {self.version!r}")
+        if source.document.identity == self.version:
+            raise ValueError(f"the source is already {self.version!r}")
         mapping = dict(mapping or {})
         here = {n.name for n in self.dag}
         there = {n.name for n in source.nodes}
@@ -739,7 +752,7 @@ class NodeJournal:
         missing = sorted(name for name, target in full.items()
                          if target is not None and target not in here)
         if missing:
-            raise ValueError(f"source nodes with nowhere to go on version {self.version!r}: "
+            raise ValueError(f"source nodes with nowhere to go on {self.version!r}: "
                              f"{missing} — map them to a node or to None")
         landed = [t for t in full.values() if t is not None]
         if len(landed) != len(set(landed)):
@@ -750,8 +763,8 @@ class NodeJournal:
         problems: dict[Any, str] = {}
         plans: dict[Any, tuple[dict[str, str], tuple[str, ...]]] = {}
         for subject in subjects:
-            if pinned.get(subject, source.document.version) != source.document.version:
-                problems[subject] = f"pinned to version {pinned[subject]!r}"
+            if pinned.get(subject, source.document.identity) != source.document.identity:
+                problems[subject] = f"pinned to {pinned[subject]!r}"
                 continue
             progress = self.driver.progress(subject)
             drop = tuple(sorted(name for name in progress if full.get(name, name) is None))
@@ -769,11 +782,11 @@ class NodeJournal:
                         rename[name] = target
             stray = sorted(name for name in moved if name not in here)
             if stray:
-                problems[subject] = f"rows on {stray}, which version {self.version!r} lacks"
+                problems[subject] = f"rows on {stray}, which {self.version!r} lacks"
                 continue
             unjoined = sorted(name for name in moved if not joined(name, self.dag, moved))
             if unjoined:
-                problems[subject] = (f"{unjoined} could not have run on version "
+                problems[subject] = (f"{unjoined} could not have run on "
                                      f"{self.version!r}: their parents are not joined")
                 continue
             plans[subject] = (rename, drop)
