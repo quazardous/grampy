@@ -101,24 +101,29 @@
     <figure class="code-panel">
       <figcaption>2 · Run it on your storage</figcaption>
       <pre><code class="python" data-static>from quazardous.grampy import NodeJournal
-from quazardous.grampy.drivers.sqlite import SqliteDriver, schema
+from quazardous.grampy.drivers.sqlite import Query, SqliteDriver, schema
 
 for statement in schema():
     conn.execute(statement)
 journal = NodeJournal(SqliteDriver(conn), GRAPH)
 
 # A brick arrives — or comes back as a new version.
-journal.arrive("inbox", ["b1"], ref="v2")
+journal.arrive("inbox", ["brick-12"], ref="v2")
+
+# WHICH bricks may be worked is YOUR sentence, in your storage's own terms:
+# first column the subject, ORDER BY the priority. grampy reads it without
+# understanding it, in the same transaction as the claim.
+waiting = Query("SELECT id FROM bricks WHERE state <> 'shipped' ORDER BY dropped_at")
 
 # A worker: take up to 10 bricks the sort station can work on…
-lease = journal.claim("sort", 10, candidates=["b1", "b2", "b3"])
+lease = journal.claim("sort", 10, candidates=waiting)
 for brick in lease:
     ...  # your work
 # …and report, with the lease's token.
 journal.conclude("sort", lease, token=lease.token)
 
 # A janitor, every few seconds: lanes, waits, timeouts, dead workers.
-journal.settle(candidates=["b1", "b2", "b3"])
+journal.settle(candidates=waiting)
 journal.expire()</code></pre>
     </figure>
   </div>
