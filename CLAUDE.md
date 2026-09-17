@@ -1,0 +1,43 @@
+# grampy — rules for agents
+
+This repository is public (MIT). Anything committed here is read by
+strangers, so the rules below are about keeping it readable cold.
+
+## English everywhere
+
+Code, comments, docstrings, README, CHANGELOG, commit messages and PR
+descriptions are in English, whatever language the conversation is in.
+
+## Nothing from a host application
+
+grampy was extracted from a private application, and must stay generic.
+Never commit hostnames, secrets, dev-machine paths (`/home/...`), private
+tracker IDs (`#NNN`) or the vocabulary of the application that uses it.
+Use the generic terms: subject, node, run. Context about that application
+belongs in `CLAUDE.local.md` (not versioned) or on the tracker thread.
+
+## Keep the core dependency-free and 3.10-compatible
+
+The core imports only the standard library (`tests/test_isolation.py`
+checks it). The main consumer runs Python 3.10: no `match`/`case`, no
+3.11+ features. `requires-python` stays `>=3.10`.
+
+## Drivers follow the contract
+
+The claim rule lives in `grampy.dag`; drivers only store and claim
+atomically. A change to the journal or a driver must pass
+`grampy.testing.JournalContract` on the memory driver, and on PostgreSQL
+when `GRAMPY_TEST_PG_DSN` is set. Say explicitly when PostgreSQL was not
+run.
+
+## Changelog
+
+Every user-visible change adds a line to `CHANGELOG.md` under
+`[Unreleased]`, written for a user, without ticket IDs.
+
+## Commands
+
+```bash
+uv run --with pytest --with sqlalchemy pytest   # tests (PG skipped without DSN)
+uv run --with ruff ruff check                   # lint
+```
