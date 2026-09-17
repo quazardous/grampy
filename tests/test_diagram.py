@@ -22,7 +22,7 @@ SORTER = Graph(Document("brick-sorter"), (
     Node("check", parents=("colour",), optional=True, grace="5m",
          loop=Loop(to="colour", max=2)),
     Node("pack", parents=("colour", "defuse", "check"), need=2, once=True),
-), channels={"supplier-b": {"defuse": {"retry": Retry(limit=5)}}})
+), policies={"supplier-b": {"defuse": {"retry": Retry(limit=5)}}})
 
 
 def test_mermaid_draws_every_mechanism():
@@ -30,7 +30,7 @@ def test_mermaid_draws_every_mechanism():
     assert text.startswith("flowchart LR\n")
     assert 'n_scan{"scan<br/>⏱ 1m"}' in text, "a choice is a diamond"
     assert 'n_quarantine{{"quarantine<br/>waits deminer.called ⏱ 1h"}}' in text
-    assert "retry ×3" in text and "varies by channel" in text
+    assert "retry ×3" in text and "varies by policy" in text
     assert "2/3 · once" in text
     assert 'n_defuse -.->|"failed"| n_reject' in text, "a failure edge"
     assert 'n_check -.->|"loop ≤2 on failed"| n_colour' in text, "a loop edge"
@@ -88,12 +88,12 @@ def test_graphviz_accepts_the_dot():
 def test_lanes_and_limits_are_drawn():
     graph = Graph(Document("offers"), (
         Node("in", lane=Lane.throttle("1d", max_wait="3d"), rate=(Rate(10, "1m"),)),
-        Node("ai", parents=("in",), concurrency=4, per="channel"),
+        Node("ai", parents=("in",), concurrency=4, per="policy"),
     ))
     text = to_mermaid(graph)
     assert ('n_in[/"in<br/>lane: last version, place of the first · cooldown 1d · '
             'max wait 3d') in text
-    assert "rate 10/1m" in text and "≤4 at once · per channel" in text
+    assert "rate 10/1m" in text and "≤4 at once · per policy" in text
     assert "shape=house" in to_dot(graph)
     journal = NodeJournal(MemoryDriver(), graph, clock=lambda: "2026-01-01T00:00:00+00:00")
     journal.arrive("in", ["a", "b"])
@@ -120,7 +120,7 @@ def test_the_state_diagram_reads_like_a_statechart():
     assert "    n_pack --> [*]" in text and "    n_reject --> [*]" in text
     assert "note right of n_quarantine : waits deminer.called, timeout 1h" in text
     assert "note right of n_check : optional, grace 5m" in text
-    assert "varies by channel" in text
+    assert "varies by policy" in text
 
 
 def test_the_state_diagram_forks_where_a_node_has_several_children():
@@ -134,9 +134,9 @@ def test_the_state_diagram_forks_where_a_node_has_several_children():
 def test_the_state_diagram_notes_lanes_and_limits():
     graph = Graph(Document("offers"), (
         Node("in", lane=Lane.throttle("1d"), rate=(Rate(10, "1m"),)),
-        Node("ai", parents=("in",), concurrency=4, per="channel"),
+        Node("ai", parents=("in",), concurrency=4, per="policy"),
     ))
     text = to_state_diagram(graph)
     assert "note right of n_in : lane∶ last version, place of the first · cooldown 1d" in text
     assert "rate 10/1m" in text
-    assert "note right of n_ai : ≤4 at once · per channel" in text
+    assert "note right of n_ai : ≤4 at once · per policy" in text

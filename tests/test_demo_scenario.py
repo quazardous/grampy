@@ -112,11 +112,11 @@ def test_a_sorted_brick_sent_back_twice_runs_once_more_with_its_last_version(sce
 def test_salvage_bricks_skip_the_polish_station(scenario):
     """ONE WORKFLOW, TWO KINDS OF BRICK. `polish` is optional for everyone,
     and the adapter says it is not for salvage: the claim gives it up on
-    them. The channel's grace stays as the safety net."""
+    them. The policy's grace stays as the safety net."""
     world = scenario.World(seed=2, settings=scenario.Settings(
         arrivals_per_minute=0.0, tnt_share=0.0, returns_share=0.0, salvage_share=1.0))
     world.add_bricks(1)
-    assert world.journal.channel(1) == "salvage"
+    assert world.journal.policy(1) == "salvage"
     for _ in range(200):
         world.tick(1.0)
         if world.journal.progress(1).get("pack") == "done":
@@ -126,7 +126,7 @@ def test_salvage_bricks_skip_the_polish_station(scenario):
     fresh = scenario.World(seed=2, settings=scenario.Settings(
         arrivals_per_minute=0.0, tnt_share=0.0, returns_share=0.0, salvage_share=0.0))
     fresh.add_bricks(1)
-    assert fresh.journal.channel(1) == "factory"
+    assert fresh.journal.policy(1) == "factory"
     for _ in range(200):
         fresh.tick(1.0)
         if fresh.journal.progress(1).get("pack") == "done":

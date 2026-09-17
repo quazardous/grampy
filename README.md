@@ -67,8 +67,8 @@ Each line links to [the rules](https://github.com/quazardous/grampy/blob/main/do
 | [leases](https://github.com/quazardous/grampy/blob/main/docs/rules.md#time-retries-leases-waits-grace) | per node, given back by `journal.expire()` when a worker dies |
 | [waits and grace](https://github.com/quazardous/grampy/blob/main/docs/rules.md#time-retries-leases-waits-grace) | settled by a durable signal, recorded even before the wait, or failed at its timeout |
 | [lanes](https://github.com/quazardous/grampy/blob/main/docs/rules.md#lanes-subjects-that-come-back) | a subject that comes back waits, merges with the version waiting, runs again after a cooldown |
-| [channels](https://github.com/quazardous/grampy/blob/main/docs/rules.md#channels-one-workflow-several-sources) | one workflow, several sources, each with its own retries, leases and lanes |
-| [rate and concurrency](https://github.com/quazardous/grampy/blob/main/docs/rules.md#rate-limits-and-concurrency) | several bands at once (GCRA, with bursts), a cap per node, per channel |
+| [policies](https://github.com/quazardous/grampy/blob/main/docs/rules.md#policies-one-workflow-different-limits) | one workflow, subjects treated differently: their own retries, leases and **budgets** |
+| [rate and concurrency](https://github.com/quazardous/grampy/blob/main/docs/rules.md#rate-limits-and-concurrency) | several bands at once (GCRA, with bursts), a cap per node, per policy |
 | [versions](https://github.com/quazardous/grampy/blob/main/docs/rules.md#versions-and-migration) | subjects pinned to the graph they started on, migrated all or nothing |
 | [items](https://github.com/quazardous/grampy/blob/main/docs/items.md) | speak your objects: handlers name a branch, or give up a step one kind skips |
 | [drawings](https://github.com/quazardous/grampy/blob/main/docs/drawings.md) | Mermaid flowchart, Mermaid state diagram, Graphviz, with live counts |

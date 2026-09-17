@@ -49,7 +49,7 @@ class MemoryDriver:
     def __init__(self) -> None:
         self.rows: dict[tuple[Any, str], Row] = {}
         self.revisions: dict[Any, int] = {}
-        self.channel_of: dict[Any, str] = {}
+        self.policy_of: dict[Any, str] = {}
         self.version_of: dict[Any, str] = {}
         self.limiter: dict[str, float] = {}
         self.archive: list[tuple[Any, dict[str, Any]]] = []
@@ -89,7 +89,7 @@ class MemoryDriver:
                          if row.status == NODE_SCHEDULED},
                         {n: row.finished_at for n, row in held.items()
                          if row.finished_at is not None},
-                        self.channel_of.get(subject), self.version_of.get(subject)))
+                        self.policy_of.get(subject), self.version_of.get(subject)))
             yield entries
 
     def insert_if_unchanged(self, name: str, entries: list[tuple[Any, int]], *,
@@ -156,26 +156,26 @@ class MemoryDriver:
             stale = [key for key, row in self.rows.items()
                      if key[1] == name and row.status == NODE_RUNNING
                      and row.started_at < older_than
-                     and (only is None or self.channel_of.get(key[0]) in only)
-                     and self.channel_of.get(key[0]) not in exclude
+                     and (only is None or self.policy_of.get(key[0]) in only)
+                     and self.policy_of.get(key[0]) not in exclude
                      and (version is None
                           or self.version_of.get(key[0]) in (None, version))]
             for subject, n in stale:
                 self._take_away(subject, n, now=now, reason="release")
             return len(stale)
 
-    def enroll(self, subjects: list[Any], channel: str | None) -> int:
+    def enroll(self, subjects: list[Any], policy: str | None) -> int:
         with self._lock:
             for subject in subjects:
-                if channel is None:
-                    self.channel_of.pop(subject, None)
+                if policy is None:
+                    self.policy_of.pop(subject, None)
                 else:
-                    self.channel_of[subject] = channel
+                    self.policy_of[subject] = policy
         return len(subjects)
 
-    def channels(self, subjects: list[Any]) -> dict[Any, str]:
+    def policies(self, subjects: list[Any]) -> dict[Any, str]:
         with self._lock:
-            return {s: self.channel_of[s] for s in subjects if s in self.channel_of}
+            return {s: self.policy_of[s] for s in subjects if s in self.policy_of}
 
     @contextmanager
     def guard(self, keys: list[str]) -> Iterator[None]:
@@ -191,11 +191,11 @@ class MemoryDriver:
         with self._lock:
             self.limiter.update(values)
 
-    def running(self, name: str, channels: tuple[str | None, ...] | None) -> int:
+    def running(self, name: str, policies: tuple[str | None, ...] | None) -> int:
         with self._lock:
             return sum(1 for (s, n), row in self.rows.items()
                        if n == name and row.status == NODE_RUNNING
-                       and (channels is None or self.channel_of.get(s) in channels))
+                       and (policies is None or self.policy_of.get(s) in policies))
 
     def pin(self, subjects: list[Any], version: str) -> int:
         with self._lock:

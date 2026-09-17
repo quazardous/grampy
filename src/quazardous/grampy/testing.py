@@ -527,9 +527,9 @@ class JournalContract:
         journal.signal(["s1"], "email.clicked")
         assert journal.settle(harness.candidates(["s1"]))["clicked"] == {NODE_DONE: 1}
 
-    # -- channels ----------------------------------------------------------------
+    # -- policies ----------------------------------------------------------------
 
-    def _channelled(self):
+    def _policied(self):
         """ONBOARDING and FLAKY in one graph, where `slow` waits longer, retries
         more and gets a longer lease than the defaults."""
         nodes = (
@@ -538,32 +538,32 @@ class JournalContract:
             Node("call", parents=("send",), retry=Retry(limit=1, delay="10s"), lease="1h"),
             Node("survey", parents=("send",), optional=True, grace="1d"),
         )
-        return Graph(Document("channels"), nodes, channels={"slow": {
+        return Graph(Document("policies"), nodes, policies={"slow": {
             "clicked": {"timeout": "30d"},
             "call": {"retry": Retry(limit=3, delay="1m"), "lease": "5h"},
             "survey": {"grace": "10d"},
         }})
 
-    def test_a_subject_carries_its_channel(self, harness, clock):
-        journal = harness.journal(self._channelled(), clock)
+    def test_a_subject_carries_its_policy(self, harness, clock):
+        journal = harness.journal(self._policied(), clock)
         assert journal.enroll(["a", "b"], "slow") == 2
-        assert journal.channel("a") == "slow"
-        assert journal.channel("c") is None
+        assert journal.policy("a") == "slow"
+        assert journal.policy("c") is None
         journal.enroll(["b"], None)
-        assert journal.channel("b") is None
+        assert journal.policy("b") is None
         assert journal.settings("call", "slow").lease == "5h"
         assert journal.settings("call", None).lease == "1h"
 
     def test_a_source_that_needs_an_extra_step_skips_it_elsewhere(self, harness, clock):
         """THE DOCUMENTED WAY to give one source a step the others do not
         take (docs/rules.md): the node is optional for everyone, and the
-        channel that does not want it gives it a grace, so `settle` skips
+        policy that does not want it gives it a grace, so `settle` skips
         it — `skipped` satisfies what follows."""
         graph = Graph(Document("offers"), (
             Node("scrape"),
             Node("enrich", parents=("scrape",), optional=True),
             Node("publish", parents=("enrich",)),
-        ), channels={"plain": {"enrich": {"grace": "1s"}}})
+        ), policies={"plain": {"enrich": {"grace": "1s"}}})
         journal = harness.journal(graph, clock)
         journal.enroll(["plain1"], "plain")
         clock.now = "2026-01-01T00:00:00+00:00"
@@ -571,7 +571,7 @@ class JournalContract:
 
         clock.now = "2026-01-01T00:00:05+00:00"
         assert journal.settle(harness.candidates(["rich1", "plain1"])) == {
-            "enrich": {NODE_SKIPPED: 1}}, "only the channel with a grace"
+            "enrich": {NODE_SKIPPED: 1}}, "only the policy with a grace"
         assert journal.progress("plain1")["enrich"] == NODE_SKIPPED
         assert "enrich" not in journal.progress("rich1"), "no grace: never skipped alone"
 
@@ -580,8 +580,8 @@ class JournalContract:
         self._run(harness, journal, "enrich", ["rich1"])
         assert self._claim(harness, journal, "publish", ["rich1"]) == ["rich1"]
 
-    def test_a_channel_changes_retries_leases_timeouts_and_graces(self, harness, clock):
-        journal = harness.journal(self._channelled(), clock)
+    def test_a_policy_changes_retries_leases_timeouts_and_graces(self, harness, clock):
+        journal = harness.journal(self._policied(), clock)
         journal.enroll(["slow"], "slow")
         clock.now = "2026-01-01T00:00:00+00:00"
         self._run(harness, journal, "send", ["slow", "fast"])
@@ -732,15 +732,15 @@ class JournalContract:
         assert self._claim(harness, journal, "call", subjects) == [], (
             "the minute band is full again, the hour band is spent")
 
-    def test_per_channel_gives_each_channel_its_own_budget(self, harness, clock):
-        graph = Graph(Document("api"), (Node("call", concurrency=1, per="channel"),),
-                      channels={"big": {"call": {"concurrency": 3}}})
+    def test_per_policy_gives_each_policy_its_own_budget(self, harness, clock):
+        graph = Graph(Document("api"), (Node("call", concurrency=1, per="policy"),),
+                      policies={"big": {"call": {"concurrency": 3}}})
         journal = harness.journal(graph, clock)
         journal.enroll(["b1", "b2", "b3", "b4"], "big")
         journal.enroll(["s1", "s2"], "small")
         taken = self._claim(harness, journal, "call", ["b1", "b2", "b3", "b4", "s1", "s2", "x"])
         assert sorted(taken, key=str) == ["b1", "b2", "b3", "s1", "x"], (
-            "3 for big, 1 for small, 1 for the subjects without a channel")
+            "3 for big, 1 for small, 1 for the subjects without a policy")
 
     def test_a_claim_racing_another_never_exceeds_the_concurrency(self, harness, clock):
         """One claim takes the whole budget and has not committed yet; a second
@@ -932,9 +932,9 @@ class JournalContract:
         clock.now = _at(1)
         assert self._settle(harness, journal, ["s1"]) == 1, "urgent: no hour of cooldown"
 
-    def test_a_channel_tunes_its_lane(self, harness, clock):
+    def test_a_policy_tunes_its_lane(self, harness, clock):
         graph = Graph(Document("listings"), LISTING,
-                      channels={"fast": {"arrive": {"lane": Lane.throttle(cooldown="5m")}}})
+                      policies={"fast": {"arrive": {"lane": Lane.throttle(cooldown="5m")}}})
         journal = harness.journal(graph, clock)
         journal.enroll(["slow1"], None)
         journal.enroll(["fast1"], "fast")
@@ -948,7 +948,7 @@ class JournalContract:
         assert journal.arrival("slow1", "arrive") is not None
         with pytest.raises(DagError, match="never adds or removes"):
             Graph(Document("listings"), LISTING,
-                  channels={"fast": {"scrape": {"lane": Lane()}}})
+                  policies={"fast": {"scrape": {"lane": Lane()}}})
 
     def test_a_lane_lets_arrivals_in_by_place_within_its_rate(self, harness, clock):
         nodes = (Node("arrive", lane=Lane(), rate=(Rate(1, "1m"),)), *LISTING[1:])

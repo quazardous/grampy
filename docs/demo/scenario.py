@@ -48,11 +48,11 @@ GRAPH = Graph(Document("brick-sorter", version="1", namespace="demo"), (
          on={"quarantine": ("failed",), "defuse": ("failed",)}),
     # TWO KINDS OF BRICK, ONE WORKFLOW. `polish` belongs to everyone and is
     # OPTIONAL: the adapter below says it is not for salvage bricks. The
-    # channel's grace is the safety net, for a line running no polisher at
-    # all. A channel changes settings, never the structure.
+    # policy's grace is the safety net, for a line running no polisher at
+    # all. A policy changes settings, never the structure.
     Node("polish", parents=("sort",), optional=True),
     Node("pack", parents=("polish", "defuse")),
-), channels={"salvage": {"polish": {"grace": "20s"}}})
+), policies={"salvage": {"polish": {"grace": "20s"}}})
 # --8<-- [end:graph]
 
 
@@ -74,8 +74,10 @@ class Bricks(Adapter):
         """Your storage, your query — here, a dict."""
         return [self.bricks[i] for i in ids if i in self.bricks]
 
-    def channel_of(self, brick):
-        """Which crate it came from: the settings under that name apply."""
+    def policy_of(self, brick):
+        """THE BUSINESS WORD BECOMES AN OPERATING ONE. The factory knows
+        about crates; grampy only knows there are settings under this name.
+        Mapping one to the other is the factory's job, right here."""
         return brick.crate
 
     def ref_of(self, brick):
@@ -98,7 +100,7 @@ LAYOUT = {
     "polish": (3, 0), "defuse": (3, 2), "pack": (4, 0), "reject": (4, 2),
 }
 
-#: Where a brick comes from. Salvage bricks are not polished — the channel
+#: Where a brick comes from. Salvage bricks are not polished — the policy
 #: gives `polish` a grace, and the janitor skips it for them.
 CRATES = ("factory", "salvage")
 

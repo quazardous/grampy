@@ -218,7 +218,7 @@ class Node:
 
     `rate` (bands of `timing.Rate`) and `concurrency` protect what the node
     uses: a claim takes no more than the bands let through, nor more than
-    `concurrency` rows running at once. `per="channel"` gives each channel
+    `concurrency` rows running at once. `per="policy"` gives each policy
     its own budget; `per="all"` shares one.
 
     `lane` makes the node a WAY IN for subjects that come back (`Lane`): no
@@ -490,8 +490,8 @@ def check_dag(dag: tuple[Node, ...]) -> None:
                     f"worked, so it cannot take {unfit}")
         elif n.timeout is not None:
             raise DagError(f"node {n.name!r}: a timeout needs a wait")
-        if n.per not in ("all", "channel"):
-            raise DagError(f"node {n.name!r}: per={n.per!r} — expected 'all' or 'channel'")
+        if n.per not in ("all", "policy"):
+            raise DagError(f"node {n.name!r}: per={n.per!r} — expected 'all' or 'policy'")
         if n.concurrency is not None and n.concurrency < 1:
             raise DagError(f"node {n.name!r}: concurrency {n.concurrency} — at least 1")
         if any(not isinstance(band, Rate) for band in n.rate):

@@ -145,7 +145,7 @@ journal.expire()</code></pre>
   <h2 id="legend-title" class="section-title">What you are looking at</h2>
   <ul>
     <li><span class="glyph glyph-lane"></span><span><b>inbox</b> is a <code>Lane.throttle</code>: a brick sent back waits there 30 s after its last pass — sent back again meanwhile, it keeps its place and takes the latest version — and never more than 90 s.</span></li>
-    <li><span class="glyph glyph-queue"></span><span><b>polish</b> is <code>optional</code>, and the <b>salvage</b> crate (a blue dot on the brick) skips it: that channel gives the node a <code>grace</code>, so the janitor skips it and nothing downstream waits. A channel changes settings, never the shape of the workflow.</span></li>
+    <li><span class="glyph glyph-queue"></span><span><b>polish</b> is <code>optional</code>, and the <b>salvage</b> crate (a blue dot on the brick) skips it: that policy gives the node a <code>grace</code>, so the janitor skips it and nothing downstream waits. A policy changes settings, never the shape of the workflow.</span></li>
     <li><span class="glyph glyph-choice"></span><span><b>scan</b> is a <code>choice</code>: it names its branch, and the branch not taken is marked <code>omitted</code>.</span></li>
     <li><span class="glyph glyph-wait"></span><span><b>quarantine</b> is a <code>wait</code>: the brick sits on the shelf until the bomb squad's signal arrives, or fails after its 90 s timeout.</span></li>
     <li><span class="glyph glyph-retry"></span><span><b>defuse</b> has a <code>Retry(limit=3, exponential)</code>: a failure goes round the return belt and comes back later — 8 s, 16 s, 32 s.</span></li>

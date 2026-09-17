@@ -19,9 +19,9 @@ EVERY MECHANISM HAS A SHAPE — NOTHING DECLARED IS LEFT UNDRAWN
     on failed        a dashed red edge labelled with the statuses it accepts
     loop             a dotted edge back to `to`, labelled `loop ≤max`
     retry            `retry ×limit` on the node
-    rate             `rate limit/period` per band, `≤n at once`, `per channel`
+    rate             `rate limit/period` per band, `≤n at once`, `per policy`
     lease            `⏱ lease` on the node
-    channels         `varies by channel` when a channel changes the node
+    policies         `varies by policy` when a policy changes the node
 
 A drawing that silently left out a loop or a failure edge would show a
 workflow simpler than the one that runs; the tests confront every
@@ -185,12 +185,12 @@ def _state_notes(n: Node, varying: set[str]) -> list[str]:
         notes.append("rate " + " + ".join(f"{b.limit}/{b.period}" for b in n.rate))
     if n.concurrency is not None:
         notes.append(f"≤{n.concurrency} at once")
-    if (n.rate or n.concurrency is not None) and n.per == "channel":
-        notes.append("per channel")
+    if (n.rate or n.concurrency is not None) and n.per == "policy":
+        notes.append("per policy")
     if n.once:
         notes.append("once")
     if n.name in varying:
-        notes.append("varies by channel")
+        notes.append("varies by policy")
     return notes
 
 
@@ -238,10 +238,10 @@ def to_dot(graph: Any, counts: Mapping[str, Mapping[str, int]] | None = None,
 
 
 def _nodes(graph: Any) -> tuple[tuple[Node, ...], set[str]]:
-    """The nodes, and the names a channel changes."""
+    """The nodes, and the names a policy changes."""
     nodes = tuple(getattr(graph, "nodes", graph))
-    channels = getattr(graph, "channels", {}) or {}
-    varying = {name for overrides in channels.values() for name in overrides}
+    policies = getattr(graph, "policies", {}) or {}
+    varying = {name for overrides in policies.values() for name in overrides}
     return nodes, varying
 
 
@@ -263,8 +263,8 @@ def _label(n: Node, varying: set[str], counts: Mapping[str, Mapping[str, int]] |
         badges.append("rate " + " + ".join(f"{b.limit}/{b.period}" for b in n.rate))
     if n.concurrency is not None:
         badges.append(f"≤{n.concurrency} at once")
-    if (n.rate or n.concurrency is not None) and n.per == "channel":
-        badges.append("per channel")
+    if (n.rate or n.concurrency is not None) and n.per == "policy":
+        badges.append("per policy")
     if n.lease is not None:
         badges.append(f"⏱ {n.lease}")
     if n.once:
@@ -272,7 +272,7 @@ def _label(n: Node, varying: set[str], counts: Mapping[str, Mapping[str, int]] |
     if badges:
         lines.append(" · ".join(badges))
     if n.name in varying:
-        lines.append("varies by channel")
+        lines.append("varies by policy")
     if counts is not None and n.name in counts:
         shown = [f"{mark}{counts[n.name][status]}" for status, mark in _COUNT_MARKS
                  if counts[n.name].get(status)]

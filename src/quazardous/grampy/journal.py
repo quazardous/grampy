@@ -6,7 +6,7 @@
     forget    erase it — "never started", the initial state
     release   give back the leases of a dead worker
     expire    give back every lease held longer than its node allows
-    enroll    give subjects a channel, whose settings then apply to them
+    enroll    give subjects a policy, whose settings then apply to them
     migrate   move subjects pinned to another graph onto this one
     signal    record that an awaited event happened, for subjects
     arrive    a subject comes back: it waits in a lane before running again
@@ -159,8 +159,8 @@ class Entry(NamedTuple):
     due: dict[str, str] = {}
     #: `{node: finished_at}` for the concluded rows among `rows`.
     finished: dict[str, str] = {}
-    #: The subject's channel, None when it has none.
-    channel: str | None = None
+    #: The subject's policy, None when it has none.
+    policy: str | None = None
     #: The graph the subject is pinned to, None before its first write.
     version: str | None = None
 
@@ -234,13 +234,13 @@ class JournalDriver(Protocol):
                 only: tuple[str, ...] | None = None, exclude: tuple[str, ...] = (),
                 version: str | None = None) -> int:
         """ARCHIVE with reason `release` and delete the RUNNING rows started
-        before `older_than` — of subjects whose channel is in `only` when
-        given, and not in `exclude` (a subject without channel is never in
+        before `older_than` — of subjects whose policy is in `only` when
+        given, and not in `exclude` (a subject without policy is never in
         either) — and, when `version` is given, of subjects pinned to it or
         to none."""
 
-    def enroll(self, subjects: list[Any], channel: str | None) -> int:
-        """Record each subject's channel in the registry (the revisions),
+    def enroll(self, subjects: list[Any], policy: str | None) -> int:
+        """Record each subject's policy in the registry (the revisions),
         creating its entry when needed. Return the count written."""
 
     def pin(self, subjects: list[Any], version: str) -> int:
@@ -258,8 +258,8 @@ class JournalDriver(Protocol):
         waiting in those nodes deleted and renamed alike — pin the subject
         to `version`, overwriting, and raise its revision."""
 
-    def channels(self, subjects: list[Any]) -> dict[Any, str]:
-        """`{subject: channel}` for the subjects that have one."""
+    def policies(self, subjects: list[Any]) -> dict[Any, str]:
+        """`{subject: policy}` for the subjects that have one."""
 
     def history(self, subject: Any) -> list[dict[str, Any]]:
         """The archived rows of one subject, oldest archive first (ties by
@@ -325,10 +325,10 @@ class JournalDriver(Protocol):
     def set_limits(self, values: dict[str, float]) -> None:
         """Store limiter state, creating the keys as needed."""
 
-    def running(self, name: str, channels: tuple[str | None, ...] | None) -> int:
-        """How many rows of `name` are RUNNING — of subjects whose channel is
-        in `channels` (None in it stands for "no channel"), or of all
-        subjects when `channels` is None."""
+    def running(self, name: str, policies: tuple[str | None, ...] | None) -> int:
+        """How many rows of `name` are RUNNING — of subjects whose policy is
+        in `policies` (None in it stands for "no policy"), or of all
+        subjects when `policies` is None."""
 
     def progress(self, subject: Any) -> dict[str, str]:
         """`{node: status}` for one subject."""
@@ -351,8 +351,8 @@ class NodeJournal:
     def __init__(self, driver: JournalDriver, dag: tuple[Node, ...] | Graph, *,
                  clock: Callable[[], str] | None = None,
                  rng: random.Random | None = None) -> None:
-        """`dag` is a tuple of nodes, or a `Graph` whose channels change some
-        settings per source. `clock` defaults to the driver's
+        """`dag` is a tuple of nodes, or a `Graph` whose policies change some
+        settings per policy. `clock` defaults to the driver's
         (`JournalDriver.now`): workers on several machines then share one
         time. `rng` spreads retry jitter."""
         self.driver = driver
@@ -401,7 +401,7 @@ class NodeJournal:
         parents = n.parents if require_parents and not n.custom_join else ()
         now = self._clock()
         chosen: list[tuple[Any, int]] = []
-        channel_of: dict[Any, str | None] = {}
+        policy_of: dict[Any, str | None] = {}
         seen: set[Any] = set()
         for page in self.driver.scan(candidates, name=name,
                                      nodes=(name, *n.parents, *after),
@@ -414,7 +414,7 @@ class NodeJournal:
                 seen.add(e.subject)
                 if self._takable(n, after, _due_away(name, e, now), require_parents):
                     chosen.append((e.subject, e.revision))
-                    channel_of[e.subject] = e.channel
+                    policy_of[e.subject] = e.policy
                     if len(chosen) >= limit:
                         break
             if len(chosen) >= limit:
@@ -426,7 +426,7 @@ class NodeJournal:
         # claim may take fewer than `limit`, never a wrong one.
         if chosen and self._limited(n):
             taken = self._within_limits(
-                n, chosen, channel_of, now,
+                n, chosen, policy_of, now,
                 lambda group: self.driver.insert_if_unchanged(
                     name, group, status=NODE_RUNNING, now=now, lease=token))
         else:
@@ -441,23 +441,23 @@ class NodeJournal:
             v.rate or v.concurrency is not None for _, v in self._variants(n.name))
 
     def _within_limits(self, n: Node, chosen: list[tuple[Any, int]],
-                       channel_of: dict[Any, str | None], now: str,
+                       policy_of: dict[Any, str | None], now: str,
                        write: Callable[[list[tuple[Any, int]]], list[Any]]) -> list[Any]:
         """RATE AND CONCURRENCY, decided here, kept by the storage's guard.
 
         Candidates are grouped by budget — one for the node, or one per
-        channel with `per="channel"`. Under the guard of every budget's keys,
+        policy with `per="policy"`. Under the guard of every budget's keys,
         each group is cut to what `concurrency` leaves free and what the rate
         bands let through (`timing.admit`), written by `write` — a claim, or
         a lane letting subjects in — and the bands advance by what was
         actually written."""
         groups: dict[str | None, list[tuple[Any, int]]] = {}
         for subject, revision in chosen:
-            budget = channel_of.get(subject) if n.per == "channel" else None
+            budget = policy_of.get(subject) if n.per == "policy" else None
             groups.setdefault(budget, []).append((subject, revision))
         keys: dict[str | None, tuple[Node, list[str], str]] = {}
         for budget in groups:
-            seen_by = self.settings(n.name, budget) if n.per == "channel" else n
+            seen_by = self.settings(n.name, budget) if n.per == "policy" else n
             prefix = f"{n.name}|{budget if budget is not None else '*'}"
             keys[budget] = (seen_by, [f"rate|{prefix}|{i}" for i in range(len(seen_by.rate))],
                             f"running|{prefix}")
@@ -472,7 +472,7 @@ class NodeJournal:
                 allowed = len(group)
                 if seen_by.concurrency is not None:
                     busy = self.driver.running(
-                        n.name, None if n.per != "channel" else (budget,))
+                        n.name, None if n.per != "policy" else (budget,))
                     allowed = min(allowed, max(0, seen_by.concurrency - busy))
                 if seen_by.rate:
                     allowed, _ = admit(seen_by.rate, [stored.get(k) for k in band_keys],
@@ -537,10 +537,10 @@ class NodeJournal:
         subjects = _unique(subjects)
         now = self._clock()
         touched = 0
-        retry_of = self._per_channel(name, "retry", subjects)
+        retry_of = self._per_policy(name, "retry", subjects)
         if any(r is not None for r in retry_of.values()) and status == NODE_FAILED \
                 and branch is None:
-            # FIRST, THE RETRIES — each subject under its channel's policy: under
+            # FIRST, THE RETRIES — each subject under its policy's policy: under
             # the limit, the failure is archived and the node scheduled again,
             # later for later attempts.
             tries = self.driver.archived(subjects, name, "retry")
@@ -683,29 +683,29 @@ class NodeJournal:
         now = self._clock()
         released: dict[str, int] = {}
         for n in self.dag:
-            special = {channel: variant.lease for channel, variant in self._variants(n.name)
+            special = {policy: variant.lease for policy, variant in self._variants(n.name)
                        if variant.lease != n.lease}
             count = 0
             if n.lease is not None:
                 count += self.driver.release(
                     n.name, older_than=shift(now, -seconds(n.lease)), now=now,
                     exclude=tuple(sorted(special)), version=self.version)
-            for channel, lease in special.items():
+            for policy, lease in special.items():
                 if lease is not None:
                     count += self.driver.release(
                         n.name, older_than=shift(now, -seconds(lease)), now=now,
-                        only=(channel,), version=self.version)
+                        only=(policy,), version=self.version)
             if count:
                 released[n.name] = count
         return released
 
-    def enroll(self, subjects: list[Any], channel: str | None) -> int:
-        """Give these subjects a CHANNEL — their source. The graph's settings
-        for that channel (retries, leases, timeouts, graces) then apply to
+    def enroll(self, subjects: list[Any], policy: str | None) -> int:
+        """Give these subjects a POLICY — their source. The graph's settings
+        for that policy (retries, leases, timeouts, graces) then apply to
         them; the structure of the workflow stays the same for all."""
         if not subjects:
             return 0
-        count = self.driver.enroll(_unique(subjects), channel)
+        count = self.driver.enroll(_unique(subjects), policy)
         self._pin(_unique(subjects))
         return count
 
@@ -804,32 +804,32 @@ class NodeJournal:
                                 version=target_version, now=now)
         return len(plans)
 
-    def channel(self, subject: Any) -> str | None:
-        """The subject's channel, None when it has none."""
-        return self.driver.channels([subject]).get(subject)
+    def policy(self, subject: Any) -> str | None:
+        """The subject's policy, None when it has none."""
+        return self.driver.policies([subject]).get(subject)
 
-    def settings(self, name: str, channel: str | None) -> Node:
-        """The node as a subject of `channel` sees it."""
+    def settings(self, name: str, policy: str | None) -> Node:
+        """The node as a subject of `policy` sees it."""
         node(name, self.dag)
         if self.graph is None:
             return node(name, self.dag)
-        return node(name, self.graph.variant(channel))
+        return node(name, self.graph.variant(policy))
 
     def _variants(self, name: str) -> list[tuple[str, Node]]:
         if self.graph is None:
             return []
-        return [(channel, node(name, self.graph.variant(channel)))
-                for channel in self.graph.channels]
+        return [(policy, node(name, self.graph.variant(policy)))
+                for policy in self.graph.policies]
 
-    def _per_channel(self, name: str, setting: str, subjects: list[Any]) -> dict[Any, Any]:
-        """`{subject: value of `setting` on `name` for its channel}`."""
+    def _per_policy(self, name: str, setting: str, subjects: list[Any]) -> dict[Any, Any]:
+        """`{subject: value of `setting` on `name` for its policy}`."""
         default = getattr(node(name, self.dag), setting)
         if self.graph is None or not any(
                 name in overrides and setting in overrides[name]
-                for overrides in self.graph.channels.values()):
+                for overrides in self.graph.policies.values()):
             return dict.fromkeys(subjects, default)
-        channels = self.driver.channels(subjects)
-        return {s: getattr(self.settings(name, channels.get(s)), setting) for s in subjects}
+        policies = self.driver.policies(subjects)
+        return {s: getattr(self.settings(name, policies.get(s)), setting) for s in subjects}
 
     def signal(self, subjects: list[Any], event: str, ref: str | None = None) -> int:
         """Record that `event` happened for these subjects — DURABLY, before
@@ -862,7 +862,7 @@ class NodeJournal:
         if not subjects:
             return out
         now = self._clock()
-        lane_of = self._per_channel(name, "lane", subjects)
+        lane_of = self._per_policy(name, "lane", subjects)
         after = (name, *sorted(descendants(name, self.dag)))
         groups: dict[Lane, list[Any]] = {}
         for subject in subjects:
@@ -937,7 +937,7 @@ class NodeJournal:
                 went_back = self.driver.latest(subjects, n.name, None)
             for e in ready:
                 since = _joined_since(n, e)
-                seen_by = self.settings(n.name, e.channel)
+                seen_by = self.settings(n.name, e.policy)
                 if n.wait is not None:
                     at = heard.get(e.subject)
                     if at is not None and at >= went_back.get(e.subject, ""):
@@ -985,7 +985,7 @@ class NodeJournal:
                 continue
             if any(e.rows.get(x) in (NODE_RUNNING, NODE_SCHEDULED) for x in pass_nodes):
                 continue
-            lane = self.settings(n.name, e.channel).lane
+            lane = self.settings(n.name, e.policy).lane
             assert lane is not None
             if not arrival.urgent:
                 ready = [arrival.place]
@@ -1008,7 +1008,7 @@ class NodeJournal:
 
         if self._limited(n):
             return len(self._within_limits(
-                n, chosen, {s: entries[s].channel for s, _ in chosen}, now, write))
+                n, chosen, {s: entries[s].policy for s, _ in chosen}, now, write))
         return len(write(chosen))
 
     def history(self, subject: Any) -> list[dict[str, Any]]:

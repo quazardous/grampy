@@ -24,7 +24,7 @@ class Bricks(Adapter):
     def id_of(self, brick):      return brick.id
     def load(self, ids):         return Brick.objects.filter(id__in=list(ids))
 
-    def channel_of(self, brick): return brick.crate          # its source
+    def policy_of(self, brick): return brick.crate          # its operating policy
     def ref_of(self, brick):     return brick.content_hash   # its version, in a lane
     def branch(self, brick, node):
         return "quarantine" if brick.tnt else "sort"
@@ -37,7 +37,7 @@ items = Items(journal, Bricks())
 Then the application stops handling ids:
 
 ```python
-items.admit(new_bricks)                # channel read off each brick, once
+items.admit(new_bricks)                # policy read off each brick, once
 items.arrive("inbox", new_bricks)      # ref too
 
 lease = items.claim("sort", 10, candidates=my_loader())   # BRICKS in…
@@ -81,7 +81,7 @@ silently never happening. That costs a claim on a step not done: a hot path
 may prefer to leave those subjects out of `candidates` in the first place —
 which subjects a worker offers has always been
 [your sentence](drivers.md#candidates-are-your-sentence) — and keep a
-channel `grace` as the safety net for the ones nobody takes.
+policy `grace` as the safety net for the ones nobody takes.
 
 `branch(item, node)` does the same for a `choice`: instead of working out
 the branch by hand at every call site, the handler reads the item and names
@@ -105,7 +105,7 @@ right choice when you already hold ids and no objects.
 
 | | |
 |---|---|
-| `admit(items)` | record each item's channel, once |
+| `admit(items)` | record each item's policy, once |
 | `arrive(node, items, urgent=False)` | a lane, each item bringing its `ref_of` |
 | `claim(node, limit, candidates=…)` | items in (reused) or a driver query; an `ItemLease` out |
 | `conclude(node, items, token=None, status=…)` | asks `branch` for a choice |

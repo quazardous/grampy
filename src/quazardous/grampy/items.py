@@ -3,12 +3,12 @@
     class Bricks(Adapter):
         def id_of(self, brick):      return brick.id
         def load(self, ids):         return [BRICKS[i] for i in ids]
-        def channel_of(self, brick): return brick.crate
+        def policy_of(self, brick): return brick.crate
         def applies(self, brick, node):
             return node != "polish" or brick.crate == "factory"
 
     items = Items(journal, Bricks())
-    items.admit(bricks)                          # channel read from the item
+    items.admit(bricks)                          # policy read from the item
     lease = items.claim("sort", 10, candidates=query)
     for brick in lease:                          # OBJECTS, loaded in one call
         ...
@@ -45,7 +45,7 @@ silently never happening.
 That spends a claim on a step not done. A hot path may prefer to leave
 those subjects out of `candidates` in the first place — which subjects a
 worker offers has always been the application's sentence — and keep a
-channel `grace` as the safety net for the ones nobody takes.
+policy `grace` as the safety net for the ones nobody takes.
 """
 from __future__ import annotations
 
@@ -79,9 +79,9 @@ class Adapter:
 
     # -- optional ----------------------------------------------------------
 
-    def channel_of(self, item: Any) -> str | None:
+    def policy_of(self, item: Any) -> str | None:
         """Which source this item came from, as a label. The graph's settings
-        for that channel then apply to it. `None` means no channel."""
+        for that policy then apply to it. `None` means no policy."""
         return None
 
     def ref_of(self, item: Any) -> str | None:
@@ -121,15 +121,15 @@ class Items:
     # -- the door ----------------------------------------------------------
 
     def admit(self, items: Sequence[Any]) -> int:
-        """Take these items in: record each one's channel, once. Items
-        sharing a channel are enrolled together. Return the count."""
-        by_channel: dict[str | None, list[Any]] = {}
+        """Take these items in: record each one's policy, once. Items
+        sharing a policy are enrolled together. Return the count."""
+        by_policy: dict[str | None, list[Any]] = {}
         for item in items:
-            by_channel.setdefault(self.adapter.channel_of(item), []).append(
+            by_policy.setdefault(self.adapter.policy_of(item), []).append(
                 self.adapter.id_of(item))
         written = 0
-        for channel, ids in by_channel.items():
-            written += self.journal.enroll(ids, channel)
+        for policy, ids in by_policy.items():
+            written += self.journal.enroll(ids, policy)
         return written
 
     def arrive(self, name: str, items: Sequence[Any], *,

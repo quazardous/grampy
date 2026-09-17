@@ -30,8 +30,8 @@ the drawing.
 | on failed | a dashed red edge, labelled | an outcome `<<choice>>` |
 | loop | a dotted edge back, `loop ≤max` | a transition back |
 | retry | `retry ×limit` on the node | a transition to itself |
-| rate, concurrency | `rate 100/1m`, `≤4 at once`, `per channel` | a note |
-| changed by a channel | `varies by channel` | a note |
+| rate, concurrency | `rate 100/1m`, `≤4 at once`, `per policy` | a note |
+| changed by a policy | `varies by policy` | a note |
 
 Counts (`overlay(journal)`) are a second layer on the flowchart only: Mermaid
 cannot style the states of a state diagram the way it styles a flowchart's

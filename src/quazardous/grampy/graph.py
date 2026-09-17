@@ -1,8 +1,8 @@
 """THE GRAPH AS DATA — a workflow that can be written, read, stored, drawn.
 
     Document   who the graph is: dsl, namespace, name, version
-    Graph      a document, its nodes, and per-channel settings, all checked
-    OVERRIDABLE  the node settings a channel may change
+    Graph      a document, its nodes, and per-policy settings, all checked
+    OVERRIDABLE  the node settings a policy may change
     to_dict / from_dict, to_json / from_json
 
 ────────────────────────────────────────────────────────────────────────
@@ -42,10 +42,10 @@ DSL = "grampy/1"
 
 _NODE_FLAGS = ("optional", "once", "choice")
 
-#: WHAT A CHANNEL MAY CHANGE ON A NODE: its settings, never its structure.
+#: WHAT A POLICY MAY CHANGE ON A NODE: its settings, never its structure.
 #: Parents, joins, choices, loops and waits are the workflow; how long to
-#: wait, how often to retry, how long a lease lasts are how a source is
-#: treated.
+#: wait, how often to retry, how long a lease lasts are how hard a subject
+#: under that policy is pushed.
 OVERRIDABLE = ("retry", "lease", "timeout", "grace", "rate", "concurrency", "lane")
 _NODE_LABELS = ("working", "state")
 
@@ -77,46 +77,46 @@ class Document:
 
 @dataclass(frozen=True)
 class Graph:
-    """A document, its nodes, and the settings some CHANNELS change.
-    `check_dag` runs on construction, on the nodes and on every channel's
-    variant: a Graph that exists holds together for every source.
+    """A document, its nodes, and the settings some POLICIES change.
+    `check_dag` runs on construction, on the nodes and on every policy's
+    variant: a Graph that exists holds together under every policy.
 
-        Graph(doc, nodes, channels={"partner-a": {"call": {"retry": Retry(5, "1m")}}})
+        Graph(doc, nodes, policies={"slow-partner": {"call": {"retry": Retry(5, "1m")}}})
     """
 
     document: Document
     nodes: tuple[Node, ...]
-    channels: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
+    policies: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "nodes", tuple(self.nodes))
         check_dag(self.nodes)
         names = {n.name for n in self.nodes}
-        for channel, overrides in self.channels.items():
+        for policy, overrides in self.policies.items():
             for name, settings in overrides.items():
                 if name not in names:
-                    raise DagError(f"channel {channel!r} changes {name!r}, which does not exist")
+                    raise DagError(f"policy {policy!r} changes {name!r}, which does not exist")
                 refused = sorted(set(settings) - set(OVERRIDABLE))
                 if refused:
                     raise DagError(
-                        f"channel {channel!r} changes {refused} on {name!r} — a channel "
+                        f"policy {policy!r} changes {refused} on {name!r} — a policy "
                         f"changes only {list(OVERRIDABLE)}, never the structure")
                 shared = sorted({"rate", "concurrency"} & set(settings))
                 base = next(n for n in self.nodes if n.name == name)
                 if "lane" in settings and (base.lane is None or settings["lane"] is None):
                     raise DagError(
-                        f"channel {channel!r} changes the lane of {name!r}: a channel tunes "
+                        f"policy {policy!r} changes the lane of {name!r}: a policy tunes "
                         f"a lane the node declares, it never adds or removes one")
-                if shared and base.per != "channel":
+                if shared and base.per != "policy":
                     raise DagError(
-                        f"channel {channel!r} changes {shared} on {name!r}, whose budget is "
-                        f"shared by every channel — declare per='channel' first")
-            check_dag(self.variant(channel))
+                        f"policy {policy!r} changes {shared} on {name!r}, whose budget is "
+                        f"shared by every policy — declare per='policy' first")
+            check_dag(self.variant(policy))
 
-    def variant(self, channel: str | None) -> tuple[Node, ...]:
-        """The nodes as `channel` sees them: its settings over the defaults.
-        An unknown channel, or none, sees the defaults."""
-        overrides = self.channels.get(channel, {}) if channel is not None else {}
+    def variant(self, policy: str | None) -> tuple[Node, ...]:
+        """The nodes as `policy` sees them: its settings over the defaults.
+        An unknown policy, or none, sees the defaults."""
+        overrides = self.policies.get(policy, {}) if policy is not None else {}
         return tuple(replace(n, **overrides[n.name]) if n.name in overrides else n
                      for n in self.nodes)
 
@@ -158,12 +158,12 @@ class Graph:
         out: dict[str, Any] = {"document": {"dsl": d.dsl, "namespace": d.namespace,
                                             "name": d.name, "version": d.version},
                                "nodes": nodes}
-        if self.channels:
-            out["channels"] = {
-                channel: {name: {key: _setting_to_dict(key, value)
+        if self.policies:
+            out["policies"] = {
+                policy: {name: {key: _setting_to_dict(key, value)
                                  for key, value in settings.items()}
                           for name, settings in overrides.items()}
-                for channel, overrides in self.channels.items()}
+                for policy, overrides in self.policies.items()}
         return out
 
     def to_json(self, **kwargs: Any) -> str:
@@ -175,7 +175,7 @@ class Graph:
     @classmethod
     def from_dict(cls, data: Any) -> Graph:
         top = _mapping(data, "$", required=("document", "nodes"),
-                       allowed=("document", "nodes", "channels"))
+                       allowed=("document", "nodes", "policies"))
         head = _mapping(top["document"], "$.document", required=("name",),
                         allowed=("dsl", "namespace", "name", "version"))
         for key in head:
@@ -252,15 +252,15 @@ class Graph:
                               once=spec.get("once", False),
                               on={p: tuple(v) for p, v in on.items()}, need=need,
                               choice=spec.get("choice", False)))
-        channels: dict[str, dict[str, dict[str, Any]]] = {}
-        raw_channels = top.get("channels", {})
-        if not isinstance(raw_channels, dict):
-            raise GraphFormatError("$.channels: expected an object of channels by name")
-        for channel, raw_overrides in raw_channels.items():
+        policies: dict[str, dict[str, dict[str, Any]]] = {}
+        raw_policies = top.get("policies", {})
+        if not isinstance(raw_policies, dict):
+            raise GraphFormatError("$.policies: expected an object of policies by name")
+        for policy, raw_overrides in raw_policies.items():
             if not isinstance(raw_overrides, dict):
-                raise GraphFormatError(f"$.channels.{channel}: expected an object of nodes")
+                raise GraphFormatError(f"$.policies.{policy}: expected an object of nodes")
             for name, raw_settings in raw_overrides.items():
-                path = f"$.channels.{channel}.{name}"
+                path = f"$.policies.{policy}.{name}"
                 settings = _mapping(raw_settings, path, required=(), allowed=OVERRIDABLE)
                 parsed: dict[str, Any] = {}
                 for key, value in settings.items():
@@ -275,8 +275,8 @@ class Graph:
                     else:
                         _duration(value, f"{path}.{key}")
                         parsed[key] = value
-                channels.setdefault(channel, {})[name] = parsed
-        return cls(document, tuple(nodes), channels)
+                policies.setdefault(policy, {})[name] = parsed
+        return cls(document, tuple(nodes), policies)
 
     @classmethod
     def from_json(cls, text: str) -> Graph:

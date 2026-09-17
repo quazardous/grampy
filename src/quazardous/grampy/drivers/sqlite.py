@@ -22,7 +22,7 @@ two tables it expects, for an application that wants them as they are:
 
     table       subject, node, status, started_at, finished_at, lease —
                 `(subject, node)` as primary key; timestamps ISO-8601 text
-    revisions   subject (primary key), revision (integer), channel, version (text)
+    revisions   subject (primary key), revision (integer), policy, version (text)
     history     the node table's columns, plus archived_at and reason
     limits      key (text, primary key), value (real): rate and concurrency state
     arrivals    subject, node, ref, place, arrived_at (text), urgent (integer) —
@@ -96,7 +96,7 @@ def schema(table: str = "grampy_nodes", revisions: str = "grampy_revisions",
         f"started_at TEXT NOT NULL, finished_at TEXT, lease TEXT, "
         f"PRIMARY KEY ({subject}, node))",
         f"CREATE TABLE IF NOT EXISTS {revisions} ("
-        f"{subject} NOT NULL PRIMARY KEY, revision INTEGER NOT NULL, channel TEXT, "
+        f"{subject} NOT NULL PRIMARY KEY, revision INTEGER NOT NULL, policy TEXT, "
         f"version TEXT)",
         f"CREATE TABLE IF NOT EXISTS {history} ("
         f"{subject} NOT NULL, node TEXT NOT NULL, status TEXT NOT NULL, "
@@ -221,7 +221,7 @@ class SqliteDriver:
                 version: str | None = None) -> int:
         where = "node = ? AND status = ? AND started_at < ?"
         params: list[Any] = [name, NODE_RUNNING, older_than]
-        registry = f"SELECT {{s}} FROM {self.revisions} WHERE channel IN ({{marks}})"
+        registry = f"SELECT {{s}} FROM {self.revisions} WHERE policy IN ({{marks}})"
         if only is not None:
             where += " AND {s} IN (" + registry.replace("{marks}", ", ".join("?" * len(only))) + ")"
             params += list(only)
@@ -260,20 +260,20 @@ class SqliteDriver:
                 f"INSERT INTO {self.limits_table} (key, value) VALUES (?, ?) "
                 f"ON CONFLICT (key) DO UPDATE SET value = excluded.value", (key, value))
 
-    def running(self, name: str, channels: tuple[str | None, ...] | None) -> int:
+    def running(self, name: str, policies: tuple[str | None, ...] | None) -> int:
         sql = f"SELECT COUNT(*) FROM {self.table} t WHERE node = ? AND status = ?"
         params: list[Any] = [name, NODE_RUNNING]
-        if channels is not None:
-            named = [c for c in channels if c is not None]
+        if policies is not None:
+            named = [c for c in policies if c is not None]
             tests = []
             if named:
                 marks = ", ".join("?" * len(named))
                 tests.append(f"t.{self.subject} IN (SELECT {self.subject} FROM "
-                             f"{self.revisions} WHERE channel IN ({marks}))")
+                             f"{self.revisions} WHERE policy IN ({marks}))")
                 params += named
-            if None in channels:
+            if None in policies:
                 tests.append(f"t.{self.subject} NOT IN (SELECT {self.subject} FROM "
-                             f"{self.revisions} WHERE channel IS NOT NULL)")
+                             f"{self.revisions} WHERE policy IS NOT NULL)")
             sql += " AND (" + (" OR ".join(tests) or "0") + ")"
         return int(self.conn.execute(sql, params).fetchone()[0])
 
@@ -332,21 +332,21 @@ class SqliteDriver:
             self.conn.execute(f"INSERT INTO {self.table} ({columns}) VALUES (?, ?, ?, ?, ?, ?)",
                               (row[0], rename[row[1]], *row[2:]))
 
-    def enroll(self, subjects: list[Any], channel: str | None) -> int:
+    def enroll(self, subjects: list[Any], policy: str | None) -> int:
         for subject in subjects:
             self.conn.execute(
-                f"INSERT INTO {self.revisions} ({self.subject}, revision, channel) "
-                f"VALUES (?, 0, ?) ON CONFLICT ({self.subject}) DO UPDATE SET channel = ?",
-                (subject, channel, channel))
+                f"INSERT INTO {self.revisions} ({self.subject}, revision, policy) "
+                f"VALUES (?, 0, ?) ON CONFLICT ({self.subject}) DO UPDATE SET policy = ?",
+                (subject, policy, policy))
         return len(subjects)
 
-    def channels(self, subjects: list[Any]) -> dict[Any, str]:
+    def policies(self, subjects: list[Any]) -> dict[Any, str]:
         out: dict[Any, str] = {}
         for chunk in _chunks(subjects):
             marks = ", ".join("?" * len(chunk))
             out.update(self.conn.execute(
-                f"SELECT {self.subject}, channel FROM {self.revisions} "
-                f"WHERE {self.subject} IN ({marks}) AND channel IS NOT NULL", chunk).fetchall())
+                f"SELECT {self.subject}, policy FROM {self.revisions} "
+                f"WHERE {self.subject} IN ({marks}) AND policy IS NOT NULL", chunk).fetchall())
         return out
 
     def _raise_revision(self, subject: Any) -> None:
@@ -549,7 +549,7 @@ class SqliteDriver:
         due: dict[Any, dict[str, str]] = {s: {} for s in batch}
         finished: dict[Any, dict[str, str]] = {s: {} for s in batch}
         revisions: dict[Any, int] = {}
-        channel_of: dict[Any, str] = {}
+        policy_of: dict[Any, str] = {}
         version_of: dict[Any, str] = {}
         for chunk in _chunks(list(rows)):
             marks = ", ".join("?" * len(chunk))
@@ -559,12 +559,12 @@ class SqliteDriver:
             # refuse, or a revision its write will. Rows first, then the
             # revision, would pair a parent since forgotten with the revision
             # raised by forgetting it — and the write would go through.
-            for subject, revision, channel, version in self.conn.execute(
-                    f"SELECT {self.subject}, revision, channel, version FROM {self.revisions} "
+            for subject, revision, policy, version in self.conn.execute(
+                    f"SELECT {self.subject}, revision, policy, version FROM {self.revisions} "
                     f"WHERE {self.subject} IN ({marks})", chunk).fetchall():
                 revisions[subject] = revision
-                if channel is not None:
-                    channel_of[subject] = channel
+                if policy is not None:
+                    policy_of[subject] = policy
                 if version is not None:
                     version_of[subject] = version
             for subject, n, status, started, ended in self.conn.execute(
@@ -578,7 +578,7 @@ class SqliteDriver:
                 if ended is not None:
                     finished[subject][n] = ended
         return [Entry(s, int(revisions.get(s, 0)), rows[s], due[s], finished[s],
-                      channel_of.get(s), version_of.get(s)) for s in batch]
+                      policy_of.get(s), version_of.get(s)) for s in batch]
 
 
 def _check(name: str) -> None:

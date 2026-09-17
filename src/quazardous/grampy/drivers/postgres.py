@@ -16,7 +16,7 @@ none. It needs two `sqlalchemy.Table`s sharing a subject column (named by
                 `finished_at` and `lease` nullable. Timestamps are ISO-8601
                 text, compared lexically.
     revisions   the subject registry, one row per subject: `revision`, an
-                integer, `channel` and `version`, nullable text; the subject
+                integer, `policy` and `version`, nullable text; the subject
                 as primary key. Rows are created on demand.
     history     the rows taken away: the node table's columns, plus
                 `archived_at` and `reason` (text); append-only, no key
@@ -100,7 +100,7 @@ from ..journal import Arrival, Entry
 #: THE COLUMNS THE NODE TABLE MUST CARRY, besides the subject.
 REQUIRED_COLUMNS = ("node", "status", "started_at", "finished_at", "lease")
 #: THE COLUMNS THE REVISIONS TABLE MUST CARRY, besides the subject.
-REVISION_COLUMNS = ("revision", "channel", "version")
+REVISION_COLUMNS = ("revision", "policy", "version")
 #: THE COLUMNS THE HISTORY TABLE MUST CARRY, besides the subject.
 HISTORY_COLUMNS = (*REQUIRED_COLUMNS, "archived_at", "reason")
 #: THE COLUMNS THE ARRIVALS TABLE MUST CARRY, besides the subject.
@@ -179,7 +179,7 @@ class PostgresDriver:
         held = t.alias("d")
         query = (
             sa.select(candidate, c.c.grampy_rank,
-                      sa.func.coalesce(r.c.revision, 0), r.c.channel, r.c.version)
+                      sa.func.coalesce(r.c.revision, 0), r.c.policy, r.c.version)
             .select_from(c.outerjoin(r, self._rev_subject == candidate))
             .order_by(c.c.grampy_rank)
             .limit(int(page)))
@@ -310,10 +310,10 @@ class PostgresDriver:
                         t.c.started_at < older_than)
         if only is not None:
             where = sa.and_(where, self._subject.in_(
-                sa.select(self._rev_subject).where(r.c.channel.in_(list(only)))))
+                sa.select(self._rev_subject).where(r.c.policy.in_(list(only)))))
         if exclude:
             where = sa.and_(where, self._subject.not_in(
-                sa.select(self._rev_subject).where(r.c.channel.in_(list(exclude)))))
+                sa.select(self._rev_subject).where(r.c.policy.in_(list(exclude)))))
         if version is not None:
             where = sa.and_(where, self._subject.not_in(
                 sa.select(self._rev_subject).where(r.c.version.is_not(None),
@@ -346,17 +346,17 @@ class PostgresDriver:
         self._execute(insert.on_conflict_do_update(
             index_elements=["key"], set_={"value": insert.excluded.value}))
 
-    def running(self, name: str, channels: tuple[str | None, ...] | None) -> int:
+    def running(self, name: str, policies: tuple[str | None, ...] | None) -> int:
         t, r = self.table, self.revisions
         query = sa.select(sa.func.count()).select_from(t).where(
             t.c.node == name, t.c.status == NODE_RUNNING)
-        if channels is not None:
-            named = [c for c in channels if c is not None]
-            with_channel = sa.select(self._rev_subject).where(r.c.channel.in_(named))
-            test = self._subject.in_(with_channel)
-            if None in channels:
+        if policies is not None:
+            named = [c for c in policies if c is not None]
+            with_policy = sa.select(self._rev_subject).where(r.c.policy.in_(named))
+            test = self._subject.in_(with_policy)
+            if None in policies:
                 test = sa.or_(test, self._subject.not_in(
-                    sa.select(self._rev_subject).where(r.c.channel.is_not(None))))
+                    sa.select(self._rev_subject).where(r.c.policy.is_not(None))))
             query = query.where(test)
         return int(self._execute(query).scalar())
 
@@ -419,22 +419,22 @@ class PostgresDriver:
         if moved:
             self._execute(sa.insert(t).values(moved))
 
-    def enroll(self, subjects: list[Any], channel: str | None) -> int:
+    def enroll(self, subjects: list[Any], policy: str | None) -> int:
         r = self.revisions
         rows = self._execute(
             postgresql.insert(r)
-            .values([{self._rev_subject.key: s, "revision": 0, "channel": channel}
+            .values([{self._rev_subject.key: s, "revision": 0, "policy": policy}
                      for s in sorted(subjects)])
             .on_conflict_do_update(index_elements=[self._rev_subject.key],
-                                   set_={"channel": channel})
+                                   set_={"policy": policy})
             .returning(self._rev_subject)).fetchall()
         return len(rows)
 
-    def channels(self, subjects: list[Any]) -> dict[Any, str]:
+    def policies(self, subjects: list[Any]) -> dict[Any, str]:
         r = self.revisions
         return {row[0]: row[1] for row in self._execute(
-            sa.select(self._rev_subject, r.c.channel)
-            .where(self._rev_subject.in_(list(subjects)), r.c.channel.is_not(None))).fetchall()}
+            sa.select(self._rev_subject, r.c.policy)
+            .where(self._rev_subject.in_(list(subjects)), r.c.policy.is_not(None))).fetchall()}
 
     def _raise_revisions(self, subjects: list[Any]) -> None:
         r = self.revisions

@@ -44,7 +44,7 @@ class Bricks(Adapter):
         self.calls.append(f"load({sorted(ids)})")
         return [self.bricks[i] for i in ids if i in self.bricks]
 
-    def channel_of(self, brick):
+    def policy_of(self, brick):
         return brick.crate
 
     def ref_of(self, brick):
@@ -119,11 +119,11 @@ def test_an_optional_node_is_given_up_on_the_items_that_refuse_it(world):
     assert [b.id for b in items.claim("pack", 10, candidates=bricks[:2])] == [1, 2]
 
 
-def test_the_channel_and_the_ref_are_read_from_the_item(world):
+def test_the_policy_and_the_ref_are_read_from_the_item(world):
     bricks, adapter, items = world
     assert items.admit(bricks) == 3
-    assert items.journal.driver.channel_of[2] == "salvage"
-    assert items.journal.driver.channel_of[1] == "factory"
+    assert items.journal.driver.policy_of[2] == "salvage"
+    assert items.journal.driver.policy_of[1] == "factory"
 
 
 def test_an_item_that_no_longer_loads_does_not_lose_the_claim(world):

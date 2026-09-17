@@ -74,7 +74,7 @@ nodes = sa.Table("job_nodes", metadata,
 revisions = sa.Table("job_revisions", metadata,
     sa.Column("job_id", sa.Text, primary_key=True),
     sa.Column("revision", sa.Integer, nullable=False),
-    sa.Column("channel", sa.Text),
+    sa.Column("policy", sa.Text),
     sa.Column("version", sa.Text))
 history = sa.Table("job_node_history", metadata,
     *[sa.Column(c.name, c.type) for c in nodes.columns],

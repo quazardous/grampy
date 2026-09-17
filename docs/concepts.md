@@ -63,8 +63,8 @@ The differences that matter most:
 | grampy | Graphile Worker | BullMQ | Hatchet | Inngest | Temporal | Oban |
 |---|---|---|---|---|---|---|
 | **rate** bands with burst, GCRA, several at once, queued (`Node(rate=(Rate(…), …))`) | — (`forbiddenFlags` to build one) [9] | *partial:* `limiter {max, duration}`, one band [27]; *Pro* per group [21] | several `RateLimit` per task, re-queued [42] | `throttle {limit, period, burst, key}` GCRA, queued; `rateLimit` drops [45][46] | *partial:* one rate per level [68][69] | *partial, Pro:* `rate_limit` per queue, algorithm to choose [79][80] |
-| **concurrency** cap, per channel (`concurrency=`, `per="channel"`) | *partial:* `concurrentJobs` per worker [6] | `setGlobalConcurrency`; per key *Pro* groups [28][20] | `ConcurrencyExpression` per task [40] | `concurrency {limit, key, scope}` [50] | *partial:* per worker; fairness keys [68][69] | queue `limit`; *Pro* `global_limit` with partition [79] |
-| **channel** settings: retry, lease, rate, lane per source (`Graph(channels=…)`) | *partial:* options per job [2] | *partial, Pro:* `setGroupConcurrency` [29] | *partial:* keys split limits, same values [40][42] | *partial:* `key` per tenant, same limit [60] | *partial:* fairness weight per key [69] | *partial:* options per job; *Pro* runtime limits [72][81] |
+| **concurrency** cap, per policy (`concurrency=`, `per="policy"`) | *partial:* `concurrentJobs` per worker [6] | `setGlobalConcurrency`; per key *Pro* groups [28][20] | `ConcurrencyExpression` per task [40] | `concurrency {limit, key, scope}` [50] | *partial:* per worker; fairness keys [68][69] | queue `limit`; *Pro* `global_limit` with partition [79] |
+| **policy** settings: retry, lease, rate, lane per named policy (`Graph(policies=…)`) | *partial:* options per job [2] | *partial, Pro:* `setGroupConcurrency` [29] | *partial:* keys split limits, same values [40][42] | *partial:* `key` per tenant, same limit [60] | *partial:* fairness weight per key [69] | *partial:* options per job; *Pro* runtime limits [72][81] |
 
 ## Changing the workflow
 

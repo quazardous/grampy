@@ -76,7 +76,7 @@ def revision_table(metadata, name, subject_type=str):
         name, metadata,
         sa.Column("subject", _type(subject_type), primary_key=True),
         sa.Column("revision", sa.Integer, nullable=False),
-        sa.Column("channel", sa.Text),
+        sa.Column("policy", sa.Text),
         sa.Column("version", sa.Text))
 
 

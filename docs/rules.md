@@ -9,7 +9,7 @@ What grampy guarantees, mechanism by mechanism. The short version is in the
 - [Going back: history, loops, replay](#going-back-history-loops-replay)
 - [Time: retries, leases, waits, grace](#time-retries-leases-waits-grace)
 - [Lanes: subjects that come back](#lanes-subjects-that-come-back)
-- [Channels: one workflow, several sources](#channels-one-workflow-several-sources)
+- [Policies: one workflow, different limits](#policies-one-workflow-different-limits)
 - [Rate limits and concurrency](#rate-limits-and-concurrency)
 - [Versions and migration](#versions-and-migration)
 - [What holds it together](#what-holds-it-together)
@@ -101,16 +101,64 @@ order they came.
 Presets carry the names other tools use: `Lane.throttle` (Graphile Worker's
 `preserve_run_at`), `Lane.debounce`, `Lane.dedupe`.
 
-## Channels: one workflow, several sources
+## Policies: one workflow, different limits
 
-`journal.enroll(subjects, "partner-a")` records a subject's channel; a
-`Graph(..., channels={"partner-a": {"call": {"retry": Retry(5, "1m")}}})`
-changes, for that channel only, a node's `retry`, `lease`, `timeout`, `grace`,
-`rate`, `concurrency` or `lane` settings — never the structure.
+A **policy** is a named set of operating settings, recorded on a subject and
+never recomputed. `journal.enroll(subjects, "slow-partner")` puts a subject
+under one; the graph says what that name changes:
+
+```python
+Graph(..., policies={"slow-partner": {"call": {"retry": Retry(5, "1m")}}})
+```
+
+Only `retry`, `lease`, `timeout`, `grace`, `rate`, `concurrency` and `lane` —
+**never the structure**. The steps, the joins and the branches are the same
+for everyone; a policy says how hard to push, how long to wait, how often to
+try again. grampy never learns what the name means: it is a key, and the
+application alone decides which subject gets it.
+
+### When a policy is the only answer
+
+Most of what a policy does could be arranged by hand. One thing could not:
+**a limit shared by workers that cannot see each other.**
+
+Two partners behind the same step. One tolerates a thousand calls a minute,
+the other a hundred — and breaking the second one's limit gets you banned,
+not slowed:
+
+```python
+GRAPH = Graph(Document("offers"), (
+    Node("fetch"),
+    Node("call", parents=("fetch",),
+         rate=(Rate(1000, "1m"),), concurrency=8, per="policy"),   # ← per policy
+    Node("store", parents=("call",)),
+), policies={
+    "slow-partner": {"call": {"rate": (Rate(100, "1m"),), "concurrency": 2}},
+})
+```
+
+`per="policy"` gives **each policy its own budget**, and the claim spends it.
+A node whose budget is shared by everyone refuses to have it changed per
+policy — declare `per="policy"` first, or the graph will not build.
+
+Why nothing else does the job:
+
+- **One budget for all** throttles the fast partner to the slow one's limit.
+  You bought a thousand calls a minute and use a hundred.
+- **Checking before you call** breaks exactly when it matters. Two workers on
+  two machines both look, both see room, both call. Under load — the only
+  time the limit counts — they overshoot together. Enforcing it properly means
+  coordinating across machines, which is what the journal was brought in to
+  do: the budget is spent *inside* the claim, so two claimers never overspend.
+- **Two graphs** duplicate a workflow that is identical, plus its joins, its
+  migrations and its drawing, so that two numbers can differ.
+
+That is the case that makes the mechanism worth its weight. Retries and leases
+per policy are a convenience on top of it.
 
 ### One source needs an extra step
 
-A channel never adds a node: the workflow would differ per source, and so
+A policy never adds a node: the workflow would differ per policy, and so
 would its joins, its migrations and its drawing. Three ways to get the same
 result, cheapest first.
 
@@ -123,7 +171,7 @@ GRAPH = Graph(Document("offers"), (
     Node("scrape"),
     Node("enrich", parents=("scrape",), optional=True),   # only some sources
     Node("publish", parents=("enrich",)),
-), channels={"plain-source": {"enrich": {"grace": "1s"}}})   # …skipped there
+), policies={"plain-source": {"enrich": {"grace": "1s"}}})   # …skipped there
 ```
 
 - for the sources that need it, a worker claims `enrich` as usual;
@@ -140,7 +188,7 @@ Without a grace the node is never skipped on its own, and the application can
 still skip it explicitly for the subjects it chooses:
 `journal.skip("enrich", candidates=…)`.
 
-**2. The routes really differ: a `choice` on the channel.** Put a choice node
+**2. The routes really differ: a `choice` on the policy.** Put a choice node
 first and conclude it with the branch that source takes; the other branches,
 and whatever only they lead to, are `omitted` in the same write, and a join
 further down still proceeds.
@@ -154,7 +202,7 @@ alive — worth it only when they really are two workflows.
 `Node("summarise", parents=("fetch",), rate=(Rate(100, "1m"), Rate(1000, "1h",
 burst=50)), concurrency=4)` — a claim takes no more than every band lets
 through (GCRA, one number stored per band) nor more than 4 rows running at
-once. `per="channel"` gives each channel its own budget. The journal decides;
+once. `per="policy"` gives each policy its own budget. The journal decides;
 the driver only guards the budget's keys while it does, so two claimers never
 overspend it.
 

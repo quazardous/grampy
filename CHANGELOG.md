@@ -64,9 +64,11 @@ imported as `from quazardous import grampy`.
 - Change a workflow while subjects are in flight: each subject stays on the
   graph version it started on, and a migration moves the subjects that fit
   the new version — or refuses them all, saying which do not and why.
-- Run one workflow for several sources: give subjects a channel, and let a
-  channel change retries, leases, timeouts, grace periods, rate limits and lanes without
-  changing the steps themselves.
+- Treat some subjects differently without a second workflow: put them under a
+  named policy, and let that policy change retries, leases, timeouts, grace
+  periods, rate limits and lanes — never the steps themselves. Each policy can
+  hold its own rate and concurrency budget, which is the one thing an
+  application cannot enforce on its own across several machines.
 - Let subjects come back: a lane is a way in where each new version of a
   subject waits — merged with the one already waiting, kept back by a
   cooldown after its last pass, a quiet delay or a maximum wait — and then
@@ -76,7 +78,7 @@ imported as `from quazardous import grampy`.
 - Protect a costly resource anywhere in a workflow: give a node rate limits
   (several bands at once, such as 100 a minute and 1000 an hour, with bursts)
   and a cap on how many subjects it works at the same time, shared by all
-  channels or counted per channel. Workers claiming at the same moment never
+  policies or counted per policy. Workers claiming at the same moment never
   go past them, on any storage.
 - The journal reads the time from the storage — the database server for
   PostgreSQL — so that workers on different machines agree on what is due.
