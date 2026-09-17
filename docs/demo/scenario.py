@@ -70,9 +70,12 @@ class Bricks(Adapter):
     def id_of(self, brick):
         return brick.id
 
-    def load(self, ids):
-        """Your storage, your query — here, a dict."""
-        return [self.bricks[i] for i in ids if i in self.bricks]
+    def inflate(self, candidates):
+        """WHATEVER THE CALLER HAD, AS BRICKS. The factory is handed the
+        batch as it came and alone knows what an id looks like here."""
+        return [self.bricks[c] if isinstance(c, int) else c
+                for c in candidates
+                if not isinstance(c, int) or c in self.bricks]
 
     def policy_of(self, brick):
         """THE BUSINESS WORD BECOMES AN OPERATING ONE. The factory knows

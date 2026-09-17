@@ -35,7 +35,7 @@ check_dag(DAG)
 
 class DocsAdapter(Adapter):                       # how grampy reads YOUR object
     def id_of(self, doc):  return doc.id
-    def load(self, ids):   return [LIBRARY[i] for i in ids]
+    def inflate(self, ids):   return [LIBRARY[i] for i in ids]
     def applies(self, doc, node):          # one graph, subjects that differ
         return node != "crop" or doc.scanned
 

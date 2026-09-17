@@ -40,9 +40,14 @@ class Bricks(Adapter):
     def id_of(self, brick):
         return brick.id
 
-    def load(self, ids):
-        self.calls.append(f"load({sorted(ids)})")
-        return [self.bricks[i] for i in ids if i in self.bricks]
+    def inflate(self, candidates):
+        """Objects pass; ids are fetched — the adapter alone can tell."""
+        thin = [c for c in candidates if isinstance(c, int)]
+        if thin:
+            self.calls.append(f"inflate({sorted(thin)})")
+        fat = {i: self.bricks[i] for i in thin if i in self.bricks}
+        return [fat[c] if isinstance(c, int) else c
+                for c in candidates if not isinstance(c, int) or c in fat]
 
     def policy_of(self, brick):
         return brick.crate
@@ -74,7 +79,7 @@ def test_candidates_are_items_too_and_are_not_loaded_twice(world):
     lease = items.claim("scan", 10, candidates=bricks)
     assert [b.id for b in lease] == [1, 2, 3]
     assert all(b is bricks[b.id - 1] for b in lease), "the very objects given"
-    assert adapter.calls == [f"applies({i},scan)" for i in (1, 2, 3)], "no load"
+    assert adapter.calls == [f"applies({i},scan)" for i in (1, 2, 3)], "nothing inflated"
     assert lease.token, "the lease still carries its proof"
 
 
@@ -83,7 +88,7 @@ def test_a_generator_of_items_works_like_a_list(world):
     bricks, adapter, items = world
     lease = items.claim("scan", 10, candidates=(b for b in bricks))
     assert [b.id for b in lease] == [1, 2, 3]
-    assert adapter.calls == [f"applies({i},scan)" for i in (1, 2, 3)], "no load"
+    assert adapter.calls == [f"applies({i},scan)" for i in (1, 2, 3)], "nothing inflated"
 
 
 def test_a_driver_query_is_handed_over_untouched_and_the_lease_is_loaded():
@@ -104,7 +109,7 @@ def test_a_driver_query_is_handed_over_untouched_and_the_lease_is_loaded():
     items = Items(NodeJournal(SqliteDriver(conn), GRAPH), adapter)
     lease = items.claim("scan", 10, candidates=Query("SELECT id FROM docs ORDER BY id"))
     assert [b.id for b in lease] == [1, 2, 3]
-    assert adapter.calls.count("load([1, 2, 3])") == 1, "one query for the batch"
+    assert adapter.calls.count("inflate([1, 2, 3])") == 1, "one query for the batch"
 
 
 def test_a_choice_takes_the_branch_the_handler_names(world):
@@ -147,7 +152,7 @@ def test_the_policy_and_the_ref_are_read_from_the_item(world):
 
 
 def test_an_item_that_no_longer_loads_does_not_lose_the_claim(world):
-    """On the query path, a row deleted between the claim and the load is
+    """On the query path, a row deleted between the claim and the inflate is
     named rather than dropped, and the rest of the lease still concludes."""
     import sqlite3
 
@@ -175,14 +180,14 @@ def test_the_adapter_is_asked_once_per_item_per_call(world):
 
 
 def test_the_handlers_have_answers_for_an_application_with_nothing_to_say():
-    """An adapter that only knows how to name and load its items works."""
+    """An adapter that only knows how to name and inflate its items works."""
 
     class Bare(Adapter):
         def id_of(self, item):
             return item
 
-        def load(self, ids):
-            return list(ids)
+        def inflate(self, candidates):
+            return list(candidates)
 
     journal = NodeJournal(MemoryDriver(), (Node("a"), Node("b", parents=("a",))))
     items = Items(journal, Bare())
@@ -256,7 +261,7 @@ def test_ids_are_accepted_wherever_items_are(world):
     lease = items.claim("scan", 10, candidates=[1, 2, 3])
     assert [b.id for b in lease] == [1, 2, 3]
     assert all(isinstance(b, Brick) for b in lease), "ids came back as objects"
-    assert adapter.calls.count("load([1, 2, 3])") == 1
+    assert adapter.calls.count("inflate([1, 2, 3])") == 1
 
     items.conclude("scan", lease)
     assert items.settle([1, 2, 3]) is not None, "settle takes ids too"
@@ -268,19 +273,21 @@ def test_objects_and_ids_may_be_mixed_in_one_call(world):
     lease = items.claim("scan", 10, candidates=[bricks[0], 2, bricks[2]])
     assert [b.id for b in lease] == [1, 2, 3]
     assert lease[0] is bricks[0], "the object given is the object returned"
-    assert adapter.calls.count("load([2])") == 1, "only the id was fetched"
+    assert adapter.calls.count("inflate([2])") == 1, "only the id was fetched"
 
 
-def test_an_object_the_adapter_cannot_read_is_not_taken_for_an_id(world):
-    """A broken adapter must not pass silently as someone passing ids."""
+def test_the_adapter_alone_decides_what_is_an_id(world):
+    """The layer never guesses: it hands the batch over as it came, and what
+    comes back is items. Here the adapter fetches ints and passes bricks."""
     bricks, adapter, items = world
-    with pytest.raises(TypeError, match="could not read"):
-        items.claim("scan", 10, candidates=[object()])
+    lease = items.claim("scan", 10, candidates=[bricks[0], 2])
+    assert adapter.calls.count("inflate([2])") == 1, "only the id was fetched"
+    assert [b.id for b in lease] == [1, 2]
 
 
-def test_load_is_only_needed_when_a_query_names_the_candidates():
+def test_inflate_is_only_needed_when_a_query_names_the_candidates():
     """Items travel with the claim, so an adapter that never meets a driver
-    query never needs `load` — and is told plainly when it does."""
+    query never needs `inflate` — and is told plainly when it does."""
 
     class NoLoad(Adapter):
         def id_of(self, brick):
@@ -302,5 +309,5 @@ def test_load_is_only_needed_when_a_query_names_the_candidates():
 
     # A driver query hands back ids, and there is nothing to turn them into.
     fresh = Items(NodeJournal(SqliteDriver(conn), (Node("b"),)), NoLoad())
-    with pytest.raises(NotImplementedError, match="NoLoad.load is needed here"):
+    with pytest.raises(NotImplementedError, match=r"NoLoad needs `inflate`"):
         fresh.claim("b", 10, candidates=Query("SELECT id FROM docs ORDER BY id"))

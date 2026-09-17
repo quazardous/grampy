@@ -2,7 +2,7 @@
 
     class Bricks(Adapter):
         def id_of(self, brick):      return brick.id
-        def load(self, ids):         return [BRICKS[i] for i in ids]
+        def inflate(self, ids):         return [BRICKS[i] for i in ids]
         def policy_of(self, brick): return brick.crate
         def applies(self, brick, node):
             return node != "polish" or brick.crate == "factory"
@@ -57,12 +57,6 @@ from .dag import NODE_DONE, NODE_FAILED, NODE_SKIPPED, node
 from .journal import Lease, NodeJournal
 
 
-def _could_be_an_id(candidate: Any) -> bool:
-    """An id is "unique, stable, and an integer or a string" — nothing else
-    is one, so nothing else may be mistaken for one."""
-    return isinstance(candidate, (int, str)) and not isinstance(candidate, bool)
-
-
 def _are_items(candidates: Any) -> bool:
     """Your objects, rather than something a driver reads itself.
 
@@ -90,17 +84,28 @@ class Adapter:
 
     # -- required only when a driver's query names the candidates -----------
 
-    def load(self, ids: Sequence[Any]) -> Iterable[Any]:
-        """The items for these ids, IN ONE CALL — your query, your storage.
+    def inflate(self, candidates: Sequence[Any]) -> Iterable[Any]:
+        """WHATEVER THE CALLER HAD, AS ITEMS — in one call, your storage.
 
-        Order does not matter, and an id with nothing behind it may be left
-        out: it comes back as `ItemLease.missing`.
+        The layer hands you the batch exactly as it received it and asks for
+        objects back. Yours already? Let them through, which is what the
+        default does. Ids, or a mix? Fetch what needs fetching, and only
+        that: you are the one who can tell them apart.
 
-        ONLY NEEDED ON THE QUERY PATH. When candidates are your own objects
-        they travel with the claim and are handed straight back, so an
-        application that never passes a driver query never needs this.
+            def inflate(self, candidates):
+                thin = [c for c in candidates if isinstance(c, int)]
+                fat = {b.id: b for b in Brick.objects.filter(id__in=thin)}
+                return [fat.get(c, c) for c in candidates]
+
+        Order does not matter, and a candidate nothing comes back for may be
+        left out: it lands in `ItemLease.missing`.
+
+        THIS IS ALSO WHERE IDS COME BACK FROM A DRIVER'S QUERY — the storage
+        named the candidates, so the claim has ids and nothing attached. An
+        adapter that never overrides this is told, rather than handed ids it
+        would treat as objects.
         """
-        raise NotImplementedError
+        return candidates
 
     # -- optional ----------------------------------------------------------
 
@@ -184,14 +189,14 @@ class Items:
         `candidates` MAY BE ANYTHING YOU HAVE: your own objects, their ids, or
         a mix of the two, in any iterable. Objects travel with the claim and
         are handed straight back — a batch you already loaded is not loaded
-        twice — and whatever was named by id alone is loaded with `load`.
+        twice — and whatever was named by id alone is loaded with `inflate`.
 
         An id is an int or a string, which is what tells the two apart. An
         object `id_of` cannot read, and that could not be an id, is an adapter
         to fix, and says so.
 
         A DRIVER'S OWN QUERY is handed to the journal untouched, and the lease
-        is loaded with `load`. That is the one place ids are unavoidable —
+        is loaded with `inflate`. That is the one place ids are unavoidable —
         the storage produces the candidates, and it has no Python objects to
         give. It buys something a list cannot: the driver may filter and page
         in the database, so a claim of ten out of a large backlog never ships
@@ -283,37 +288,20 @@ class Items:
         stay in hand; a driver's query travels on untouched."""
         if not _are_items(candidates):
             return {}, candidates
-        given: dict[Any, Any] = {}
-        subjects: list[Any] = []
-        for candidate in candidates:
-            try:
-                subject = self.adapter.id_of(candidate)
-            except (AttributeError, TypeError, KeyError, IndexError) as why:
-                # AN ID IS AN INT OR A STRING, and nothing else is. One the
-                # adapter cannot read but that could be an id IS one; a wider
-                # object that fails is an adapter that needs fixing.
-                if not _could_be_an_id(candidate):
-                    raise TypeError(
-                        f"{type(self.adapter).__name__}.id_of could not read "
-                        f"{candidate!r} ({why}) — candidates are your items, or "
-                        f"their ids as int or str") from why
-                subjects.append(candidate)
-                continue
-            given[subject] = candidate
-            subjects.append(subject)
-        return given, subjects
+        # THE ADAPTER SEES THE BATCH AS IT CAME, and says what is an item.
+        given = {self.adapter.id_of(i): i
+                 for i in self.adapter.inflate(list(candidates))}
+        return given, list(given)
 
     def _loaded(self, lease: Lease) -> dict[Any, Any]:
-        """`{id: item}` for a lease, in the lease's order, in ONE load."""
+        """`{id: item}` for a lease, in the lease's order, in ONE call."""
         if not lease:
             return {}
-        try:
-            got = self.adapter.load(list(lease))
-        except NotImplementedError:
+        if type(self.adapter).inflate is Adapter.inflate:
             raise NotImplementedError(
-                f"{type(self.adapter).__name__}.load is needed here: the claim "
-                f"named candidates a driver produced, so it came back as ids "
-                f"with no objects attached. Write `load`, or pass your items "
-                f"as candidates and they travel with the claim") from None
-        found = {self.adapter.id_of(i): i for i in got}
+                f"{type(self.adapter).__name__} needs `inflate`: a driver's "
+                f"query named the candidates, so the claim came back as ids "
+                f"with no objects attached. Write it, or pass your items as "
+                f"candidates and they travel with the claim")
+        found = {self.adapter.id_of(i): i for i in self.adapter.inflate(list(lease))}
         return {s: found[s] for s in lease if s in found}
