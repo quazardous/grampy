@@ -1,0 +1,358 @@
+/* grampy demo kit — the "brick lab" look shared by every demo.
+ *
+ * A bright lab bench seen from above: a light cutting mat, white trays, bricks
+ * in primary colours, a row of studs for a rule. Tokens first, then the page
+ * chrome (masthead, controls, panel, code, legend), then the bench (belts,
+ * pads, trays, bins, bricks, effects). A demo adds only what is its own. */
+
+:root {
+  --ground: #f6f8fa;
+  --surface: #ffffff;
+  --ink: #1b2733;
+  --muted: #5d6b78;
+  --line: #e1e7ed;
+  --accent: #0a62c2;
+  --accent-ink: #ffffff;
+  --focus: #0a62c2;
+  --hazard: #ffc629;
+  --hazard-ink: #1b2733;
+  --reject: #d8342b;
+  --ok: #1d9a55;
+
+  --brick-red: #e3342f;
+  --brick-orange: #ff8a1f;
+  --brick-yellow: #ffcc1a;
+  --brick-green: #43b049;
+  --brick-blue: #1f78e0;
+  --brick-pink: #e04ba0;
+  --brick-unknown: #a5adb5;
+  --brick-edge: rgba(20, 30, 40, 0.28);
+
+  --bench: #eef3f7;
+  --grid: rgba(80, 110, 140, 0.10);
+  --grid-major: rgba(80, 110, 140, 0.18);
+  --bench-ink: #4c5a67;
+  --belt: #cfd8e0;
+  --belt-mark: #95a3b0;
+  --belt-fail: #f2bdb8;
+  --pad: rgba(10, 98, 194, 0.05);
+  --pad-edge: rgba(10, 98, 194, 0.35);
+  --tray-rim: #ffffff;
+  --tray-floor: #f7f9fb;
+  --tray-edge: #d9e1e8;
+  --tray-ink: #1b2733;
+  --tray-muted: #6a7885;
+  --bin-metal: #b7c1ca;
+  --bin-floor: #8e9aa5;
+  --shadow: rgba(40, 70, 100, 0.16);
+
+  --code-bg: #f3f6f9;
+  --code-ink: #1b2733;
+  --code-kw: #b23a1d;
+  --code-str: #217a3c;
+  --code-com: #6b7885;
+  --code-cls: #0a62c2;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #10161c; --surface: #172029; --ink: #e5ebf0; --muted: #9aa8b4; --line: #26323d;
+    --accent: #5aa3f0; --accent-ink: #0b1219; --focus: #7db7f5; --reject: #f0645a; --ok: #4cc27c;
+    --brick-edge: rgba(0, 0, 0, 0.45);
+    --bench: #16202a; --grid: rgba(160, 190, 220, 0.06); --grid-major: rgba(160, 190, 220, 0.12);
+    --bench-ink: #b3c1cd; --belt: #2c3a47; --belt-mark: #5d6f80; --belt-fail: #6b3a36;
+    --pad: rgba(90, 163, 240, 0.07); --pad-edge: rgba(90, 163, 240, 0.4);
+    --tray-rim: #e8edf1; --tray-floor: #dde4ea; --tray-edge: #c3cdd6;
+    --bin-metal: #56636f; --bin-floor: #3b4651; --shadow: rgba(0, 0, 0, 0.45);
+    --code-bg: #1c2733; --code-ink: #dfe7ee; --code-kw: #ff9e7a; --code-str: #9fd88a;
+    --code-com: #8a98a5; --code-cls: #7db7f5;
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] {
+  --ground: #10161c; --surface: #172029; --ink: #e5ebf0; --muted: #9aa8b4; --line: #26323d;
+  --accent: #5aa3f0; --accent-ink: #0b1219; --focus: #7db7f5; --reject: #f0645a; --ok: #4cc27c;
+  --brick-edge: rgba(0, 0, 0, 0.45);
+  --bench: #16202a; --grid: rgba(160, 190, 220, 0.06); --grid-major: rgba(160, 190, 220, 0.12);
+  --bench-ink: #b3c1cd; --belt: #2c3a47; --belt-mark: #5d6f80; --belt-fail: #6b3a36;
+  --pad: rgba(90, 163, 240, 0.07); --pad-edge: rgba(90, 163, 240, 0.4);
+  --tray-rim: #e8edf1; --tray-floor: #dde4ea; --tray-edge: #c3cdd6;
+  --bin-metal: #56636f; --bin-floor: #3b4651; --shadow: rgba(0, 0, 0, 0.45);
+  --code-bg: #1c2733; --code-ink: #dfe7ee; --code-kw: #ff9e7a; --code-str: #9fd88a;
+  --code-com: #8a98a5; --code-cls: #7db7f5;
+  color-scheme: dark;
+}
+
+/* -- page ------------------------------------------------------------------- */
+
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+
+body {
+  background: var(--ground);
+  color: var(--ink);
+  font: 15px/1.55 "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  padding-inline: clamp(16px, 3vw, 40px);
+  padding-block: 20px 56px;
+  display: grid;
+  gap: 22px;
+  max-width: 1520px;
+  margin-inline: auto;
+}
+
+a { color: var(--accent); text-underline-offset: 3px; }
+code { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 0.9em; }
+:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+h1, h2, h3 { font-family: "Rubik", "IBM Plex Sans", system-ui, sans-serif; text-wrap: balance; }
+
+/* A row of studs in brick colours: the kit's rule. */
+.stud-rule {
+  height: 12px;
+  background: repeating-linear-gradient(90deg,
+    var(--brick-red) 0 72px, var(--brick-orange) 72px 144px, var(--brick-yellow) 144px 216px,
+    var(--brick-green) 216px 288px, var(--brick-blue) 288px 360px, var(--brick-pink) 360px 432px);
+  -webkit-mask: radial-gradient(circle at 6px 6px, #000 4.5px, transparent 5px) 0 0 / 18px 12px repeat-x;
+  mask: radial-gradient(circle at 6px 6px, #000 4.5px, transparent 5px) 0 0 / 18px 12px repeat-x;
+}
+
+.masthead { display: grid; gap: 14px; }
+.masthead-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px 32px;
+}
+.brand .kicker {
+  margin: 0 0 4px;
+  font: 600 12px/1 "IBM Plex Mono", monospace;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.brand h1 { font-weight: 700; font-size: clamp(30px, 4.6vw, 44px); line-height: 1.05; margin: 0 0 8px; }
+.brand p { margin: 0; max-width: 66ch; color: var(--muted); }
+
+.tally { display: flex; flex-wrap: wrap; gap: 8px; margin: 0; }
+.tally div {
+  display: grid;
+  min-width: 108px;
+  padding: 8px 14px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.tally dt { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+.tally dd { margin: 0; font: 500 24px/1.15 "IBM Plex Mono", monospace; font-variant-numeric: tabular-nums; }
+.tally .bad dd { color: var(--reject); }
+.tally .good dd { color: var(--ok); }
+
+/* -- controls -------------------------------------------------------------- */
+
+.controls { display: flex; flex-wrap: wrap; gap: 12px 28px; align-items: center; }
+.control-group { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
+
+button, select {
+  font: 500 14px/1 "IBM Plex Sans", system-ui, sans-serif;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--tray-edge);
+  border-radius: 8px;
+  padding: 9px 14px;
+  cursor: pointer;
+  box-shadow: 0 1px 0 var(--line);
+}
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); min-width: 84px; }
+button.hazard { background: var(--hazard); color: var(--hazard-ink); border-color: #e0a800; }
+select { padding: 7px 10px; }
+.speed { display: flex; gap: 8px; align-items: center; font-size: 14px; }
+
+.sliders label { display: grid; gap: 2px; font-size: 13px; color: var(--muted); }
+.sliders output { color: var(--ink); font-family: "IBM Plex Mono", monospace; font-variant-numeric: tabular-nums; }
+.sliders input[type="range"] { width: 130px; accent-color: var(--accent); }
+.sliders label.check { display: flex; gap: 6px; align-items: center; color: var(--ink); }
+
+/* -- bench + side panel ------------------------------------------------------ */
+
+.layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(260px, 340px); gap: 20px; align-items: start; }
+@media (max-width: 980px) { .layout { grid-template-columns: minmax(0, 1fr); } }
+
+.bench-frame { margin: 0; display: grid; gap: 8px; min-width: 0; }
+.bench {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background-color: var(--bench);
+  background-image:
+    linear-gradient(var(--grid-major) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-major) 1px, transparent 1px),
+    linear-gradient(var(--grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+  background-size: 100px 100px, 100px 100px, 20px 20px, 20px 20px;
+}
+.bench svg { display: block; width: 100%; min-width: 760px; height: auto; }
+.status { font-size: 13px; color: var(--muted); }
+
+.panel { display: grid; gap: 18px; min-width: 0; }
+.panel h2, .section-title {
+  font: 600 12px/1.2 "IBM Plex Sans", system-ui, sans-serif;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin: 0 0 8px;
+  color: var(--muted);
+}
+
+.counts { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 13px; }
+.counts th, .counts td { padding: 4px 6px; text-align: right; border-bottom: 1px solid var(--line); }
+.counts th:first-child, .counts td:first-child { text-align: left; }
+.counts td:first-child { font-family: "IBM Plex Mono", monospace; }
+.counts td.zero { color: var(--tray-edge); }
+
+.detail { font-size: 13px; }
+.detail .hint { margin: 0; color: var(--muted); }
+.detail dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 0 0 8px; }
+.detail dt { color: var(--muted); }
+.detail dd { margin: 0; font-family: "IBM Plex Mono", monospace; }
+.detail ol { margin: 0; padding-left: 18px; font-family: "IBM Plex Mono", monospace; font-size: 12px; }
+
+.calls {
+  list-style: none;
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--code-bg);
+  color: var(--code-ink);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font: 12px/1.55 "IBM Plex Mono", ui-monospace, monospace;
+  max-height: 280px;
+  overflow: auto;
+  display: grid;
+  gap: 1px;
+}
+.calls li { white-space: pre-wrap; overflow-wrap: anywhere; }
+.calls .fn { color: var(--code-cls); font-weight: 500; }
+.calls .note { color: var(--code-com); }
+
+/* -- code ----------------------------------------------------------------------- */
+
+.code-lead, .code-links { margin: 0 0 12px; max-width: 75ch; }
+.code-links { margin: 12px 0 0; font-size: 14px; color: var(--muted); }
+.code-panels { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 440px), 1fr)); }
+.code-panel { margin: 0; min-width: 0; display: grid; gap: 6px; align-content: start; }
+.code-panel figcaption { font-size: 13px; font-weight: 600; }
+.code-panel pre {
+  margin: 0;
+  padding: 14px 16px;
+  background: var(--code-bg);
+  color: var(--code-ink);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow-x: auto;
+  font: 12.5px/1.6 "IBM Plex Mono", ui-monospace, monospace;
+}
+.kw { color: var(--code-kw); }
+.str { color: var(--code-str); }
+.com { color: var(--code-com); font-style: italic; }
+.cls { color: var(--code-cls); }
+
+/* -- legend ----------------------------------------------------------------------- */
+
+.legend ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px 20px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+.legend li { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 10px; align-items: start; font-size: 14px; max-width: 65ch; }
+.glyph { width: 14px; height: 14px; display: block; border: 2px solid var(--bench-ink); border-radius: 3px; transform: translateY(4px); }
+.glyph-choice { transform: translateY(4px) rotate(45deg) scale(0.8); border-radius: 1px; }
+.glyph-wait { background: repeating-linear-gradient(-45deg, var(--hazard) 0 3px, var(--hazard-ink) 3px 6px); }
+.glyph-retry { border-radius: 50%; border-style: dashed; }
+.glyph-fail { border-color: var(--reject); background: var(--reject); }
+.glyph-join { border-color: var(--ok); }
+.glyph-queue { border-style: dashed; border-color: var(--accent); }
+.glyph-lane { border-color: var(--accent); background: linear-gradient(var(--accent) 0 0) center / 8px 2px no-repeat; }
+
+/* -- the bench, drawn in SVG --------------------------------------------------------- */
+
+.belt { fill: none; stroke: var(--belt); stroke-width: 14; stroke-linecap: round; }
+.belt-marks { fill: none; stroke: var(--belt-mark); stroke-width: 2; stroke-dasharray: 3 11; animation: lab-belt 1.4s linear infinite; }
+.belt-fail { stroke: var(--belt-fail); }
+@keyframes lab-belt { to { stroke-dashoffset: -28; } }
+
+.queue-pad { fill: var(--pad); stroke: var(--pad-edge); stroke-width: 1.3; stroke-dasharray: 5 4; }
+.bench-label { font-family: "IBM Plex Mono", monospace; font-size: 11px; fill: var(--bench-ink); }
+
+.tray-rim { fill: var(--tray-rim); stroke: var(--tray-edge); stroke-width: 1; }
+.tray-floor { fill: var(--tray-floor); }
+.tray .name { font-family: "Rubik", "IBM Plex Sans", sans-serif; font-weight: 600; font-size: 15px; fill: var(--tray-ink); }
+.tray .role { font-family: "IBM Plex Mono", monospace; font-size: 10px; fill: var(--tray-muted); }
+.tray .count { font-family: "IBM Plex Mono", monospace; font-size: 11.5px; fill: var(--tray-ink); font-variant-numeric: tabular-nums; }
+.tray.reject .tray-rim { stroke: var(--reject); stroke-width: 2; }
+.tray.lane .tray-rim { stroke: var(--accent); stroke-width: 2; }
+.tray .slot { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linecap: round; }
+.stripe { fill: url(#lab-hazard); }
+
+.tab.red { fill: var(--brick-red); }
+.tab.orange { fill: var(--brick-orange); }
+.tab.yellow { fill: var(--brick-yellow); }
+.tab.green { fill: var(--brick-green); }
+.tab.blue { fill: var(--brick-blue); }
+.tab.pink { fill: var(--brick-pink); }
+
+.waste-body { fill: var(--bin-metal); }
+.waste-floor { fill: var(--bin-floor); }
+
+/* A brick seen from above: a plate with eight studs. */
+.brick { --c: var(--brick-unknown); cursor: pointer; transition: transform 0.7s cubic-bezier(0.3, 0.7, 0.2, 1), opacity 0.6s ease; }
+.brick.red { --c: var(--brick-red); }
+.brick.orange { --c: var(--brick-orange); }
+.brick.yellow { --c: var(--brick-yellow); }
+.brick.green { --c: var(--brick-green); }
+.brick.blue { --c: var(--brick-blue); }
+.brick.pink { --c: var(--brick-pink); }
+.brick .plate { fill: var(--c); stroke: var(--brick-edge); stroke-width: 0.8; transition: fill 0.5s ease; }
+.brick .stud { fill: var(--c); stroke: rgba(255, 255, 255, 0.55); stroke-width: 0.7; transition: fill 0.5s ease; }
+.brick .band { fill: var(--reject); display: none; }
+.brick .stamp { font: 700 6.5px "IBM Plex Mono", monospace; fill: #fff; pointer-events: none; display: none; }
+.brick.tnt.unknown .band, .brick.tnt.unknown .stamp { display: inline; }
+.brick .badge { display: none; pointer-events: none; }
+.brick .badge rect { fill: var(--accent); }
+.brick .badge text { font: 600 7.5px "IBM Plex Mono", monospace; fill: var(--accent-ink); }
+.brick.versioned .badge { display: inline; }
+.brick .debris { display: none; }
+.brick .debris path { fill: #5b6570; stroke: #2e353c; stroke-width: 0.6; }
+.brick .debris .ember { fill: #c2551f; }
+.brick.wasted .body { display: none; }
+.brick.wasted .debris { display: inline; }
+.brick.selected .plate { stroke: var(--focus); stroke-width: 2.5; }
+.brick:focus-visible { outline: none; }
+.brick:focus-visible .plate { stroke: var(--focus); stroke-width: 2.5; }
+.brick.working .body { animation: lab-work 0.5s ease-in-out infinite alternate; }
+@keyframes lab-work { to { transform: translateY(-1.5px); } }
+.brick.revealing .body { animation: lab-glow 1.1s ease-out; }
+@keyframes lab-glow {
+  0% { filter: brightness(2) drop-shadow(0 0 0 #fff6c2); }
+  40% { filter: brightness(1.35) drop-shadow(0 0 6px #ffe98a); }
+  100% { filter: none; }
+}
+.brick.returnable { cursor: alias; }
+
+.sparkle .halo { fill: rgba(255, 220, 90, 0.3); stroke: #ffc629; stroke-width: 2.5; animation: lab-halo 0.9s ease-out forwards; transform-box: fill-box; transform-origin: center; }
+@keyframes lab-halo { from { transform: scale(0.3); opacity: 0.95; } to { transform: scale(1.8); opacity: 0; } }
+.sparkle .spark { fill: #ffc629; stroke: #fff; stroke-width: 1; animation: lab-spark 1.1s ease-out both; }
+.sparkle .spark.s1 { fill: #ff7fca; }
+.sparkle .spark.s2 { fill: #62c6ff; }
+@keyframes lab-spark {
+  0% { transform: translateY(0) scale(0.2) rotate(0deg); opacity: 0; }
+  20% { opacity: 1; }
+  100% { transform: translateY(calc(-1 * var(--reach))) scale(1) rotate(90deg); opacity: 0; }
+}
+.puff .flash { fill: #ffb347; animation: lab-flash 0.45s ease-out forwards; transform-box: fill-box; transform-origin: center; }
+@keyframes lab-flash { from { transform: scale(0.4); opacity: 1; } to { transform: scale(1.9); opacity: 0; } }
+.puff .smoke { fill: #9aa5af; animation: lab-smoke 1.1s ease-out both; transform-box: fill-box; transform-origin: center; }
+@keyframes lab-smoke { from { transform: scale(0.4); opacity: 0.85; } to { transform: scale(2.2) translateY(-6px); opacity: 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .belt-marks, .brick.working .body, .brick.revealing .body, .sparkle *, .puff * { animation: none; }
+  .sparkle, .puff { display: none; }
+  .brick, .brick .plate, .brick .stud { transition: none; }
+}

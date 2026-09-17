@@ -31,7 +31,8 @@ First release, planned as 0.1.0. Installed as `grampy-q`, imported as
 - An online demo: a brick sorting line animated in the browser, run by the
   real library, that sorts bricks by colour; a TNT brick hides its colour,
   waits for the bomb squad, gets retried at the defuse station, and either
-  shows its colour or ends in the waste bin.
+  shows its colour or ends in the waste bin; a sorted brick sent back waits
+  in an inbox lane before it runs again.
 - Draw a workflow as a Mermaid flowchart or a Graphviz graph, every
   mechanism with its own shape — lanes, rate limits and concurrency
   included — optionally with the live count of subjects per step; or as a

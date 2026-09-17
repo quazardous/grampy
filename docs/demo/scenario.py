@@ -3,7 +3,7 @@
 Nothing here decides a workflow rule: the journal does. This module only
 plays the factory around it — bricks arriving, workers taking a claim and
 finishing it after a while, a defuser that sometimes fails, a bomb squad
-that answers a call — and reports, for each brick, where the journal says it
+that answers a call, sorted bricks sent back for another pass — and reports, for each brick, where the journal says it
 stands, so the page can draw it there.
 
     world = World(seed=7)
@@ -24,6 +24,7 @@ from quazardous.grampy import (
     NODE_SCHEDULED,
     Document,
     Graph,
+    Lane,
     Node,
     NodeJournal,
     claimable_nodes,
@@ -35,7 +36,8 @@ from quazardous.grampy.timing import Retry
 # --8<-- [start:graph]
 #: The factory, as grampy sees it.
 GRAPH = Graph(Document("brick-sorter", version="1", namespace="demo"), (
-    Node("scan", choice=True, lease="30s"),
+    Node("inbox", lane=Lane.throttle(cooldown="30s", max_wait="90s")),
+    Node("scan", parents=("inbox",), choice=True, lease="30s"),
     Node("sort", parents=("scan",), lease="30s"),
     Node("quarantine", parents=("scan",), wait="bomb-squad.arrived", timeout="90s"),
     Node("defuse", parents=("quarantine",), lease="40s",
@@ -48,9 +50,12 @@ GRAPH = Graph(Document("brick-sorter", version="1", namespace="demo"), (
 
 #: Where each station stands on the floor, in layers left to right.
 LAYOUT = {
-    "scan": (0, 1), "sort": (1, 0), "quarantine": (1, 2),
-    "defuse": (2, 2), "pack": (3, 0), "reject": (3, 2),
+    "inbox": (0, 1), "scan": (1, 1), "sort": (2, 0), "quarantine": (2, 2),
+    "defuse": (3, 2), "pack": (4, 0), "reject": (4, 2),
 }
+
+#: How long a sorted brick is kept back after its pass — the inbox lane's cooldown.
+COOLDOWN = 30.0
 
 #: One tray per colour at the end of the line; a TNT brick hides its colour until defused.
 COLOURS = ("red", "orange", "yellow", "green", "blue", "pink")
@@ -63,6 +68,7 @@ class Brick:
     colour: str
     tnt: bool
     born: float
+    version: int = 1
 
 
 @dataclass
@@ -80,6 +86,7 @@ class Settings:
     defuse_failure: float = 0.7
     squad_auto: bool = True
     squad_delay: float = 25.0
+    returns_share: float = 0.15
     workers: dict[str, int] = field(default_factory=lambda: {
         "scan": 2, "sort": 2, "defuse": 1, "pack": 2, "reject": 1})
     durations: dict[str, float] = field(default_factory=lambda: {
@@ -104,6 +111,10 @@ class World:
         self._next_id = 1
         self._arrival_debt = 0.0
         self._called: dict[int, float] = {}
+        #: Sorted bricks off the line, kept so that they can be sent back.
+        self.gone: dict[int, Brick] = {}
+        self.shipped_at: dict[int, float] = {}
+        self._returns: dict[int, float] = {}
 
     # -- time ------------------------------------------------------------------
 
@@ -117,11 +128,38 @@ class World:
     # -- what visitors do -------------------------------------------------------
 
     def add_bricks(self, count: int, tnt: bool | None = None) -> None:
+        added = []
         for _ in range(count):
             is_tnt = self.rng.random() < self.settings.tnt_share if tnt is None else tnt
             colour = self.rng.choice(COLOURS)
             self.bricks[self._next_id] = Brick(self._next_id, colour, is_tnt, self.elapsed)
+            added.append(self._next_id)
             self._next_id += 1
+        if added:
+            self.journal.arrive("inbox", added, ref="v1")
+            self._log(f'journal.arrive("inbox", {added}, ref="v1")')
+
+    def send_back(self, brick_id: int) -> bool:
+        """A sorted brick comes back as a new version: it waits in the inbox
+        lane — merged with the version already waiting, if any — until its
+        cooldown has passed. Only a shipped brick, or one already waiting,
+        can be sent back."""
+        brick_id = int(brick_id)
+        waiting = self.journal.arrival(brick_id, "inbox") is not None
+        shipped = self.finished.get(brick_id, ("",))[0] == "shipped" or brick_id in self.gone
+        if not (waiting or shipped):
+            return False
+        brick = self.bricks.get(brick_id) or self.gone.pop(brick_id)
+        brick.version += 1
+        brick.tnt = False       # what comes back has been through the squad
+        self.bricks[brick_id] = brick
+        self.finished.pop(brick_id, None)
+        self._returns.pop(brick_id, None)
+        ref = f"v{brick.version}"
+        outcome = self.journal.arrive("inbox", [brick_id], ref=ref)
+        kind = "merged" if outcome["merged"] else "queued"
+        self._log(f'journal.arrive("inbox", [{brick_id}], ref="{ref}")  # {kind}')
+        return True
 
     def call_squad(self) -> None:
         waiting = [b.id for b in self.bricks.values() if self._where(b.id)[0] == "shelf"]
@@ -139,6 +177,9 @@ class World:
     def tick(self, seconds: float) -> str:
         self.elapsed += seconds
         self._arrive(seconds)
+        for brick_id, when in list(self._returns.items()):
+            if when <= self.elapsed:
+                self.send_back(brick_id)
         self._finish_jobs()
         self._squad()
         expired = self.journal.expire()
@@ -211,27 +252,40 @@ class World:
 
     def _retire(self) -> None:
         for brick_id in self._active():
+            if self.journal.arrival(brick_id, "inbox") is not None:
+                continue        # back in the inbox: its last pass is still on record
             progress = self.journal.progress(brick_id)
             if progress.get("pack") == NODE_DONE:
                 self.finished[brick_id] = ("shipped", self.elapsed)
+                self.shipped_at[brick_id] = self.elapsed
                 self.shipped += 1
                 self.sorted[self.bricks[brick_id].colour] += 1
+                if self.rng.random() < self.settings.returns_share:
+                    self._returns[brick_id] = self.elapsed + self.rng.uniform(4, 30)
             elif progress.get("reject") == NODE_DONE:
                 self.finished[brick_id] = ("boom", self.elapsed)
                 self.exploded += 1
-        for brick_id, (_, when) in list(self.finished.items()):
+        for brick_id, (kind, when) in list(self.finished.items()):
             if self.elapsed - when > 6:
-                self.bricks.pop(brick_id, None)
+                brick = self.bricks.pop(brick_id, None)
                 self.finished.pop(brick_id, None)
+                if kind == "shipped" and brick is not None:
+                    self.gone[brick_id] = brick
+        while len(self.gone) > 200:
+            oldest = next(iter(self.gone))
+            self.gone.pop(oldest)
+            self._returns.pop(oldest, None)
 
     # -- what the page draws -------------------------------------------------------
 
     def _where(self, brick_id: int) -> tuple[str, str | None]:
-        """(place, node): `station` working, `retry` waiting to try again,
-        `shelf` in quarantine, `queue` waiting for a worker, `shipped`,
-        `boom`."""
+        """(place, node): `inbox` waiting in the lane, `station` working,
+        `retry` waiting to try again, `shelf` in quarantine, `queue` waiting
+        for a worker, `shipped`, `boom`."""
         if brick_id in self.finished:
             return self.finished[brick_id][0], None
+        if self.journal.arrival(brick_id, "inbox") is not None:
+            return "inbox", "inbox"
         progress = self.journal.progress(brick_id)
         for name, status in progress.items():
             if status == NODE_RUNNING:
@@ -258,11 +312,20 @@ class World:
         for brick in self.bricks.values():
             place, node = self._where(brick.id)
             revealed = self._revealed(brick)
-            bricks.append({
+            entry = {
                 "id": brick.id, "colour": brick.colour if revealed else None, "tnt": brick.tnt,
-                "revealed": revealed, "place": place, "node": node,
+                "revealed": revealed, "place": place, "node": node, "version": brick.version,
                 "retries": self.journal.retries(brick.id, "defuse") if brick.tnt else 0,
-            })
+            }
+            if place == "inbox":
+                arrival = self.journal.arrival(brick.id, "inbox")
+                assert arrival is not None
+                entry["arrived"] = arrival.place
+                shipped = self.shipped_at.get(brick.id)
+                entry["cooldown"] = (max(0, int(COOLDOWN - (self.elapsed - shipped)))
+                                     if shipped is not None else 0)
+            bricks.append(entry)
+        bricks.sort(key=lambda b: (b.get("arrived", ""), b["id"]))
         return {
             "clock": self._now()[11:19],
             "bricks": bricks,
@@ -276,7 +339,9 @@ class World:
                 "tnt_share": self.settings.tnt_share,
                 "defuse_failure": self.settings.defuse_failure,
                 "squad_auto": self.settings.squad_auto,
+                "returns_share": self.settings.returns_share,
             },
+            "returnable": sorted(self.gone)[-60:],
         }
 
     def detail(self, brick_id: int) -> str:
@@ -285,7 +350,7 @@ class World:
             return json.dumps(None)
         return json.dumps({
             "id": brick_id, "colour": brick.colour if self._revealed(brick) else None,
-            "tnt": brick.tnt,
+            "tnt": brick.tnt, "version": brick.version,
             "progress": self.journal.progress(brick_id),
             "history": self.journal.history(brick_id),
         })
@@ -293,4 +358,5 @@ class World:
 
 def static() -> str:
     """What does not move: the graph as a document, and the floor layout."""
-    return json.dumps({"graph": GRAPH.to_dict(), "layout": LAYOUT, "colours": COLOURS})
+    return json.dumps({"graph": GRAPH.to_dict(), "layout": LAYOUT, "colours": COLOURS,
+                       "cooldown": COOLDOWN})

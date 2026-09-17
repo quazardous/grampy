@@ -75,3 +75,35 @@ def test_the_build_packs_grampy_and_the_scenario(tmp_path, monkeypatch, scenario
     names = set(zipfile.ZipFile(out).namelist())
     assert "scenario.py" in names and "quazardous/grampy/journal.py" in names
     assert "quazardous/__init__.py" not in names, "quazardous stays a namespace"
+
+
+def test_a_sorted_brick_sent_back_twice_runs_once_more_with_its_last_version(scenario):
+    world = scenario.World(seed=5, settings=scenario.Settings(
+        arrivals_per_minute=0.0, tnt_share=0.0, returns_share=0.0))
+    world.add_bricks(1, tnt=False)
+    for _ in range(60):
+        world.tick(1.0)
+        if world.finished.get(1, ("",))[0] == "shipped":
+            break
+    assert world.shipped == 1
+    shipped_at = world.elapsed
+    assert world.send_back(1) is True
+    world.tick(1.0)
+    assert world.send_back(1) is True, "a waiting brick merges its new version"
+    assert world.send_back(999) is False
+    state = json.loads(world.tick(1.0))
+    [brick] = [b for b in state["bricks"] if b["id"] == 1]
+    assert brick["place"] == "inbox" and brick["version"] == 3 and brick["cooldown"] > 0
+    arrival = world.journal.arrival(1, "inbox")
+    assert arrival.ref == "v3" and arrival.place == arrival.arrived_at, "throttle keeps its place"
+    while world.elapsed - shipped_at < scenario.COOLDOWN - 1:
+        state = json.loads(world.tick(1.0))
+        assert [b for b in state["bricks"] if b["id"] == 1][0]["place"] == "inbox"
+    for _ in range(80):
+        world.tick(1.0)
+        if world.shipped == 2:
+            break
+    assert world.shipped == 2, "one more pass, not two"
+    history = world.journal.history(1)
+    assert [e["lease"] for e in history if e["status"] == "entered"] == ["v1", "v3"]
+    assert any(e["node"] == "pack" and e["reason"] == "arrival" for e in history)
