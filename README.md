@@ -44,6 +44,7 @@ journal.claim("crop", 10, candidates=["s1", "s2"])            # ['s1'] — s2 st
 | `quazardous.grampy.dag` | `Node`, the statuses, `check_dag`, and the **pure** claim rule: `claimable`, `claimable_nodes`, `descendants`, `ancestors` |
 | `quazardous.grampy.graph` | the graph **as data**: `Graph(Document(name, version), nodes)`, a canonical dict / JSON form, strict reading with the path of every error |
 | `quazardous.grampy.timing` | durations (`30s`, `10m`, `7d`), ISO instants, `Retry` and its backoff |
+| `quazardous.grampy.diagram` | `to_mermaid` / `to_dot`: every mechanism drawn (choice ◇, wait ⬡, failure edges, loops, badges), with live counts from `overlay(journal)` |
 | `quazardous.grampy.states` | derived from the graph: `replay_targets`, `replayed_after`, `to_undo`, `source_state`, `allowed_transitions` |
 | `quazardous.grampy.journal` | `NodeJournal` — the logic (validation, rule inputs, clock) over a `JournalDriver` protocol |
 | `quazardous.grampy.drivers.memory` | dict-based, deterministic, no dependency — the reference driver |
@@ -113,6 +114,17 @@ journal.claim("crop", 10, candidates=["s1", "s2"])            # ['s1'] — s2 st
 - `Node.working` / `Node.state` are **projections** an application may
   mirror on its subjects; nothing in grampy reads them to decide. They
   are what `allowed_transitions` and the replay helpers are derived from.
+
+## Drawing a graph
+
+```python
+from quazardous.grampy.diagram import overlay, to_mermaid, to_dot
+
+print(to_mermaid(graph))                    # paste into any Markdown that renders Mermaid
+print(to_mermaid(graph, overlay(journal)))  # with ▶ running ✓ done ✗ failed … per node
+```
+
+![A brick sorter: a choice, a wait with a timeout, retries, a failure edge, a loop and a 2-of-3 join](docs/brick-sorter.png)
 
 ## Drivers
 
