@@ -9,7 +9,9 @@
     enroll    give subjects a channel, whose settings then apply to them
     migrate   move subjects pinned to one graph version onto this one
     signal    record that an awaited event happened, for subjects
-    settle    conclude waits and skip optional nodes past their grace
+    arrive    a subject comes back: it waits in a lane before running again
+    settle    conclude waits, let due arrivals through their lane, and skip
+              optional nodes past their grace
     history   every row forget, release or a loop took away, kept
     progress  what is recorded for ONE subject
     stages    what a BATCH went through, with durations
@@ -111,6 +113,7 @@ from .dag import (
     NODE_RUNNING,
     NODE_SCHEDULED,
     NODE_SKIPPED,
+    Lane,
     Node,
     accepts,
     claimable,
@@ -162,6 +165,17 @@ class Entry(NamedTuple):
     version: str | None = None
 
 
+class Arrival(NamedTuple):
+    """A subject waiting in a lane: the version it brings (`ref`, opaque),
+    its `place` in the lane, when it FIRST arrived, and whether it is
+    urgent."""
+
+    ref: str | None
+    place: str
+    arrived_at: str
+    urgent: bool = False
+
+
 class JournalDriver(Protocol):
     """The storage a journal needs. Every method works on node rows:
     `(subject, node) → status, started_at, finished_at`, one row per pair,
@@ -174,7 +188,7 @@ class JournalDriver(Protocol):
     claimable — the journal does both — and never commits.
     """
 
-    def scan(self, candidates: Any, *, name: str, nodes: tuple[str, ...],
+    def scan(self, candidates: Any, *, name: str | None, nodes: tuple[str, ...],
              parents: tuple[str, ...], page: int, now: str) -> Iterator[list[Entry]]:
         """The candidates, IN THEIR ORDER, page by page — each with its
         revision, its rows on `nodes`, and when its `scheduled` rows are due.
@@ -183,7 +197,8 @@ class JournalDriver(Protocol):
         that holds a row for `name` — other than a `scheduled` row due by
         `now` — or one of whose `parents` has no `NODE_SATISFYING` row
         (`parents` is empty when the node joins in a way a pre-filter cannot
-        know). It must not leave out anything else."""
+        know). It must not leave out anything else; with `name` None, nothing
+        for a row it holds."""
 
     def insert_if_unchanged(self, name: str, entries: list[tuple[Any, int]], *,
                             status: str, now: str, lease: str | None) -> list[Any]:
@@ -239,8 +254,9 @@ class JournalDriver(Protocol):
                 version: str, now: str) -> None:
         """ATOMICALLY for one subject: archive with reason `migrate` and
         delete the rows of `drop`, rename the rows of `rename` (old → new;
-        the journal guarantees no two land on one name), pin the subject to
-        `version` — overwriting — and raise its revision."""
+        the journal guarantees no two land on one name) — the arrivals
+        waiting in those nodes deleted and renamed alike — pin the subject
+        to `version`, overwriting, and raise its revision."""
 
     def channels(self, subjects: list[Any]) -> dict[Any, str]:
         """`{subject: channel}` for the subjects that have one."""
@@ -254,10 +270,37 @@ class JournalDriver(Protocol):
         """`{subject: rows of `name` archived with `reason`}`, subjects
         without any left out."""
 
-    def signal(self, subjects: list[Any], event: str, *, now: str, ref: str | None) -> int:
-        """Append to each subject's history a row `node=event`,
-        `status="received"`, `reason="signal"`, archived at `now`, `ref` in
-        `lease`. Return the count written."""
+    def note(self, subjects: list[Any], name: str, *, status: str, reason: str,
+             now: str, ref: str | None) -> int:
+        """Append to each subject's history a row `node=name`, `status`,
+        `reason`, started, finished and archived at `now`, `ref` in `lease`.
+        Return the count written."""
+
+    def arrive(self, name: str, subjects: list[Any], *, ref: str | None, now: str,
+               merge: str, position: str, urgent: bool) -> dict[Any, str]:
+        """ATOMICALLY per subject, the arrival of `name`: when none waits,
+        store one — `ref`, place and first arrival at `now`, `urgent`; when
+        one waits, merge — `ref` replaced when `merge` is "last", place moved
+        to `now` when `position` is "last", `urgent` kept once set. Return
+        `{subject: "queued" | "merged"}`."""
+
+    def arrivals(self, subjects: list[Any], name: str) -> dict[Any, Arrival]:
+        """`{subject: Arrival}` of the subjects waiting in `name`."""
+
+    def enter(self, name: str, entries: list[tuple[Any, int]], *,
+              archive: tuple[str, ...], now: str) -> list[Any]:
+        """ATOMICALLY, for each `(subject, revision)` whose revision is still
+        `revision`, that has an arrival waiting in `name`, and none of whose
+        rows of `archive` is `running` or `scheduled`: archive with reason
+        `arrival` and delete its rows of `archive`, raising its revision as
+        `forget` does; append to its history the arrival — `node=name`,
+        `status="entered"`, started at its first arrival, finished and
+        archived at `now`, its `ref` in `lease`, reason `lane` — and delete
+        it; insert a `done` row for `name`, started at the first arrival and
+        finished at `now`. Return the subjects that entered."""
+
+    def queued(self, name: str) -> int:
+        """How many arrivals wait in `name`."""
 
     def latest(self, subjects: list[Any], name: str,
                reason: str | None) -> dict[Any, str]:
@@ -344,6 +387,10 @@ class NodeJournal:
             raise ValueError(
                 f"node {name!r} waits for {n.wait!r}: it is settled (`settle`), "
                 f"never claimed")
+        if n.lane is not None:
+            raise ValueError(
+                f"node {name!r} is a lane: subjects `arrive` in it and `settle` lets "
+                f"them through, it is never claimed")
         limit = int(limit)
         token = secrets.token_hex(16)
         if limit <= 0:
@@ -376,7 +423,10 @@ class NodeJournal:
         # took it, a revision moved) is not replaced — under contention a
         # claim may take fewer than `limit`, never a wrong one.
         if chosen and self._limited(n):
-            taken = self._claim_within_limits(n, chosen, channel_of, now, token)
+            taken = self._within_limits(
+                n, chosen, channel_of, now,
+                lambda group: self.driver.insert_if_unchanged(
+                    name, group, status=NODE_RUNNING, now=now, lease=token))
         else:
             taken = (self.driver.insert_if_unchanged(
                          name, chosen, status=NODE_RUNNING, now=now, lease=token)
@@ -388,16 +438,17 @@ class NodeJournal:
         return bool(n.rate) or n.concurrency is not None or any(
             v.rate or v.concurrency is not None for _, v in self._variants(n.name))
 
-    def _claim_within_limits(self, n: Node, chosen: list[tuple[Any, int]],
-                             channel_of: dict[Any, str | None], now: str,
-                             token: str) -> list[Any]:
+    def _within_limits(self, n: Node, chosen: list[tuple[Any, int]],
+                       channel_of: dict[Any, str | None], now: str,
+                       write: Callable[[list[tuple[Any, int]]], list[Any]]) -> list[Any]:
         """RATE AND CONCURRENCY, decided here, kept by the storage's guard.
 
         Candidates are grouped by budget — one for the node, or one per
         channel with `per="channel"`. Under the guard of every budget's keys,
         each group is cut to what `concurrency` leaves free and what the rate
-        bands let through (`timing.admit`), written, and the bands advance by
-        what was actually taken."""
+        bands let through (`timing.admit`), written by `write` — a claim, or
+        a lane letting subjects in — and the bands advance by what was
+        actually written."""
         groups: dict[str | None, list[tuple[Any, int]]] = {}
         for subject, revision in chosen:
             budget = channel_of.get(subject) if n.per == "channel" else None
@@ -424,9 +475,7 @@ class NodeJournal:
                 if seen_by.rate:
                     allowed, _ = admit(seen_by.rate, [stored.get(k) for k in band_keys],
                                        instant, allowed)
-                written = self.driver.insert_if_unchanged(
-                    n.name, group[:allowed], status=NODE_RUNNING, now=now,
-                    lease=token) if allowed else []
+                written = write(group[:allowed]) if allowed else []
                 taken += written
                 if seen_by.rate:
                     _, tats = admit(seen_by.rate, [stored.get(k) for k in band_keys],
@@ -730,10 +779,15 @@ class NodeJournal:
             plans[subject] = (rename, drop)
         if problems:
             raise MigrationError(problems)
+        # Every renamed or dropped node is passed, rows or not: an arrival
+        # waiting in a lane follows its node too.
+        every_rename = {name: target for name, target in full.items()
+                        if target is not None and target != name}
+        every_drop = tuple(sorted(name for name, target in full.items() if target is None))
         now = self._clock()
         target_version: str = self.version
-        for subject, (renamed, dropped) in plans.items():
-            self.driver.rewrite(subject, rename=renamed, drop=dropped,
+        for subject in plans:
+            self.driver.rewrite(subject, rename=every_rename, drop=every_drop,
                                 version=target_version, now=now)
         return len(plans)
 
@@ -770,7 +824,60 @@ class NodeJournal:
         since it last went back (a loop, a forget), however early."""
         if not subjects:
             return 0
-        return self.driver.signal(_unique(subjects), event, now=self._clock(), ref=ref)
+        return self.driver.note(_unique(subjects), event, status="received",
+                                reason="signal", now=self._clock(), ref=ref)
+
+    def arrive(self, name: str, subjects: list[Any], *, ref: str | None = None,
+               urgent: bool = False) -> dict[str, int]:
+        """THESE SUBJECTS CAME BACK — a new version of each, `ref` naming it
+        (opaque, optional) — and wait in the lane `name` to run again.
+
+        An arrival for a subject already waiting is merged, as the lane says
+        (`Lane.merge`, `Lane.position`); the merge is noted in the history.
+        With `while_running="skip"`, an arrival for a subject whose pass is
+        still running is dropped, and noted. `urgent` lets the arrival through
+        at the next `settle` whatever its cooldown or delay — never over a
+        running pass.
+
+        Nothing runs here: `settle` lets due arrivals in. Return
+        `{"queued": n, "merged": n, "skipped": n}`."""
+        n = node(name, self.dag)
+        if n.lane is None:
+            raise ValueError(f"node {name!r} is not a lane: nothing arrives in it")
+        out = {"queued": 0, "merged": 0, "skipped": 0}
+        subjects = _unique(subjects)
+        if not subjects:
+            return out
+        now = self._clock()
+        lane_of = self._per_channel(name, "lane", subjects)
+        after = (name, *sorted(descendants(name, self.dag)))
+        groups: dict[Lane, list[Any]] = {}
+        for subject in subjects:
+            lane = lane_of[subject]
+            if lane.while_running == "skip" and any(
+                    self.driver.progress(subject).get(x) in (NODE_RUNNING, NODE_SCHEDULED)
+                    for x in after):
+                self.driver.note([subject], name, status="skipped", reason="lane",
+                                 now=now, ref=ref)
+                out["skipped"] += 1
+                continue
+            groups.setdefault(lane, []).append(subject)
+        for lane, group in groups.items():
+            outcome = self.driver.arrive(name, group, ref=ref, now=now, merge=lane.merge,
+                                         position=lane.position, urgent=urgent)
+            merged = [s for s in group if outcome.get(s) == "merged"]
+            if merged:
+                self.driver.note(merged, name, status="merged", reason="lane", now=now,
+                                 ref=ref)
+            out["merged"] += len(merged)
+            out["queued"] += sum(1 for s in group if outcome.get(s) == "queued")
+        self._pin(subjects)
+        return out
+
+    def arrival(self, subject: Any, name: str) -> Arrival | None:
+        """What waits for this subject in the lane `name`, if anything."""
+        node(name, self.dag)
+        return self.driver.arrivals([subject], name).get(subject)
 
     def settle(self, candidates: Any) -> dict[str, dict[str, int]]:
         """CONCLUDE WHAT NO WORKER DOES, on the candidates, for every node:
@@ -778,6 +885,8 @@ class NodeJournal:
             wait      `done` when a signal was received since the node last
                       went back; `failed` once `timeout` has passed since
                       its parents concluded
+            lane      a due arrival enters: the previous pass is archived and
+                      the lane is `done` (`Lane`); reported as `entered`
             grace     an optional node still untaken `grace` after its
                       parents concluded is `skipped`
 
@@ -788,6 +897,11 @@ class NodeJournal:
         now = self._clock()
         out: dict[str, dict[str, int]] = {}
         for n in self.dag:
+            if n.lane is not None:
+                entered = self._let_in(n, candidates, now)
+                if entered:
+                    out.setdefault(n.name, {})["entered"] = entered
+                continue
             if n.wait is None and n.grace is None and all(
                     v.grace is None for _, v in self._variants(n.name)):
                 continue
@@ -830,6 +944,60 @@ class NodeJournal:
                     out.setdefault(n.name, {})[status] = len(written)
         return out
 
+    def _let_in(self, n: Node, candidates: Any, now: str) -> int:
+        """THE LANE'S DOOR. An arrival enters when the subject's parents are
+        joined, nothing of its previous pass runs, and it is due: urgent, or
+        past both its `delay` (from its place) and its `cooldown` (from the
+        end of the previous pass) — or past `max_wait` from its first arrival
+        whatever the rest. Due arrivals enter in the order of their places,
+        within the lane's `rate`."""
+        after = tuple(sorted(descendants(n.name, self.dag)))
+        pass_nodes = (n.name, *after)
+        entries: dict[Any, Entry] = {}
+        order: dict[Any, int] = {}
+        # No pre-filter on the lane's own row: the previous pass holds one.
+        for page in self.driver.scan(candidates, name=None, nodes=(*pass_nodes, *n.parents),
+                                     parents=(), page=PAGE, now=now):
+            for e in page:
+                if e.subject not in entries and self._mine(e):
+                    order[e.subject] = len(order)
+                    entries[e.subject] = e
+        if not entries:
+            return 0
+        waiting = self.driver.arrivals(list(entries), n.name)
+        due: list[tuple[str, int, Any]] = []
+        for subject, arrival in waiting.items():
+            e = entries[subject]
+            if not joined(n.name, self.dag, e.rows):
+                continue
+            if any(e.rows.get(x) in (NODE_RUNNING, NODE_SCHEDULED) for x in pass_nodes):
+                continue
+            lane = self.settings(n.name, e.channel).lane
+            assert lane is not None
+            if not arrival.urgent:
+                ready = [arrival.place]
+                if lane.delay is not None:
+                    ready.append(shift(arrival.place, seconds(lane.delay)))
+                ended = [e.finished[x] for x in pass_nodes if x in e.finished]
+                if lane.cooldown is not None and ended:
+                    ready.append(shift(max(ended), seconds(lane.cooldown)))
+                late = (lane.max_wait is not None
+                        and shift(arrival.arrived_at, seconds(lane.max_wait)) <= now)
+                if max(ready) > now and not late:
+                    continue
+            due.append((arrival.place, order[subject], subject))
+        chosen = [(subject, entries[subject].revision) for _, _, subject in sorted(due)]
+        if not chosen:
+            return 0
+
+        def write(group: list[tuple[Any, int]]) -> list[Any]:
+            return self.driver.enter(n.name, group, archive=pass_nodes, now=now)
+
+        if self._limited(n):
+            return len(self._within_limits(
+                n, chosen, {s: entries[s].channel for s, _ in chosen}, now, write))
+        return len(write(chosen))
+
     def history(self, subject: Any) -> list[dict[str, Any]]:
         """Every row taken away from ONE subject — by `forget`, `release` or
         a loop — oldest first, each with `archived_at` and `reason`."""
@@ -857,10 +1025,13 @@ class NodeJournal:
 
     def counts(self, name: str) -> dict[str, int]:
         """How many subjects stand where, for this node."""
-        node(name, self.dag)
+        n = node(name, self.dag)
         by_status = self.driver.status_counts(name)
-        return {status: int(by_status.get(status, 0))
-                for status in (NODE_RUNNING, NODE_SCHEDULED, *NODE_CONCLUDED)}
+        out = {status: int(by_status.get(status, 0))
+               for status in (NODE_RUNNING, NODE_SCHEDULED, *NODE_CONCLUDED)}
+        if n.lane is not None:
+            out["waiting"] = int(self.driver.queued(name))
+        return out
 
     def node_for_state(self, state: str) -> str | None:
         """The node whose WORKING state this is, if any.

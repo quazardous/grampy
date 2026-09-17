@@ -29,7 +29,7 @@ from ..dag import (
     NODE_SCHEDULED,
     NODE_SKIPPED,
 )
-from ..journal import Entry, utc_now
+from ..journal import Arrival, Entry, utc_now
 
 
 @dataclass
@@ -53,6 +53,7 @@ class MemoryDriver:
         self.version_of: dict[Any, str] = {}
         self.limiter: dict[str, float] = {}
         self.archive: list[tuple[Any, dict[str, Any]]] = []
+        self.waiting: dict[tuple[Any, str], Arrival] = {}
         self._lock = threading.RLock()
 
     def _take_away(self, subject: Any, name: str, *, now: str, reason: str) -> bool:
@@ -71,7 +72,7 @@ class MemoryDriver:
     def now(self) -> str:
         return utc_now()
 
-    def scan(self, candidates: Any, *, name: str, nodes: tuple[str, ...],
+    def scan(self, candidates: Any, *, name: str | None, nodes: tuple[str, ...],
              parents: tuple[str, ...], page: int, now: str) -> Iterator[list[Entry]]:
         """No pre-filter: every candidate is read, the journal decides."""
         subjects = list(candidates)
@@ -212,10 +213,15 @@ class MemoryDriver:
         with self._lock:
             for name in drop:
                 self._take_away(subject, name, now=now, reason="migrate")
+                self.waiting.pop((subject, name), None)
             moved = {new: self.rows.pop((subject, old)) for old, new in rename.items()
                      if (subject, old) in self.rows}
             for new, row in moved.items():
                 self.rows[(subject, new)] = row
+            waiting = {new: self.waiting.pop((subject, old)) for old, new in rename.items()
+                       if (subject, old) in self.waiting}
+            for new, arrival in waiting.items():
+                self.waiting[(subject, new)] = arrival
             self.version_of[subject] = version
             self.revisions[subject] = self.revisions.get(subject, 0) + 1
 
@@ -239,14 +245,63 @@ class MemoryDriver:
                     counts[s] = counts.get(s, 0) + 1
         return counts
 
-    def signal(self, subjects: list[Any], event: str, *, now: str, ref: str | None) -> int:
+    def note(self, subjects: list[Any], name: str, *, status: str, reason: str,
+             now: str, ref: str | None) -> int:
         with self._lock:
             for subject in subjects:
                 self.archive.append((subject, {
-                    "node": event, "status": "received", "started_at": now,
+                    "node": name, "status": status, "started_at": now,
                     "finished_at": now, "lease": ref, "archived_at": now,
-                    "reason": "signal"}))
+                    "reason": reason}))
         return len(subjects)
+
+    def arrive(self, name: str, subjects: list[Any], *, ref: str | None, now: str,
+               merge: str, position: str, urgent: bool) -> dict[Any, str]:
+        out: dict[Any, str] = {}
+        with self._lock:
+            for subject in subjects:
+                current = self.waiting.get((subject, name))
+                if current is None:
+                    self.waiting[(subject, name)] = Arrival(ref, now, now, urgent)
+                    out[subject] = "queued"
+                    continue
+                self.waiting[(subject, name)] = Arrival(
+                    ref if merge == "last" else current.ref,
+                    now if position == "last" else current.place,
+                    current.arrived_at, current.urgent or urgent)
+                out[subject] = "merged"
+        return out
+
+    def arrivals(self, subjects: list[Any], name: str) -> dict[Any, Arrival]:
+        with self._lock:
+            return {s: self.waiting[(s, name)] for s in subjects if (s, name) in self.waiting}
+
+    def enter(self, name: str, entries: list[tuple[Any, int]], *,
+              archive: tuple[str, ...], now: str) -> list[Any]:
+        entered: list[Any] = []
+        with self._lock:
+            for subject, revision in entries:
+                arrival = self.waiting.get((subject, name))
+                if arrival is None or self.revisions.get(subject, 0) != revision:
+                    continue
+                if any(self.rows[(subject, x)].status in (NODE_RUNNING, NODE_SCHEDULED)
+                       for x in archive if (subject, x) in self.rows):
+                    continue
+                self.revisions[subject] = revision + 1
+                for x in archive:
+                    self._take_away(subject, x, now=now, reason="arrival")
+                del self.waiting[(subject, name)]
+                self.archive.append((subject, {
+                    "node": name, "status": "entered", "started_at": arrival.arrived_at,
+                    "finished_at": now, "lease": arrival.ref, "archived_at": now,
+                    "reason": "lane"}))
+                self.rows[(subject, name)] = Row(NODE_DONE, arrival.arrived_at, now)
+                entered.append(subject)
+        return entered
+
+    def queued(self, name: str) -> int:
+        with self._lock:
+            return sum(1 for (_, n) in self.waiting if n == name)
 
     def latest(self, subjects: list[Any], name: str,
                reason: str | None) -> dict[Any, str]:

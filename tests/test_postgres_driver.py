@@ -60,6 +60,17 @@ def limits_table(metadata, name):
         sa.Column("value", sa.Float))
 
 
+def arrivals_table(metadata, name, subject_type=str):
+    return sa.Table(
+        name, metadata,
+        sa.Column("subject", _type(subject_type), primary_key=True),
+        sa.Column("node", sa.Text, primary_key=True),
+        sa.Column("ref", sa.Text),
+        sa.Column("place", sa.Text, nullable=False),
+        sa.Column("arrived_at", sa.Text, nullable=False),
+        sa.Column("urgent", sa.Boolean, nullable=False))
+
+
 def revision_table(metadata, name, subject_type=str):
     return sa.Table(
         name, metadata,
@@ -92,17 +103,18 @@ class PostgresHarness:
         revisions = revision_table(metadata, f"grampy_revisions_{n}", subject_type)
         history = history_table(metadata, f"grampy_history_{n}", subject_type)
         limits = limits_table(metadata, f"grampy_limits_{n}")
+        arrivals = arrivals_table(metadata, f"grampy_arrivals_{n}", subject_type)
         metadata.create_all(self.conn)
         return NodeJournal(
             PostgresDriver(self.conn.execute, table, revisions, history, subject="subject",
-                           limits=limits),
+                           limits=limits, arrivals=arrivals),
             dag, clock=clock)
 
     def journal_on(self, journal, dag, clock):
         d = journal.driver
         return NodeJournal(PostgresDriver(self.conn.execute, d.table, d.revisions,
                                           d.history_table, subject="subject",
-                                          limits=d.limits_table),
+                                          limits=d.limits_table, arrivals=d.arrivals_table),
                            dag, clock=clock)
 
     def candidates(self, subjects):
@@ -134,6 +146,7 @@ class PostgresStore:
         self.revisions = revision_table(self.metadata, f"grampy_shared_revisions_{n}")
         self.history = history_table(self.metadata, f"grampy_shared_history_{n}")
         self.limits = limits_table(self.metadata, f"grampy_shared_limits_{n}")
+        self.arrivals = arrivals_table(self.metadata, f"grampy_shared_arrivals_{n}")
         self.metadata.create_all(engine)
 
     def session(self):
@@ -149,7 +162,8 @@ class PostgresSession:
         self.transaction = self.conn.begin()
         self.journal = NodeJournal(
             PostgresDriver(self.conn.execute, store.table, store.revisions,
-                           store.history, subject="subject", limits=store.limits),
+                           store.history, subject="subject", limits=store.limits,
+                           arrivals=store.arrivals),
             store.dag, clock=store.clock)
 
     def candidates(self, subjects):
@@ -198,3 +212,14 @@ def test_a_revisions_table_without_its_column_is_refused():
     history = history_table(metadata, "history")
     with pytest.raises(ValueError, match="lacks the column"):
         PostgresDriver(lambda statement: None, table, revisions, history, subject="subject")
+
+
+def test_a_lane_without_an_arrivals_table_says_so():
+    from quazardous.grampy import Lane, Node
+    metadata = sa.MetaData()
+    driver = PostgresDriver(lambda statement: None, node_table(metadata, "nodes"),
+                            revision_table(metadata, "revisions"),
+                            history_table(metadata, "history"), subject="subject")
+    journal = NodeJournal(driver, (Node("in", lane=Lane()),), clock=lambda: "2026-01-01")
+    with pytest.raises(ValueError, match="arrivals"):
+        journal.driver.arrivals(["s1"], "in")

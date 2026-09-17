@@ -51,6 +51,7 @@ from .dag import (
     NODE_SCHEDULED,
     NODE_SKIPPED,
     DagError,
+    Lane,
     Loop,
     Node,
     accepts,
@@ -129,6 +130,25 @@ ONBOARDING = (
     Node("remind", parents=("clicked",), on={"clicked": ("failed",)}),
     Node("survey", parents=("send",), optional=True, grace="1d"),
 )
+
+
+#: Listings that come back: each new version waits in a lane, an hour at
+#: least after the last pass ended, then is scraped and published.
+LISTING = (
+    Node("arrive", lane=Lane.throttle(cooldown="1h")),
+    Node("scrape", parents=("arrive",)),
+    Node("publish", parents=("scrape",)),
+)
+
+T0 = "2026-01-01T00:00:00+00:00"
+
+
+def _at(minutes: float) -> str:
+    return shift(T0, minutes * 60)
+
+
+def _listing(**lane: Any) -> tuple[Node, ...]:
+    return (Node("arrive", lane=Lane(**lane)), *LISTING[1:])
 
 
 class Clock:
@@ -714,6 +734,210 @@ class JournalContract:
         finally:
             store.close()
 
+    # -- lanes -----------------------------------------------------------------
+
+    def _settle(self, harness, journal, subjects):
+        return journal.settle(harness.candidates(subjects)).get("arrive", {}).get("entered", 0)
+
+    def _through(self, harness, journal, subjects):
+        """One whole pass after the lane: scrape, then publish."""
+        self._run(harness, journal, "scrape", subjects)
+        self._run(harness, journal, "publish", subjects)
+
+    def test_an_arrival_waits_in_its_lane_until_settled(self, harness, clock):
+        journal = harness.journal(LISTING, clock)
+        clock.now = T0
+        assert journal.arrive("arrive", ["s1"], ref="v1") == {
+            "queued": 1, "merged": 0, "skipped": 0}
+        assert journal.progress("s1") == {}
+        assert self._claim(harness, journal, "scrape", ["s1"]) == []
+        assert journal.counts("arrive")["waiting"] == 1
+        assert journal.arrival("s1", "arrive").ref == "v1"
+        assert self._settle(harness, journal, ["s1"]) == 1
+        assert journal.progress("s1") == {"arrive": NODE_DONE}
+        assert journal.arrival("s1", "arrive") is None
+        assert journal.counts("arrive")["waiting"] == 0
+        assert self._claim(harness, journal, "scrape", ["s1"]) == ["s1"]
+        [entered] = journal.history("s1")
+        assert (entered["node"], entered["status"], entered["lease"], entered["reason"]) == (
+            "arrive", "entered", "v1", "lane")
+
+    def test_a_lane_is_never_claimed_and_only_a_lane_takes_arrivals(self, harness, clock):
+        journal = harness.journal(LISTING, clock)
+        with pytest.raises(ValueError, match="lane"):
+            self._claim(harness, journal, "arrive", ["s1"])
+        with pytest.raises(ValueError, match="not a lane"):
+            journal.arrive("scrape", ["s1"])
+
+    def test_throttle_keeps_the_last_version_at_the_place_of_the_first(self, harness, clock):
+        journal = harness.journal(LISTING, clock)
+        clock.now = _at(0)
+        journal.arrive("arrive", ["s1"], ref="v1")
+        clock.now = _at(5)
+        assert journal.arrive("arrive", ["s1"], ref="v2")["merged"] == 1
+        waiting = journal.arrival("s1", "arrive")
+        assert (waiting.ref, waiting.place, waiting.arrived_at) == ("v2", _at(0), _at(0))
+        merged = [e for e in journal.history("s1") if e["status"] == "merged"]
+        assert [e["lease"] for e in merged] == ["v2"]
+
+    def test_dedupe_keeps_the_first_version(self, harness, clock):
+        journal = harness.journal(_listing(merge="first"), clock)
+        clock.now = _at(0)
+        journal.arrive("arrive", ["s1"], ref="v1")
+        clock.now = _at(5)
+        journal.arrive("arrive", ["s1"], ref="v2")
+        assert journal.arrival("s1", "arrive").ref == "v1"
+
+    def test_debounce_waits_for_quiet_and_max_wait_ends_it(self, harness, clock):
+        journal = harness.journal(_listing(position="last", delay="10m", max_wait="25m"), clock)
+        for minute in (0, 5, 10):
+            clock.now = _at(minute)
+            journal.arrive("arrive", ["s1"], ref=f"v{minute}")
+        assert journal.arrival("s1", "arrive").place == _at(10)
+        clock.now = _at(19)
+        assert self._settle(harness, journal, ["s1"]) == 0, "quiet since 10, not 10 minutes yet"
+        clock.now = _at(15)
+        journal.arrive("arrive", ["s1"], ref="v15")
+        clock.now = _at(24)
+        assert self._settle(harness, journal, ["s1"]) == 0
+        clock.now = _at(25)
+        assert self._settle(harness, journal, ["s1"]) == 1, "max_wait from the first arrival"
+        assert journal.history("s1")[-1]["lease"] == "v15"
+
+    def test_cooldown_runs_from_the_end_of_the_previous_pass(self, harness, clock):
+        journal = harness.journal(LISTING, clock)
+        clock.now = _at(0)
+        journal.arrive("arrive", ["s1"], ref="v1")
+        assert self._settle(harness, journal, ["s1"]) == 1, "no previous pass, no cooldown"
+        clock.now = _at(30)
+        self._through(harness, journal, ["s1"])
+        clock.now = _at(40)
+        journal.arrive("arrive", ["s1"], ref="v2")
+        clock.now = _at(89)
+        assert self._settle(harness, journal, ["s1"]) == 0, "the pass ended at 30"
+        assert journal.progress("s1") == {
+            "arrive": NODE_DONE, "scrape": NODE_DONE, "publish": NODE_DONE}, (
+            "the previous pass stays visible while the next version waits")
+        clock.now = _at(90)
+        assert self._settle(harness, journal, ["s1"]) == 1
+        assert journal.progress("s1") == {"arrive": NODE_DONE}
+        archived = sorted((e["node"], e["status"]) for e in journal.history("s1")
+                          if e["reason"] == "arrival")
+        assert archived == [("arrive", NODE_DONE), ("publish", NODE_DONE),
+                            ("scrape", NODE_DONE)]
+        assert self._claim(harness, journal, "scrape", ["s1"]) == ["s1"]
+
+    def test_an_arrival_during_a_running_pass_waits_for_it(self, harness, clock):
+        journal = harness.journal(_listing(), clock)
+        clock.now = _at(0)
+        journal.arrive("arrive", ["s1"], ref="v1")
+        self._settle(harness, journal, ["s1"])
+        lease = self._claim(harness, journal, "scrape", ["s1"])
+        journal.arrive("arrive", ["s1"], ref="v2")
+        assert self._settle(harness, journal, ["s1"]) == 0, "scrape is running"
+        journal.conclude("scrape", lease, token=lease.token)
+        assert self._settle(harness, journal, ["s1"]) == 1
+        assert journal.progress("s1") == {"arrive": NODE_DONE}
+
+    def test_the_driver_never_lets_an_arrival_in_over_a_running_pass(self, harness, clock):
+        """What the journal checks before, the driver holds on its own: a
+        claim may land between the journal's read and the write."""
+        journal = harness.journal(_listing(), clock)
+        clock.now = _at(0)
+        journal.arrive("arrive", ["s1"], ref="v1")
+        self._settle(harness, journal, ["s1"])
+        self._claim(harness, journal, "scrape", ["s1"])
+        journal.arrive("arrive", ["s1"], ref="v2")
+        [entry] = [e for page in journal.driver.scan(
+            harness.candidates(["s1"]), name=None, nodes=("arrive", "scrape", "publish"),
+            parents=(), page=10, now=_at(0)) for e in page]
+        assert journal.driver.enter("arrive", [("s1", entry.revision)],
+                                    archive=("arrive", "scrape", "publish"), now=_at(0)) == []
+        assert journal.driver.enter("arrive", [("s1", entry.revision + 1)],
+                                    archive=("arrive",), now=_at(0)) == [], "stale revision"
+        assert journal.progress("s1") == {"arrive": NODE_DONE, "scrape": NODE_RUNNING}
+        assert journal.driver.enter("scrape", [("s1", entry.revision)],
+                                    archive=("scrape",), now=_at(0)) == [], "nothing waits there"
+
+    def test_skip_drops_an_arrival_during_a_running_pass(self, harness, clock):
+        journal = harness.journal(_listing(while_running="skip"), clock)
+        clock.now = _at(0)
+        journal.arrive("arrive", ["s1"], ref="v1")
+        self._settle(harness, journal, ["s1"])
+        self._claim(harness, journal, "scrape", ["s1"])
+        assert journal.arrive("arrive", ["s1"], ref="v2") == {
+            "queued": 0, "merged": 0, "skipped": 1}
+        assert journal.arrival("s1", "arrive") is None
+        assert [e["lease"] for e in journal.history("s1") if e["status"] == "skipped"] == ["v2"]
+
+    def test_an_urgent_arrival_skips_the_cooldown_but_not_a_running_pass(self, harness, clock):
+        journal = harness.journal(LISTING, clock)
+        clock.now = _at(0)
+        journal.arrive("arrive", ["s1"], ref="v1")
+        self._settle(harness, journal, ["s1"])
+        lease = self._claim(harness, journal, "scrape", ["s1"])
+        journal.arrive("arrive", ["s1"], ref="v2")
+        journal.arrive("arrive", ["s1"], ref="v3", urgent=True)
+        assert journal.arrival("s1", "arrive").urgent
+        assert self._settle(harness, journal, ["s1"]) == 0
+        journal.conclude("scrape", lease, token=lease.token)
+        clock.now = _at(1)
+        assert self._settle(harness, journal, ["s1"]) == 1, "urgent: no hour of cooldown"
+
+    def test_a_channel_tunes_its_lane(self, harness, clock):
+        graph = Graph(Document("listings"), LISTING,
+                      channels={"fast": {"arrive": {"lane": Lane.throttle(cooldown="5m")}}})
+        journal = harness.journal(graph, clock)
+        journal.enroll(["slow1"], None)
+        journal.enroll(["fast1"], "fast")
+        clock.now = _at(0)
+        journal.arrive("arrive", ["slow1", "fast1"])
+        assert self._settle(harness, journal, ["slow1", "fast1"]) == 2
+        self._through(harness, journal, ["slow1", "fast1"])
+        journal.arrive("arrive", ["slow1", "fast1"])
+        clock.now = _at(5)
+        assert self._settle(harness, journal, ["slow1", "fast1"]) == 1
+        assert journal.arrival("slow1", "arrive") is not None
+        with pytest.raises(DagError, match="never adds or removes"):
+            Graph(Document("listings"), LISTING,
+                  channels={"fast": {"scrape": {"lane": Lane()}}})
+
+    def test_a_lane_lets_arrivals_in_by_place_within_its_rate(self, harness, clock):
+        nodes = (Node("arrive", lane=Lane(), rate=(Rate(1, "1m"),)), *LISTING[1:])
+        journal = harness.journal(nodes, clock)
+        for minute, subject in ((0, "c"), (1, "a"), (2, "b")):
+            clock.now = _at(minute)
+            journal.arrive("arrive", [subject])
+        clock.now = _at(3)
+        assert self._settle(harness, journal, ["a", "b", "c"]) == 1
+        assert journal.progress("c") == {"arrive": NODE_DONE}, "c arrived first"
+        assert self._settle(harness, journal, ["a", "b", "c"]) == 0, "one a minute"
+        clock.now = _at(4)
+        assert self._settle(harness, journal, ["a", "b", "c"]) == 1
+        assert journal.progress("a") == {"arrive": NODE_DONE}
+
+    def test_a_lane_after_other_nodes_waits_for_its_parents(self, harness, clock):
+        nodes = (Node("fetch"), Node("tag", parents=("fetch",), lane=Lane()),
+                 Node("index", parents=("tag",)))
+        journal = harness.journal(nodes, clock)
+        journal.arrive("tag", ["s1"])
+        assert journal.settle(harness.candidates(["s1"])) == {}
+        self._run(harness, journal, "fetch", ["s1"])
+        assert journal.settle(harness.candidates(["s1"])) == {"tag": {"entered": 1}}
+        assert journal.progress("s1") == {"fetch": NODE_DONE, "tag": NODE_DONE}
+
+    def test_a_migration_carries_the_arrivals_of_a_renamed_lane(self, harness, clock):
+        v1 = Graph(Document("listings", version="1"), LISTING)
+        v2 = Graph(Document("listings", version="2"),
+                   (Node("inbox", lane=Lane.throttle(cooldown="1h")),
+                    Node("scrape", parents=("inbox",)), Node("publish", parents=("scrape",))))
+        old = harness.journal(v1, clock)
+        new = harness.journal_on(old, v2, clock)
+        old.arrive("arrive", ["s1"], ref="v1")
+        assert new.migrate(["s1"], v1, {"arrive": "inbox"}) == 1
+        assert new.arrival("s1", "inbox").ref == "v1"
+        assert new.settle(harness.candidates(["s1"])) == {"inbox": {"entered": 1}}
+
     # -- skip ----------------------------------------------------------------
 
     def test_only_an_optional_node_is_skipped(self, harness, journal):
@@ -820,6 +1044,19 @@ class JournalContract:
                               deadline=None, derandomize=True,
                               suppress_health_check=list(HealthCheck)))
 
+    def test_the_driver_follows_the_model_through_lanes(self, harness):
+        """The same model, every graph entered through a lane: arrivals,
+        merges, cooldowns, delays and waits over and over again."""
+        pytest.importorskip("hypothesis")
+        from hypothesis import HealthCheck, settings
+        from hypothesis.stateful import run_state_machine_as_test
+
+        run_state_machine_as_test(
+            _model_machine(harness, str, lane_root=True),
+            settings=settings(max_examples=50, stateful_step_count=50,
+                              deadline=None, derandomize=True,
+                              suppress_health_check=list(HealthCheck)))
+
     # -- subject ids -----------------------------------------------------------
 
     def test_integer_ids_come_back_as_integers(self, harness, clock):
@@ -869,6 +1106,88 @@ class JournalContract:
                   worker.commit, requeue.commit)
 
             _assert_no_orphan(store, ["s1"])
+        finally:
+            store.close()
+
+    def _lane_ready(self, store):
+        """s1 went through `scrape`; `publish` is claimable; a second version
+        waits in the lane, due."""
+        setup = store.session()
+        setup.journal.arrive("arrive", ["s1"], ref="v1")
+        setup.journal.settle(setup.candidates(["s1"]))
+        lease = setup.journal.claim("scrape", 1, candidates=setup.candidates(["s1"]))
+        setup.journal.conclude("scrape", lease, token=lease.token)
+        setup.journal.arrive("arrive", ["s1"], ref="v2")
+        setup.commit()
+
+    @pytest.mark.parametrize("first", ["worker", "door"])
+    def test_a_lane_never_lets_a_version_in_over_a_claim(self, harness, clock, first):
+        """The lane lets v2 in — archiving the pass — while a worker claims
+        `publish` on the strength of that pass. Whoever writes first, a claim
+        that was granted is never archived under the worker's feet, and
+        `publish` never ends up held without its parent."""
+        store = harness.store(_listing(), clock)
+        try:
+            self._lane_ready(store)
+            worker, door = store.session(), store.session()
+            granted: list[Any] = []
+
+            def claim() -> None:
+                granted.extend(worker.journal.claim(
+                    "publish", 1, candidates=worker.candidates(["s1"])))
+
+            def let_in() -> None:
+                door.journal.settle(door.candidates(["s1"]))
+
+            if first == "worker":
+                claim()
+                _race(let_in, door.commit, worker.commit)
+            else:
+                let_in()
+                _race(claim, worker.commit, door.commit)
+            _assert_no_orphan(store, ["s1"], _listing())
+            check = store.session()
+            try:
+                if granted:
+                    assert check.journal.progress("s1").get("publish") == NODE_RUNNING, (
+                        "the lane archived a pass while a worker held publish")
+                    assert check.journal.arrival("s1", "arrive") is not None
+            finally:
+                check.rollback()
+        finally:
+            store.close()
+
+    @pytest.mark.parametrize("first", ["arrival", "door"])
+    def test_a_version_arriving_as_the_lane_lets_one_in_is_never_lost(
+            self, harness, clock, first):
+        store = harness.store(_listing(), clock)
+        try:
+            setup = store.session()
+            setup.journal.arrive("arrive", ["s1"], ref="v1")
+            setup.commit()
+            arrival, door = store.session(), store.session()
+
+            def arrive() -> None:
+                arrival.journal.arrive("arrive", ["s1"], ref="v2")
+
+            def let_in() -> None:
+                door.journal.settle(door.candidates(["s1"]))
+
+            if first == "arrival":
+                arrive()
+                _race(let_in, door.commit, arrival.commit)
+            else:
+                let_in()
+                _race(arrive, arrival.commit, door.commit)
+            check = store.session()
+            try:
+                entered = [e["lease"] for e in check.journal.history("s1")
+                           if e["status"] == "entered"]
+                waiting = check.journal.arrival("s1", "arrive")
+                kept = [*entered, *([waiting.ref] if waiting else [])]
+                assert "v2" in kept, f"v2 lost: entered {entered}, waiting {waiting}"
+            finally:
+                check.rollback()
         finally:
             store.close()
 
@@ -931,10 +1250,11 @@ class JournalContract:
             store.close()
 
 
-def _model_machine(harness: Any, subject_type: type = str) -> Any:
+def _model_machine(harness: Any, subject_type: type = str, lane_root: bool = False) -> Any:
     """A Hypothesis state machine: one random graph per run, one journal on
     it, and the MODEL — `{subject: {node: (status, started_at, lease)}}` —
-    moved by the rule written as plainly as possible."""
+    moved by the rule written as plainly as possible. `lane_root` makes the
+    root a lane in every graph, so that runs dwell on arrivals."""
     from hypothesis import strategies as st
     from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, rule
 
@@ -968,16 +1288,18 @@ def _model_machine(harness: Any, subject_type: type = str) -> Any:
 
         nodes = []
         for spec in specs:
-            choice = spec["name"] in with_children and draw(st.integers(0, 3)) == 0
+            root_lane = lane_root and not spec["parents"]
+            choice = (not root_lane and spec["name"] in with_children
+                      and draw(st.integers(0, 3)) == 0)
             loop = None
-            if not choice and draw(st.integers(0, 3)) == 0:
+            if not choice and not root_lane and draw(st.integers(0, 3)) == 0:
                 loop = Loop(to=draw(st.sampled_from([spec["name"], *upstream(spec["name"])])),
                             max=draw(st.integers(1, 2)),
                             on=tuple(draw(st.lists(st.sampled_from(
                                 (NODE_DONE, NODE_SKIPPED, NODE_FAILED)),
                                 min_size=1, max_size=2, unique=True))))
             retry = None
-            if draw(st.integers(0, 3)) == 0:
+            if not root_lane and draw(st.integers(0, 3)) == 0:
                 retry = Retry(limit=draw(st.integers(1, 2)), delay=draw(st.integers(0, 3)),
                               backoff=draw(st.sampled_from(("constant", "linear",
                                                             "exponential"))))
@@ -986,13 +1308,22 @@ def _model_machine(harness: Any, subject_type: type = str) -> Any:
                     and draw(st.booleans())):
                 wait = draw(st.sampled_from(("ev1", "ev2")))
                 timeout = draw(st.one_of(st.none(), st.integers(1, 2), st.integers(1, 2)))
-            optional = not choice and draw(st.booleans())
+            lane = None
+            if root_lane or (not choice and loop is None and retry is None and wait is None
+                             and draw(st.integers(0, 2)) == 0):
+                lane = Lane(merge=draw(st.sampled_from(("first", "last"))),
+                            position=draw(st.sampled_from(("first", "last"))),
+                            cooldown=draw(st.one_of(st.none(), st.integers(5, 30))),
+                            delay=draw(st.one_of(st.none(), st.integers(1, 4))),
+                            max_wait=draw(st.one_of(st.none(), st.integers(3, 12))),
+                            while_running=draw(st.sampled_from(("queue", "skip"))))
+            optional = not choice and lane is None and draw(st.booleans())
             if optional and draw(st.integers(0, 3)) > 0:
                 grace = draw(st.integers(1, 2))
             nodes.append(Node(spec["name"], parents=spec["parents"],
                               on=spec.get("on", {}), need=spec.get("need"),
                               choice=choice, loop=loop, retry=retry, wait=wait,
-                              timeout=timeout, grace=grace, optional=optional))
+                              timeout=timeout, grace=grace, optional=optional, lane=lane))
         return tuple(nodes)
 
     # Few subjects, so that they collide; ids given back EXACTLY as given.
@@ -1015,6 +1346,8 @@ def _model_machine(harness: Any, subject_type: type = str) -> Any:
                 s: [] for s in _SUBJECTS}
             self.passes: dict[tuple[str, str], int] = {}
             self.retried: dict[tuple[str, str], int] = {}
+            # (subject, lane) -> (ref, place, arrived_at, urgent)
+            self.waiting: dict[tuple[Any, str], tuple[Any, str, str, bool]] = {}
 
         def _archive(self, s: str, name: str, reason: str) -> bool:
             row = self.model[s].pop(name, None)
@@ -1042,7 +1375,7 @@ def _model_machine(harness: Any, subject_type: type = str) -> Any:
                    node: Node | None = None) -> Any:
             n = node or self._node(data)
             self._tick()
-            if n.wait is not None:
+            if n.wait is not None or n.lane is not None:
                 with pytest.raises(ValueError):
                     self.journal.claim(n.name, limit, candidates=harness.candidates(candidates))
                 return None
@@ -1110,7 +1443,7 @@ def _model_machine(harness: Any, subject_type: type = str) -> Any:
         def advance(self, data: Any) -> None:
             """A worker's full turn on one node — claim then conclude done —
             so that sequences reach deep states (joins, waits, timeouts)."""
-            workable = [x for x in self.dag if x.wait is None]
+            workable = [x for x in self.dag if x.wait is None and x.lane is None]
             if not workable:
                 return
             n = data.draw(st.sampled_from(workable))
@@ -1152,6 +1485,72 @@ def _model_machine(harness: Any, subject_type: type = str) -> Any:
                 self.archived[s].append((self.clock.now, event, "received", "signal"))
             assert self.journal.signal(candidates, event) == len(unique)
 
+        def _pass(self, n: Node) -> tuple[str, ...]:
+            return (n.name, *sorted(descendants(n.name, self.dag)))
+
+        def _running(self, s: Any, n: Node) -> bool:
+            return any(self.model[s].get(x, ("",))[0] in (NODE_RUNNING, NODE_SCHEDULED)
+                       for x in self._pass(n))
+
+        @rule(data=st.data(), candidates=subjects, ref=st.sampled_from((None, "r1", "r2")),
+              urgent=st.integers(0, 5).map(lambda x: x == 5))
+        def arrive(self, data: Any, candidates: list[Any], ref: Any, urgent: bool) -> None:
+            lanes = [x for x in self.dag if x.lane is not None]
+            if not lanes:
+                return
+            n = data.draw(st.sampled_from(lanes))
+            lane = n.lane
+            assert lane is not None
+            self._tick()
+            now = self.clock.now
+            expected = {"queued": 0, "merged": 0, "skipped": 0}
+            for s in dict.fromkeys(candidates):
+                current = self.waiting.get((s, n.name))
+                if lane.while_running == "skip" and self._running(s, n):
+                    self.archived[s].append((now, n.name, "skipped", "lane"))
+                    expected["skipped"] += 1
+                elif current is None:
+                    self.waiting[(s, n.name)] = (ref, now, now, urgent)
+                    expected["queued"] += 1
+                else:
+                    self.waiting[(s, n.name)] = (
+                        ref if lane.merge == "last" else current[0],
+                        now if lane.position == "last" else current[1],
+                        current[2], current[3] or urgent)
+                    self.archived[s].append((now, n.name, "merged", "lane"))
+                    expected["merged"] += 1
+            assert self.journal.arrive(n.name, candidates, ref=ref, urgent=urgent) == expected
+
+        def _let_in(self, n: Node, candidates: list[Any], now: str) -> int:
+            lane = n.lane
+            assert lane is not None
+            due = []
+            for index, s in enumerate(dict.fromkeys(candidates)):
+                waiting = self.waiting.get((s, n.name))
+                if waiting is None or self._running(s, n):
+                    continue
+                if not joined(n.name, self.dag, self._statuses(s)):
+                    continue
+                ref, place, arrived_at, urgent = waiting
+                ready = [place]
+                if lane.delay is not None:
+                    ready.append(shift(place, seconds(lane.delay)))
+                ended = [self.model[s][x][3] for x in self._pass(n)
+                         if x in self.model[s] and self.model[s][x][3] is not None]
+                if lane.cooldown is not None and ended:
+                    ready.append(shift(max(ended), seconds(lane.cooldown)))
+                late = (lane.max_wait is not None
+                        and shift(arrived_at, seconds(lane.max_wait)) <= now)
+                if urgent or max(ready) <= now or late:
+                    due.append((place, index, s))
+            for _, _, s in sorted(due):
+                for x in self._pass(n):
+                    self._archive(s, x, "arrival")
+                ref, place, arrived_at, urgent = self.waiting.pop((s, n.name))
+                self.archived[s].append((now, n.name, "entered", "lane"))
+                self.model[s][n.name] = (NODE_DONE, arrived_at, None, now)
+            return len(due)
+
         @rule(candidates=subjects, wait=st.integers(0, 5))
         def settle(self, candidates: list[Any], wait: int) -> None:
             for _ in range(wait):
@@ -1159,6 +1558,11 @@ def _model_machine(harness: Any, subject_type: type = str) -> Any:
             now = self.clock.now
             expected: dict[str, dict[str, int]] = {}
             for n in self.dag:
+                if n.lane is not None:
+                    entered = self._let_in(n, candidates, now)
+                    if entered:
+                        expected[n.name] = {"entered": entered}
+                    continue
                 if n.wait is None and n.grace is None:
                     continue
                 for s in dict.fromkeys(candidates):
@@ -1220,10 +1624,17 @@ def _model_machine(harness: Any, subject_type: type = str) -> Any:
                 return
             for s in _SUBJECTS:
                 assert self.journal.progress(s) == self._statuses(s), s
-                expected = [(name, status, reason) for _, name, status, reason
-                            in sorted(self.archived[s], key=lambda a: (a[0], a[1]))]
-                got = [(e["node"], e["status"], e["reason"]) for e in self.journal.history(s)]
+                # Rows archived at the same second on the same node come in
+                # no promised order.
+                expected = sorted(self.archived[s])
+                got = sorted((e["archived_at"], e["node"], e["status"], e["reason"])
+                             for e in self.journal.history(s))
                 assert got == expected, f"history of {s}"
+                for n in self.dag:
+                    if n.lane is not None:
+                        waiting = self.journal.arrival(s, n.name)
+                        assert (tuple(waiting) if waiting else None) == self.waiting.get(
+                            (s, n.name)), f"{s} waiting in {n.name}"
 
     return Machine
 
@@ -1270,14 +1681,15 @@ def _run_threads(targets: list[Any]) -> None:
         raise errors[0]
 
 
-def _assert_no_orphan(store: Any, subjects: list[Any]) -> None:
+def _assert_no_orphan(store: Any, subjects: list[Any],
+                      dag: tuple[Node, ...] = DIAMOND) -> None:
     """No row of a node while one of its parents is not `done` or `skipped`."""
     session = store.session()
     try:
         for subject in subjects:
             progress = session.journal.progress(subject)
             for name in progress:
-                missing = [p for p in node(name, DIAMOND).parents
+                missing = [p for p in node(name, dag).parents
                            if progress.get(p) not in NODE_SATISFYING]
                 assert not missing, (
                     f"{subject}: {name} is {progress[name]} but its parent(s) "

@@ -1,6 +1,7 @@
 """THE POSTGRESQL DRIVER — node rows in tables the application declares.
 
-    PostgresDriver(execute, table, revisions, history, subject="request_id")
+    PostgresDriver(execute, table, revisions, history, subject="request_id",
+                   limits=None, arrivals=None)
 
 ────────────────────────────────────────────────────────────────────────
 THE TABLES ARE INJECTED
@@ -22,6 +23,9 @@ none. It needs two `sqlalchemy.Table`s sharing a subject column (named by
                 required.
     limits      optional, needed by nodes with a `rate` or a `concurrency`:
                 `key` (text, primary key) and `value` (double precision).
+    arrivals    optional, needed by graphs with a lane: the subject and `node`
+                as primary key, `ref` (nullable text), `place` and
+                `arrived_at` (text), `urgent` (boolean).
 
 ────────────────────────────────────────────────────────────────────────
 THE CONNECTION IS INJECTED TOO, AS AN `execute`
@@ -91,7 +95,7 @@ from ..dag import (
     NODE_SCHEDULED,
     NODE_SKIPPED,
 )
-from ..journal import Entry
+from ..journal import Arrival, Entry
 
 #: THE COLUMNS THE NODE TABLE MUST CARRY, besides the subject.
 REQUIRED_COLUMNS = ("node", "status", "started_at", "finished_at", "lease")
@@ -99,6 +103,8 @@ REQUIRED_COLUMNS = ("node", "status", "started_at", "finished_at", "lease")
 REVISION_COLUMNS = ("revision", "channel", "version")
 #: THE COLUMNS THE HISTORY TABLE MUST CARRY, besides the subject.
 HISTORY_COLUMNS = (*REQUIRED_COLUMNS, "archived_at", "reason")
+#: THE COLUMNS THE ARRIVALS TABLE MUST CARRY, besides the subject.
+ARRIVAL_COLUMNS = ("node", "ref", "place", "arrived_at", "urgent")
 
 
 def _ranked(candidates: Any) -> Any:
@@ -130,7 +136,8 @@ class PostgresDriver:
 
     def __init__(self, execute: Callable[[Any], Any], table: sa.Table,
                  revisions: sa.Table, history: sa.Table, *,
-                 subject: str = "request_id", limits: sa.Table | None = None) -> None:
+                 subject: str = "request_id", limits: sa.Table | None = None,
+                 arrivals: sa.Table | None = None) -> None:
         for t, needed in ((table, REQUIRED_COLUMNS), (revisions, REVISION_COLUMNS),
                           (history, HISTORY_COLUMNS)):
             missing = [c for c in (subject, *needed) if c not in t.c]
@@ -146,6 +153,11 @@ class PostgresDriver:
             raise ValueError(f"table {limits.name!r} lacks key or value — a limits table "
                              f"needs both")
         self.limits_table = limits
+        if arrivals is not None:
+            missing = [c for c in (subject, *ARRIVAL_COLUMNS) if c not in arrivals.c]
+            if missing:
+                raise ValueError(f"table {arrivals.name!r} lacks the column(s) {missing}")
+        self.arrivals_table = arrivals
         self._subject = table.c[subject]
         self._rev_subject = revisions.c[subject]
 
@@ -157,7 +169,7 @@ class PostgresDriver:
             sa.func.timezone("UTC", sa.func.statement_timestamp()),
             'YYYY-MM-DD"T"HH24:MI:SS"+00:00"'))).scalar()
 
-    def scan(self, candidates: Any, *, name: str, nodes: tuple[str, ...],
+    def scan(self, candidates: Any, *, name: str | None, nodes: tuple[str, ...],
              parents: tuple[str, ...], page: int, now: str) -> Iterator[list[Entry]]:
         """Pre-filters in SQL what cannot be taken — a row for `name`, a
         parent not concluded — so that a page is mostly takable."""
@@ -169,11 +181,12 @@ class PostgresDriver:
             sa.select(candidate, c.c.grampy_rank,
                       sa.func.coalesce(r.c.revision, 0), r.c.channel, r.c.version)
             .select_from(c.outerjoin(r, self._rev_subject == candidate))
-            .where(~sa.exists().where(
-                held.c[self._subject.key] == candidate, held.c.node == name,
-                ~sa.and_(held.c.status == NODE_SCHEDULED, held.c.started_at <= now)))
             .order_by(c.c.grampy_rank)
             .limit(int(page)))
+        if name is not None:
+            query = query.where(~sa.exists().where(
+                held.c[self._subject.key] == candidate, held.c.node == name,
+                ~sa.and_(held.c.status == NODE_SCHEDULED, held.c.started_at <= now)))
         if parents:
             query = query.where(self.parents_concluded(parents, candidate))
         last = None
@@ -380,6 +393,21 @@ class PostgresDriver:
         if drop:
             self._take_away(sa.and_(self._subject == subject, t.c.node.in_(list(drop))),
                             now=now, reason="migrate")
+        a = self.arrivals_table
+        if a is not None and (drop or rename):
+            a_subject = a.c[self._subject.key]
+            if drop:
+                self._execute(sa.delete(a).where(a_subject == subject,
+                                                 a.c.node.in_(list(drop))))
+            if rename:
+                columns = [self._subject.key, *ARRIVAL_COLUMNS]
+                waiting = [dict(zip(columns, row, strict=True)) for row in self._execute(
+                    sa.delete(a).where(a_subject == subject, a.c.node.in_(list(rename)))
+                    .returning(*[a.c[c] for c in columns])).fetchall()]
+                for row in waiting:
+                    row["node"] = rename[row["node"]]
+                if waiting:
+                    self._execute(sa.insert(a).values(waiting))
         if not rename:
             return
         columns = [self._subject.key, *REQUIRED_COLUMNS]
@@ -445,15 +473,99 @@ class PostgresDriver:
             .where(h.c[self._subject.key] == subject)
             .order_by(h.c.archived_at, h.c.node)).fetchall()]
 
-    def signal(self, subjects: list[Any], event: str, *, now: str, ref: str | None) -> int:
+    def note(self, subjects: list[Any], name: str, *, status: str, reason: str,
+             now: str, ref: str | None) -> int:
         h = self.history_table
         rows = self._execute(
-            sa.insert(h).values([{self._subject.key: s, "node": event, "status": "received",
+            sa.insert(h).values([{self._subject.key: s, "node": name, "status": status,
                                   "started_at": now, "finished_at": now, "lease": ref,
-                                  "archived_at": now, "reason": "signal"}
+                                  "archived_at": now, "reason": reason}
                                  for s in subjects])
             .returning(h.c[self._subject.key])).fetchall()
         return len(rows)
+
+    def arrive(self, name: str, subjects: list[Any], *, ref: str | None, now: str,
+               merge: str, position: str, urgent: bool) -> dict[Any, str]:
+        """One upsert; `xmax = 0` tells a row inserted from a row updated."""
+        a = self._need_arrivals()
+        subject = a.c[self._subject.key]
+        insert = postgresql.insert(a).values(
+            [{self._subject.key: s, "node": name, "ref": ref, "place": now,
+              "arrived_at": now, "urgent": urgent} for s in sorted(subjects)])
+        merged: dict[str, Any] = {"urgent": sa.or_(a.c.urgent, insert.excluded.urgent)}
+        if merge == "last":
+            merged["ref"] = insert.excluded.ref
+        if position == "last":
+            merged["place"] = insert.excluded.place
+        rows = self._execute(
+            insert.on_conflict_do_update(index_elements=[self._subject.key, "node"],
+                                         set_=merged)
+            .returning(subject, sa.literal_column("xmax") == 0)).fetchall()
+        return {row[0]: "queued" if row[1] else "merged" for row in rows}
+
+    def arrivals(self, subjects: list[Any], name: str) -> dict[Any, Arrival]:
+        a = self._need_arrivals()
+        subject = a.c[self._subject.key]
+        return {row[0]: Arrival(row[1], row[2], row[3], bool(row[4])) for row in self._execute(
+            sa.select(subject, a.c.ref, a.c.place, a.c.arrived_at, a.c.urgent)
+            .where(a.c.node == name, subject.in_(list(subjects)))).fetchall()}
+
+    def enter(self, name: str, entries: list[tuple[Any, int]], *,
+              archive: tuple[str, ...], now: str) -> list[Any]:
+        """LOCK FIRST, CHECK AFTER. The revision rows are locked `FOR UPDATE`
+        in a statement of their own — a claim writing on these subjects waits
+        for this transaction, and finds the revision raised. The checks that
+        follow start after the lock, so they see every claim committed
+        before it: a pass running is never archived."""
+        a, t, h = self._need_arrivals(), self.table, self.history_table
+        if not entries:
+            return []
+        wanted = dict(entries)
+        subjects = sorted(wanted)
+        self._execute(
+            postgresql.insert(self.revisions)
+            .values([{self._rev_subject.key: s, "revision": 0} for s in subjects])
+            .on_conflict_do_nothing())
+        current = {row[0]: int(row[1]) for row in self._execute(
+            sa.select(self._rev_subject, self.revisions.c.revision)
+            .where(self._rev_subject.in_(subjects))
+            .order_by(self._rev_subject).with_for_update()).fetchall()}
+        busy = {row[0] for row in self._execute(
+            sa.select(self._subject).where(
+                self._subject.in_(subjects), t.c.node.in_(list(archive)),
+                t.c.status.in_((NODE_RUNNING, NODE_SCHEDULED)))).fetchall()}
+        a_subject = a.c[self._subject.key]
+        waiting = {row[0]: (row[1], row[2]) for row in self._execute(
+            sa.select(a_subject, a.c.ref, a.c.arrived_at)
+            .where(a.c.node == name, a_subject.in_(subjects))
+            .order_by(a_subject).with_for_update()).fetchall()}
+        entering = [s for s in subjects
+                    if current.get(s) == wanted[s] and s not in busy and s in waiting]
+        if not entering:
+            return []
+        self._raise_revisions(entering)
+        self._take_away(sa.and_(self._subject.in_(entering), t.c.node.in_(list(archive))),
+                        now=now, reason="arrival")
+        self._execute(sa.delete(a).where(a.c.node == name, a_subject.in_(entering)))
+        self._execute(sa.insert(h).values(
+            [{self._subject.key: s, "node": name, "status": "entered",
+              "started_at": waiting[s][1], "finished_at": now, "lease": waiting[s][0],
+              "archived_at": now, "reason": "lane"} for s in entering]))
+        self._execute(sa.insert(t).values(
+            [{self._subject.key: s, "node": name, "status": NODE_DONE,
+              "started_at": waiting[s][1], "finished_at": now} for s in entering]))
+        return entering
+
+    def queued(self, name: str) -> int:
+        a = self._need_arrivals()
+        return int(self._execute(
+            sa.select(sa.func.count()).select_from(a).where(a.c.node == name)).scalar())
+
+    def _need_arrivals(self) -> sa.Table:
+        if self.arrivals_table is None:
+            raise ValueError("this graph has a lane: give the PostgresDriver an "
+                             "`arrivals` table")
+        return self.arrivals_table
 
     def latest(self, subjects: list[Any], name: str,
                reason: str | None) -> dict[Any, str]:

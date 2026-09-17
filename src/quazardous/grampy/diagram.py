@@ -10,11 +10,14 @@ EVERY MECHANISM HAS A SHAPE — NOTHING DECLARED IS LEFT UNDRAWN
 
     choice           a diamond
     wait             a hexagon, with the event and its timeout
+    lane             a trapezoid (Mermaid) or a house (DOT), with its merge,
+                     place and timings
     optional         a dashed border, with its grace
     need=k           `k/n` on the node
     on failed        a dashed red edge labelled with the statuses it accepts
     loop             a dotted edge back to `to`, labelled `loop ≤max`
     retry            `retry ×limit` on the node
+    rate             `rate limit/period` per band, `≤n at once`, `per channel`
     lease            `⏱ lease` on the node
     channels         `varies by channel` when a channel changes the node
 
@@ -22,8 +25,9 @@ A drawing that silently left out a loop or a failure edge would show a
 workflow simpler than the one that runs; the tests confront every
 mechanism of `dag.Node` with the drawing.
 
-Counts (`overlay`) are an optional second layer: `▶ running  ⏳ scheduled
-✓ done  ↷ skipped  ✗ failed  ∅ omitted`, zeros left out.
+Counts (`overlay`) are an optional second layer: `⧖ waiting in a lane
+▶ running  ⏳ scheduled  ✓ done  ↷ skipped  ✗ failed  ∅ omitted`, zeros left
+out.
 """
 from __future__ import annotations
 
@@ -34,7 +38,7 @@ from typing import Any
 from .dag import NODE_SATISFYING, Node
 
 #: How a count is shown, in this order.
-_COUNT_MARKS = (("running", "▶"), ("scheduled", "⏳"), ("done", "✓"),
+_COUNT_MARKS = (("waiting", "⧖"), ("running", "▶"), ("scheduled", "⏳"), ("done", "✓"),
                 ("skipped", "↷"), ("failed", "✗"), ("omitted", "∅"))
 
 _UNSAFE_ID = re.compile(r"[^A-Za-z0-9_]")
@@ -93,6 +97,8 @@ def to_dot(graph: Any, counts: Mapping[str, Mapping[str, int]] | None = None,
             attrs.append("shape=diamond")
         elif n.wait is not None:
             attrs.append("shape=hexagon")
+        elif n.lane is not None:
+            attrs.append("shape=house")
         if n.optional:
             attrs.append('style="rounded,dashed"')
         lines.append(f'    "{_escape_dot(n.name)}" [{", ".join(attrs)}];')
@@ -132,10 +138,18 @@ def _label(n: Node, varying: set[str], counts: Mapping[str, Mapping[str, int]] |
         badges.append(f"{n.need}/{len(n.parents)}")
     if n.wait is not None:
         badges.append(f"waits {n.wait}" + (f" ⏱ {n.timeout}" if n.timeout is not None else ""))
+    if n.lane is not None:
+        badges.append(_describe_lane(n))
     if n.grace is not None:
         badges.append(f"grace {n.grace}")
     if n.retry is not None:
         badges.append(f"retry ×{n.retry.limit}")
+    if n.rate:
+        badges.append("rate " + " + ".join(f"{b.limit}/{b.period}" for b in n.rate))
+    if n.concurrency is not None:
+        badges.append(f"≤{n.concurrency} at once")
+    if (n.rate or n.concurrency is not None) and n.per == "channel":
+        badges.append("per channel")
     if n.lease is not None:
         badges.append(f"⏱ {n.lease}")
     if n.once:
@@ -157,7 +171,21 @@ def _mermaid_shape(n: Node) -> tuple[str, str]:
         return "{", "}"
     if n.wait is not None:
         return "{{", "}}"
+    if n.lane is not None:
+        return "[/", "\\]"
     return "(", ")"
+
+
+def _describe_lane(n: Node) -> str:
+    lane = n.lane
+    assert lane is not None
+    words = [f"lane: {lane.merge} version, place of the {lane.position}"]
+    for label in ("cooldown", "delay", "max_wait"):
+        if getattr(lane, label) is not None:
+            words.append(f"{label.replace('_', ' ')} {getattr(lane, label)}")
+    if lane.while_running == "skip":
+        words.append("skips while running")
+    return " · ".join(words)
 
 
 def _ids(nodes: tuple[Node, ...]) -> dict[str, str]:

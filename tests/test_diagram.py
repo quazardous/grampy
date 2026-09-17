@@ -7,7 +7,7 @@ import subprocess
 
 import pytest
 
-from quazardous.grampy import Document, Graph, Loop, Node, NodeJournal
+from quazardous.grampy import Document, Graph, Lane, Loop, Node, NodeJournal, Rate
 from quazardous.grampy.diagram import overlay, to_dot, to_mermaid
 from quazardous.grampy.drivers.memory import MemoryDriver
 from quazardous.grampy.timing import Retry
@@ -83,3 +83,18 @@ def test_graphviz_accepts_the_dot():
     result = subprocess.run(["dot", "-Tsvg"], input=to_dot(SORTER), capture_output=True,
                             text=True, check=False)
     assert result.returncode == 0, result.stderr
+
+
+def test_lanes_and_limits_are_drawn():
+    graph = Graph(Document("offers"), (
+        Node("in", lane=Lane.throttle("1d", max_wait="3d"), rate=(Rate(10, "1m"),)),
+        Node("ai", parents=("in",), concurrency=4, per="channel"),
+    ))
+    text = to_mermaid(graph)
+    assert ('n_in[/"in<br/>lane: last version, place of the first · cooldown 1d · '
+            'max wait 3d') in text
+    assert "rate 10/1m" in text and "≤4 at once · per channel" in text
+    assert "shape=house" in to_dot(graph)
+    journal = NodeJournal(MemoryDriver(), graph, clock=lambda: "2026-01-01T00:00:00+00:00")
+    journal.arrive("in", ["a", "b"])
+    assert "⧖2" in to_mermaid(graph, overlay(journal))

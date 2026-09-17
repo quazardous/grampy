@@ -24,6 +24,7 @@ from .dag import (
     NODE_SCHEDULED,
     NODE_SKIPPED,
     DagError,
+    Lane,
     Loop,
     Node,
     accepts,
@@ -37,7 +38,7 @@ from .dag import (
     omitted_by,
 )
 from .graph import Document, Graph, GraphFormatError
-from .journal import JournalDriver, Lease, MigrationError, NodeJournal, utc_now
+from .journal import Arrival, JournalDriver, Lease, MigrationError, NodeJournal, utc_now
 from .states import (
     allowed_transitions,
     replay_targets,
@@ -53,7 +54,8 @@ __all__ = [
     "NODE_CONCLUDED", "NODE_DONE", "NODE_FAILED", "NODE_OMITTED", "NODE_RUNNING",
     "NODE_SATISFYING", "NODE_SCHEDULED", "NODE_SKIPPED", "Rate", "Retry", "DagError",
     "Document", "Graph", "GraphFormatError",
-    "JournalDriver", "Lease", "Loop", "MigrationError", "Node", "accepts", "joined", "omitted_by",
+    "Arrival", "JournalDriver", "Lane", "Lease", "Loop", "MigrationError", "Node", "accepts",
+    "joined", "omitted_by",
     "NodeJournal", "allowed_transitions", "ancestors", "check_dag", "claimable",
     "claimable_nodes", "descendants", "node", "replay_targets", "replayed_after",
     "source_state", "to_undo", "utc_now",

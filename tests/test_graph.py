@@ -13,6 +13,7 @@ from quazardous.grampy import (
     Document,
     Graph,
     GraphFormatError,
+    Lane,
     Loop,
     Node,
 )
@@ -73,6 +74,19 @@ def test_waits_and_graces_are_written_as_data():
     assert Graph.from_json(graph.to_json()) == graph
 
 
+def test_lanes_are_written_as_data():
+    graph = Graph(Document("x"), (
+        Node("in", lane=Lane.debounce("5m", max_wait="1h")),
+        Node("work", parents=("in",)),
+    ), channels={"slow": {"in": {"lane": Lane.throttle("1d")}}})
+    data = graph.to_dict()
+    assert data["nodes"]["in"] == {"lane": {"position": "last", "delay": "5m",
+                                            "max_wait": "1h"}}
+    assert data["channels"] == {"slow": {"in": {"lane": {"cooldown": "1d"}}}}
+    assert Graph.from_json(graph.to_json()) == graph
+    assert graph.variant("slow")[0].lane == Lane.throttle("1d")
+
+
 def test_json_round_trips():
     graph = Graph(Document("orders"), DIAMOND)
     assert Graph.from_json(graph.to_json()) == graph
@@ -118,6 +132,11 @@ def test_a_graph_that_does_not_hold_together_is_refused_on_construction():
     ({"document": {"name": "x"}, "nodes": {"a": {"lease": [10]}}}, "$.nodes.a.lease"),
     ({"document": {"name": "x"}, "nodes": {"a": {"wait": 3}}}, "$.nodes.a.wait"),
     ({"document": {"name": "x"}, "nodes": {"a": {"grace": True}}}, "$.nodes.a.grace"),
+    ({"document": {"name": "x"}, "nodes": {"a": {"lane": {"cooldwon": "1h"}}}},
+     "$.nodes.a.lane: unknown key(s) ['cooldwon']"),
+    ({"document": {"name": "x"}, "nodes": {"a": {"lane": {"merge": 1}}}}, "$.nodes.a.lane.merge"),
+    ({"document": {"name": "x"}, "nodes": {"a": {"lane": {"delay": []}}}}, "$.nodes.a.lane.delay"),
+    ({"document": {"name": "x"}, "nodes": {"a": {"lane": "throttle"}}}, "$.nodes.a.lane"),
 ])
 def test_a_document_that_lies_is_refused_with_its_path(data, path):
     with pytest.raises(GraphFormatError) as caught:
@@ -207,6 +226,7 @@ def test_channels_change_settings_and_round_trip():
     ({"x": {"a": {"parents": []}}}, "never the structure"),
     ({"x": {"a": {"grace": "1m"}}}, "not"),
     ({"x": {"a": {"lease": "0s"}}}, "lease"),
+    ({"x": {"a": {"lane": Lane()}}}, "never adds or removes"),
 ])
 def test_a_channel_that_would_break_the_graph_is_refused(channels, message):
     with pytest.raises(DagError, match=message):

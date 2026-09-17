@@ -2,7 +2,8 @@
 the standard library's `sqlite3` only.
 
     SqliteDriver(conn, table="grampy_nodes", revisions="grampy_revisions",
-                 history="grampy_history", subject="subject")
+                 history="grampy_history", subject="subject",
+                 limits="grampy_limits", arrivals="grampy_arrivals")
 
 ────────────────────────────────────────────────────────────────────────
 WHY A SECOND SQL DRIVER
@@ -24,6 +25,8 @@ two tables it expects, for an application that wants them as they are:
     revisions   subject (primary key), revision (integer), channel, version (text)
     history     the node table's columns, plus archived_at and reason
     limits      key (text, primary key), value (real): rate and concurrency state
+    arrivals    subject, node, ref, place, arrived_at (text), urgent (integer) —
+                `(subject, node)` as primary key: what waits in a lane
 
 Names are identifiers checked against `[A-Za-z_][A-Za-z0-9_]*`: they are
 written into SQL, never taken from users.
@@ -68,7 +71,7 @@ from ..dag import (
     NODE_SCHEDULED,
     NODE_SKIPPED,
 )
-from ..journal import Entry, utc_now
+from ..journal import Arrival, Entry, utc_now
 
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
@@ -83,9 +86,9 @@ class Query(NamedTuple):
 
 def schema(table: str = "grampy_nodes", revisions: str = "grampy_revisions",
            history: str = "grampy_history", subject: str = "subject",
-           limits: str = "grampy_limits") -> list[str]:
+           limits: str = "grampy_limits", arrivals: str = "grampy_arrivals") -> list[str]:
     """The `CREATE TABLE` statements the driver expects."""
-    for name in (table, revisions, history, subject, limits):
+    for name in (table, revisions, history, subject, limits, arrivals):
         _check(name)
     return [
         f"CREATE TABLE IF NOT EXISTS {table} ("
@@ -100,6 +103,10 @@ def schema(table: str = "grampy_nodes", revisions: str = "grampy_revisions",
         f"started_at TEXT NOT NULL, finished_at TEXT, lease TEXT, "
         f"archived_at TEXT NOT NULL, reason TEXT NOT NULL)",
         f"CREATE TABLE IF NOT EXISTS {limits} (key TEXT NOT NULL PRIMARY KEY, value REAL)",
+        f"CREATE TABLE IF NOT EXISTS {arrivals} ("
+        f"{subject} NOT NULL, node TEXT NOT NULL, ref TEXT, place TEXT NOT NULL, "
+        f"arrived_at TEXT NOT NULL, urgent INTEGER NOT NULL DEFAULT 0, "
+        f"PRIMARY KEY ({subject}, node))",
     ]
 
 
@@ -108,10 +115,12 @@ class SqliteDriver:
 
     def __init__(self, conn: sqlite3.Connection, *, table: str = "grampy_nodes",
                  revisions: str = "grampy_revisions", history: str = "grampy_history",
-                 subject: str = "subject", limits: str = "grampy_limits") -> None:
-        for name in (table, revisions, history, subject, limits):
+                 subject: str = "subject", limits: str = "grampy_limits",
+                 arrivals: str = "grampy_arrivals") -> None:
+        for name in (table, revisions, history, subject, limits, arrivals):
             _check(name)
         self.limits_table = limits
+        self.arrivals_table = arrivals
         self.conn = conn
         self.table, self.revisions, self.subject = table, revisions, subject
         self.history_table = history
@@ -122,7 +131,7 @@ class SqliteDriver:
         """SQLite has no server: every process shares the machine's clock."""
         return utc_now()
 
-    def scan(self, candidates: Any, *, name: str, nodes: tuple[str, ...],
+    def scan(self, candidates: Any, *, name: str | None, nodes: tuple[str, ...],
              parents: tuple[str, ...], page: int, now: str) -> Iterator[list[Entry]]:
         """No pre-filter: the journal decides on every candidate read."""
         subjects = self._candidates(candidates)
@@ -295,6 +304,22 @@ class SqliteDriver:
                           (version, subject))
         for name in drop:
             self._take_away("node = ? AND {s} = ?", (name, subject), now=now, reason="migrate")
+            self.conn.execute(
+                f"DELETE FROM {self.arrivals_table} WHERE {self.subject} = ? AND node = ?",
+                (subject, name))
+        waiting = []
+        for old in rename:
+            waiting += self.conn.execute(
+                f"SELECT node, ref, place, arrived_at, urgent FROM {self.arrivals_table} "
+                f"WHERE {self.subject} = ? AND node = ?", (subject, old)).fetchall()
+            self.conn.execute(
+                f"DELETE FROM {self.arrivals_table} WHERE {self.subject} = ? AND node = ?",
+                (subject, old))
+        for old, *rest in waiting:
+            self.conn.execute(
+                f"INSERT INTO {self.arrivals_table} "
+                f"({self.subject}, node, ref, place, arrived_at, urgent) "
+                f"VALUES (?, ?, ?, ?, ?, ?)", (subject, rename[old], *rest))
         columns = f"{self.subject}, node, status, started_at, finished_at, lease"
         moved = []
         for old in rename:
@@ -357,14 +382,99 @@ class SqliteDriver:
             f"WHERE {self.subject} = ? ORDER BY archived_at, node, rowid",
             (subject,)).fetchall()]
 
-    def signal(self, subjects: list[Any], event: str, *, now: str, ref: str | None) -> int:
+    def note(self, subjects: list[Any], name: str, *, status: str, reason: str,
+             now: str, ref: str | None) -> int:
         for subject in subjects:
             self.conn.execute(
                 f"INSERT INTO {self.history_table} ({self.subject}, node, status, "
                 f"started_at, finished_at, lease, archived_at, reason) "
-                f"VALUES (?, ?, 'received', ?, ?, ?, ?, 'signal')",
-                (subject, event, now, now, ref, now))
+                f"VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (subject, name, status, now, now, ref, now, reason))
         return len(subjects)
+
+    def arrive(self, name: str, subjects: list[Any], *, ref: str | None, now: str,
+               merge: str, position: str, urgent: bool) -> dict[Any, str]:
+        """The insert takes the write lock; the merge that may follow sees
+        every commit before it."""
+        out: dict[Any, str] = {}
+        for subject in subjects:
+            if self.conn.execute(
+                    f"INSERT INTO {self.arrivals_table} "
+                    f"({self.subject}, node, ref, place, arrived_at, urgent) "
+                    f"VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                    (subject, name, ref, now, now, int(urgent))).rowcount == 1:
+                out[subject] = "queued"
+                continue
+            sets = ["urgent = MAX(urgent, ?)"]
+            params: list[Any] = [int(urgent)]
+            if merge == "last":
+                sets.append("ref = ?")
+                params.append(ref)
+            if position == "last":
+                sets.append("place = ?")
+                params.append(now)
+            self.conn.execute(
+                f"UPDATE {self.arrivals_table} SET {', '.join(sets)} "
+                f"WHERE {self.subject} = ? AND node = ?", (*params, subject, name))
+            out[subject] = "merged"
+        return out
+
+    def arrivals(self, subjects: list[Any], name: str) -> dict[Any, Arrival]:
+        out: dict[Any, Arrival] = {}
+        for chunk in _chunks(subjects):
+            marks = ", ".join("?" * len(chunk))
+            for subject, ref, place, arrived_at, urgent in self.conn.execute(
+                    f"SELECT {self.subject}, ref, place, arrived_at, urgent "
+                    f"FROM {self.arrivals_table} WHERE node = ? AND {self.subject} IN ({marks})",
+                    (name, *chunk)).fetchall():
+                out[subject] = Arrival(ref, place, arrived_at, bool(urgent))
+        return out
+
+    def enter(self, name: str, entries: list[tuple[Any, int]], *,
+              archive: tuple[str, ...], now: str) -> list[Any]:
+        """The first statement writes, so it takes the database's write lock:
+        what the checks read after it, no other writer can change until the
+        commit."""
+        entered: list[Any] = []
+        marks = ", ".join("?" * len(archive))
+        for subject, revision in sorted(entries, key=lambda e: str(e[0])):
+            self.conn.execute(
+                f"INSERT INTO {self.revisions} ({self.subject}, revision) VALUES (?, 0) "
+                f"ON CONFLICT DO NOTHING", (subject,))
+            current = self.conn.execute(
+                f"SELECT revision FROM {self.revisions} WHERE {self.subject} = ?",
+                (subject,)).fetchone()[0]
+            arrival = self.conn.execute(
+                f"SELECT ref, arrived_at FROM {self.arrivals_table} "
+                f"WHERE {self.subject} = ? AND node = ?", (subject, name)).fetchone()
+            busy = self.conn.execute(
+                f"SELECT COUNT(*) FROM {self.table} WHERE {self.subject} = ? "
+                f"AND node IN ({marks}) AND status IN (?, ?)",
+                (subject, *archive, NODE_RUNNING, NODE_SCHEDULED)).fetchone()[0]
+            if current != revision or arrival is None or busy:
+                continue
+            self._raise_revision(subject)
+            self._take_away(f"node IN ({marks}) AND {{s}} = ?", (*archive, subject),
+                            now=now, reason="arrival")
+            ref, arrived_at = arrival
+            self.conn.execute(
+                f"DELETE FROM {self.arrivals_table} WHERE {self.subject} = ? AND node = ?",
+                (subject, name))
+            self.conn.execute(
+                f"INSERT INTO {self.history_table} ({self.subject}, node, status, "
+                f"started_at, finished_at, lease, archived_at, reason) "
+                f"VALUES (?, ?, 'entered', ?, ?, ?, ?, 'lane')",
+                (subject, name, arrived_at, now, ref, now))
+            self.conn.execute(
+                f"INSERT INTO {self.table} "
+                f"({self.subject}, node, status, started_at, finished_at) "
+                f"VALUES (?, ?, ?, ?, ?)", (subject, name, NODE_DONE, arrived_at, now))
+            entered.append(subject)
+        return entered
+
+    def queued(self, name: str) -> int:
+        return int(self.conn.execute(
+            f"SELECT COUNT(*) FROM {self.arrivals_table} WHERE node = ?", (name,)).fetchone()[0])
 
     def latest(self, subjects: list[Any], name: str,
                reason: str | None) -> dict[Any, str]:

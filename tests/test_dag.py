@@ -14,6 +14,7 @@ from quazardous.grampy import (
     NODE_RUNNING,
     NODE_SKIPPED,
     DagError,
+    Lane,
     Loop,
     Node,
     ancestors,
@@ -374,3 +375,30 @@ def test_check_dag_refuses_a_lease_that_does_not_last(lease):
 def test_check_dag_refuses_waits_and_graces_that_cannot_hold(nodes, message):
     with pytest.raises(DagError, match=message):
         check_dag(nodes)
+
+
+# ── lanes ─────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("nodes, message", [
+    ((Node("a", lane=Lane(merge="middle")),), "merge='middle'"),
+    ((Node("a", lane=Lane(position="front")),), "position='front'"),
+    ((Node("a", lane=Lane(while_running="cancel")),), "while_running='cancel'"),
+    ((Node("a", lane=Lane(cooldown="0s")),), "cooldown"),
+    ((Node("a", lane=Lane(max_wait="soon")),), "max_wait"),
+    ((Node("a", lane=Lane(), retry=Retry(limit=1)),), "entered, never worked"),
+    ((Node("a", lane=Lane(), concurrency=2),), "entered, never worked"),
+    ((Node("a"), Node("b", parents=("a",), lane=Lane(), optional=True)), "entered, never"),
+    ((Node("a", lane="throttle"),), "lane takes a Lane"),
+])
+def test_check_dag_refuses_a_lane_that_cannot_hold(nodes, message):
+    with pytest.raises(DagError, match=message):
+        check_dag(nodes)
+
+
+def test_lane_presets_say_what_they_keep():
+    assert Lane.throttle("1h") == Lane(merge="last", position="first", cooldown="1h")
+    assert Lane.debounce("5m", max_wait="1h") == Lane(merge="last", position="last",
+                                                      delay="5m", max_wait="1h")
+    assert Lane.dedupe() == Lane(merge="first", position="first")
+    check_dag((Node("in", lane=Lane.throttle("1h"), rate=()), Node("work", parents=("in",))))

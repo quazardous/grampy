@@ -91,11 +91,24 @@ journal.claim("crop", 10, candidates=["s1", "s2"])            # ['s1'] — s2 st
   the wait `done`, or `failed` once the timeout has passed since its parents
   concluded. `Node(optional=True, grace="1d")` is skipped by `settle` when
   nobody took it in time.
+- **Lanes: subjects that come back.** `Node("arrive", lane=Lane.throttle(
+  cooldown="24h", max_wait="3d"))` is a way in that no worker claims:
+  `journal.arrive("arrive", ["offer-12"], ref="v7")` puts a new version of the
+  subject in it, and `journal.settle(candidates)` lets it through once due —
+  archiving the previous pass through what follows, in the same write.
+  A version arriving while one waits is merged (`merge="first"|"last"`, keeping
+  the first one's place or not); `cooldown` holds a subject back that long
+  after its last pass ended, `delay` waits for quiet, `max_wait` caps both, an
+  `urgent=True` arrival skips them, and a pass still running is never cut
+  short (`while_running="queue"|"skip"`). A `rate` on the lane lets arrivals
+  out in the order they came. Presets carry the names other tools use:
+  `Lane.throttle` (Graphile Worker's `preserve_run_at`), `Lane.debounce`,
+  `Lane.dedupe`.
 - **Channels: one workflow, several sources.** `journal.enroll(subjects,
   "partner-a")` records a subject's channel; a `Graph(..., channels={"partner-a":
   {"call": {"retry": Retry(5, "1m")}}})` changes, for that channel only, a
-  node's `retry`, `lease`, `timeout`, `grace`, `rate` or `concurrency` — never
-  the structure.
+  node's `retry`, `lease`, `timeout`, `grace`, `rate`, `concurrency` or `lane`
+  settings — never the structure.
 - **Rate limits and concurrency, on any node.** `Node("summarise",
   parents=("fetch",), rate=(Rate(100, "1m"), Rate(1000, "1h", burst=50)),
   concurrency=4)` — a claim takes no more than every band lets through
@@ -177,10 +190,17 @@ history = sa.Table("job_node_history", metadata,
 limits = sa.Table("job_limits", metadata,        # only for nodes with rate/concurrency
     sa.Column("key", sa.Text, primary_key=True),
     sa.Column("value", sa.Float))
+arrivals = sa.Table("job_arrivals", metadata,    # only for graphs with a lane
+    sa.Column("job_id", sa.Text, primary_key=True),
+    sa.Column("node", sa.Text, primary_key=True),
+    sa.Column("ref", sa.Text),
+    sa.Column("place", sa.Text, nullable=False),
+    sa.Column("arrived_at", sa.Text, nullable=False),
+    sa.Column("urgent", sa.Boolean, nullable=False))
 
 journal = NodeJournal(
     PostgresDriver(conn.execute, nodes, revisions, history, subject="job_id",
-                   limits=limits), DAG)
+                   limits=limits, arrivals=arrivals), DAG)
 eligible = sa.select(jobs.c.job_id).where(jobs.c.state != "done").order_by(jobs.c.priority)
 journal.claim("fetch", 50, candidates=eligible)
 ```

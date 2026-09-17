@@ -34,7 +34,7 @@ import json
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from .dag import DagError, Loop, Node, check_dag
+from .dag import DagError, Lane, Loop, Node, check_dag
 from .timing import Rate, Retry
 
 #: THE FORMAT THIS VERSION READS AND WRITES.
@@ -46,7 +46,7 @@ _NODE_FLAGS = ("optional", "once", "choice")
 #: Parents, joins, choices, loops and waits are the workflow; how long to
 #: wait, how often to retry, how long a lease lasts are how a source is
 #: treated.
-OVERRIDABLE = ("retry", "lease", "timeout", "grace", "rate", "concurrency")
+OVERRIDABLE = ("retry", "lease", "timeout", "grace", "rate", "concurrency", "lane")
 _NODE_LABELS = ("working", "state")
 
 
@@ -93,6 +93,10 @@ class Graph:
                         f"changes only {list(OVERRIDABLE)}, never the structure")
                 shared = sorted({"rate", "concurrency"} & set(settings))
                 base = next(n for n in self.nodes if n.name == name)
+                if "lane" in settings and (base.lane is None or settings["lane"] is None):
+                    raise DagError(
+                        f"channel {channel!r} changes the lane of {name!r}: a channel tunes "
+                        f"a lane the node declares, it never adds or removes one")
                 if shared and base.per != "channel":
                     raise DagError(
                         f"channel {channel!r} changes {shared} on {name!r}, whose budget is "
@@ -134,6 +138,8 @@ class Graph:
                 spec["concurrency"] = n.concurrency
             if n.per != "all":
                 spec["per"] = n.per
+            if n.lane is not None:
+                spec["lane"] = _lane_to_dict(n.lane)
             for flag in _NODE_FLAGS:
                 if getattr(n, flag):
                     spec[flag] = True
@@ -180,6 +186,7 @@ class Graph:
             spec = _mapping(raw, path, required=(),
                             allowed=("parents", "on", "need", "loop", "retry", "lease",
                                      "wait", "timeout", "grace", "rate", "concurrency", "per",
+                                     "lane",
                                      *_NODE_LABELS, *_NODE_FLAGS))
             parents = spec.get("parents", [])
             if not isinstance(parents, list):
@@ -225,7 +232,8 @@ class Graph:
             concurrency = _count(spec.get("concurrency"), f"{path}.concurrency")
             per = spec.get("per", "all")
             _string(per, f"{path}.per")
-            nodes.append(Node(name, parents=tuple(parents), loop=loop, retry=retry,
+            lane = _lane_from(spec["lane"], f"{path}.lane") if "lane" in spec else None
+            nodes.append(Node(name, parents=tuple(parents), loop=loop, retry=retry, lane=lane,
                               rate=rate, concurrency=concurrency, per=per,
                               lease=spec.get("lease"), wait=spec.get("wait"),
                               timeout=spec.get("timeout"), grace=spec.get("grace"),
@@ -252,6 +260,8 @@ class Graph:
                         parsed[key] = _rates_from(value, f"{path}.rate")
                     elif key == "concurrency":
                         parsed[key] = _count(value, f"{path}.concurrency")
+                    elif key == "lane":
+                        parsed[key] = _lane_from(value, f"{path}.lane")
                     else:
                         _duration(value, f"{path}.{key}")
                         parsed[key] = value
@@ -283,7 +293,28 @@ def _rate_to_dict(band: Rate) -> dict[str, Any]:
     return out
 
 
+def _lane_to_dict(lane: Lane) -> dict[str, Any]:
+    default = Lane()
+    return {key: getattr(lane, key) for key in _LANE_KEYS
+            if getattr(lane, key) != getattr(default, key)}
+
+
+_LANE_KEYS = ("merge", "position", "cooldown", "delay", "max_wait", "while_running")
+
+
+def _lane_from(value: Any, path: str) -> Lane:
+    raw = _mapping(value, path, required=(), allowed=_LANE_KEYS)
+    for key in ("merge", "position", "while_running"):
+        if key in raw:
+            _string(raw[key], f"{path}.{key}")
+    for key in ("cooldown", "delay", "max_wait"):
+        _duration(raw.get(key), f"{path}.{key}")
+    return Lane(**raw)
+
+
 def _setting_to_dict(key: str, value: Any) -> Any:
+    if key == "lane":
+        return _lane_to_dict(value)
     if key == "retry":
         return _retry_to_dict(value)
     if key == "rate":

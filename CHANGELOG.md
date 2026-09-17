@@ -33,7 +33,7 @@ First release, planned as 0.1.0. Installed as `grampy-q`, imported as
   waits for the bomb squad, gets retried at the defuse station, and either
   shows its colour or ends in the waste bin.
 - Draw a workflow as a Mermaid flowchart or a Graphviz graph, every
-  mechanism with its own shape, optionally with the live count of subjects
+  mechanism with its own shape — lanes, rate limits and concurrency included — optionally with the live count of subjects
   per step.
 - Write a workflow as data: a versioned JSON document (name, namespace,
   version, nodes) that can be stored, compared between versions and read
@@ -58,8 +58,14 @@ First release, planned as 0.1.0. Installed as `grampy-q`, imported as
   graph version it started on, and a migration moves the subjects that fit
   the new version — or refuses them all, saying which do not and why.
 - Run one workflow for several sources: give subjects a channel, and let a
-  channel change retries, leases, timeouts, grace periods and rate limits without
+  channel change retries, leases, timeouts, grace periods, rate limits and lanes without
   changing the steps themselves.
+- Let subjects come back: a lane is a way in where each new version of a
+  subject waits — merged with the one already waiting, kept back by a
+  cooldown after its last pass, a quiet delay or a maximum wait — and then
+  runs through the workflow again, the previous pass kept in the history.
+  Urgent arrivals skip the wait, a running pass is never cut short, and a
+  rate on the lane lets arrivals out in the order they came.
 - Protect a costly resource anywhere in a workflow: give a node rate limits
   (several bands at once, such as 100 a minute and 1000 an hour, with bursts)
   and a cap on how many subjects it works at the same time, shared by all

@@ -6,6 +6,7 @@
     joined           are enough parents concluded the way this node accepts?
     omitted_by       what a choice leaves dead when it takes one branch
     Loop             a declared way back: which statuses send the subject where
+    Lane             a declared way in: how returning versions of a subject wait
     descendants      everything downstream of a node
     ancestors        everything upstream of a node
     claimable        can this node be taken, given what is recorded?
@@ -95,6 +96,67 @@ class Loop:
         object.__setattr__(self, "on", tuple(self.on))
 
 
+#: HOW A LANE MERGES A NEW ARRIVAL INTO ONE ALREADY WAITING, and where the
+#: merged arrival stands in the lane.
+LANE_MERGES = ("first", "last")
+LANE_POSITIONS = ("first", "last")
+#: WHAT AN ARRIVAL DOES WHILE A PASS OF THE SUBJECT IS STILL RUNNING.
+LANE_WHILE_RUNNING = ("queue", "skip")
+
+
+@dataclass(frozen=True)
+class Lane:
+    """A DECLARED WAY IN: the subject comes back — a new version of the same
+    thing — and waits here before it runs through the graph again.
+
+    An arrival (`journal.arrive`) waits in the lane; `journal.settle` lets it
+    in once it is due, and the pass that went before — this node and
+    everything after it — is archived in the same write (reason `arrival`).
+
+        merge          first: the arrival waiting keeps its `ref`, later ones
+                       are dropped; last: the latest `ref` wins
+        position       first: a merged arrival keeps the place of the first;
+                       last: it goes to the back, as if it had just arrived
+        cooldown       not before this long after the previous pass ended —
+                       the same subject is not run twice within the window
+        delay          not before this long after its place — quiet time
+        max_wait       whatever the above, not later than this long after the
+                       first arrival: a subject that keeps coming back still
+                       gets through
+        while_running  queue: an arrival during a running pass waits for it
+                       to end; skip: it is dropped, and noted in the history
+
+    Presets under the names other tools gave them:
+
+        Lane.throttle(cooldown)   last version, place of the first
+                                  (Graphile Worker `preserve_run_at`)
+        Lane.debounce(delay)      last version, to the back (Lodash debounce,
+                                  Graphile Worker `replace`)
+        Lane.dedupe()             first version, the rest dropped
+    """
+
+    merge: str = "last"
+    position: str = "first"
+    cooldown: float | int | str | None = None
+    delay: float | int | str | None = None
+    max_wait: float | int | str | None = None
+    while_running: str = "queue"
+
+    @classmethod
+    def throttle(cls, cooldown: float | int | str,
+                 max_wait: float | int | str | None = None) -> Lane:
+        return cls(merge="last", position="first", cooldown=cooldown, max_wait=max_wait)
+
+    @classmethod
+    def debounce(cls, delay: float | int | str,
+                 max_wait: float | int | str | None = None) -> Lane:
+        return cls(merge="last", position="last", delay=delay, max_wait=max_wait)
+
+    @classmethod
+    def dedupe(cls, cooldown: float | int | str | None = None) -> Lane:
+        return cls(merge="first", position="first", cooldown=cooldown)
+
+
 @dataclass(frozen=True)
 class Node:
     """A node of the graph: who it descends from, and what it projects.
@@ -159,6 +221,11 @@ class Node:
     `concurrency` rows running at once. `per="channel"` gives each channel
     its own budget; `per="all"` shares one.
 
+    `lane` makes the node a WAY IN for subjects that come back (`Lane`): no
+    worker claims it; `journal.arrive` puts a subject in it, `journal.settle`
+    lets it through, and each pass through what follows is archived when the
+    next one enters.
+
     `retry` declares what a failure does first (`timing.Retry`): archived,
     and the node scheduled again after a delay, a bounded number of times.
     Only past the retries does the failure stand — and a loop or a failure
@@ -183,6 +250,7 @@ class Node:
     rate: tuple[Rate, ...] = ()
     concurrency: int | None = None
     per: str = "all"
+    lane: Lane | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "parents", tuple(self.parents))
@@ -433,6 +501,8 @@ def check_dag(dag: tuple[Node, ...]) -> None:
                            f"rate or concurrency")
         if n.grace is not None and not n.optional:
             raise DagError(f"node {n.name!r}: grace skips an optional node — this one is not")
+        if n.lane is not None:
+            _check_lane(n)
 
 
     # ── NO CYCLE, PROVEN BY A WALK ─────────────────────────────────
@@ -482,6 +552,34 @@ def check_dag(dag: tuple[Node, ...]) -> None:
                     f"state {state!r} is posted by {posted_by[state]!r} AND by "
                     f"{n.name!r} — the label becomes ambiguous")
             posted_by[state] = n.name
+
+
+def _check_lane(n: Node) -> None:
+    lane = n.lane
+    assert lane is not None
+    if not isinstance(lane, Lane):
+        raise DagError(f"node {n.name!r}: lane takes a Lane")
+    for label, value, allowed in (("merge", lane.merge, LANE_MERGES),
+                                  ("position", lane.position, LANE_POSITIONS),
+                                  ("while_running", lane.while_running, LANE_WHILE_RUNNING)):
+        if value not in allowed:
+            raise DagError(f"node {n.name!r}: lane {label}={value!r} — expected one of "
+                           f"{list(allowed)}")
+    for label in ("cooldown", "delay", "max_wait"):
+        value = getattr(lane, label)
+        if value is None:
+            continue
+        try:
+            if seconds(value) <= 0:
+                raise ValueError("a duration must last")
+        except ValueError as exc:
+            raise DagError(f"node {n.name!r}: lane {label} {value!r} — {exc}") from exc
+    unfit = [label for label in ("wait", "choice", "loop", "retry", "lease", "grace",
+                                 "optional", "concurrency")
+             if getattr(n, label) not in (None, False)]
+    if unfit:
+        raise DagError(f"node {n.name!r} is a lane: it is entered, never worked, so it "
+                       f"cannot take {unfit}")
 
 
 def _ancestors(name: str, by_name: dict[str, Node]) -> set[str]:
