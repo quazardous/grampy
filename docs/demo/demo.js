@@ -151,6 +151,7 @@ function describe(spec) {
     return [lane.cooldown && `cooldown ${lane.cooldown}`, lane.max_wait && `max ${lane.max_wait}`]
       .filter(Boolean).join(" · ") || "lane";
   }
+  if (spec.optional) return "optional · salvage skips it";
   if (spec.choice) return "choice · colour or TNT";
   if (spec.wait) return `waits for squad · ⏱ ${spec.timeout}`;
   if (spec.retry) return `retry ×${spec.retry.limit} · exponential`;
@@ -274,13 +275,13 @@ function render(state) {
     if (brick.tnt && brick.revealed && before && !before.revealed) {
       // Defused: the brick shows its true colour once it has arrived.
       setTimeout(() => {
-        Lab.paint(g, brick, true, colours);
+        Lab.paint(g, brick, true, colours, brick.crate === "salvage");
         g.classList.add("revealing");
         Lab.sparkle(effects, at.x, at.y);
       }, 450);
       setTimeout(() => g.classList.remove("revealing"), 1600);
     } else {
-      Lab.paint(g, brick, brick.revealed, colours);
+      Lab.paint(g, brick, brick.revealed, colours, brick.crate === "salvage");
     }
     if (brick.place === "boom" && !g.classList.contains("wasted")) {
       g.classList.add("wasted");
@@ -367,6 +368,7 @@ function showDetail() {
   box.innerHTML = `
     <dl>
       <dt>Brick</dt><dd>${data.id}${data.tnt ? " · TNT" : ""} · ${colour} · v${data.version}</dd>
+      <dt>Crate</dt><dd>${escapeHtml(data.crate)}</dd>
       <dt>Journal</dt><dd>${escapeHtml(progress)}</dd>
     </dl>
     ${history ? `<ol>${history}</ol>` : '<p class="hint">Nothing archived yet.</p>'}`;
@@ -393,7 +395,8 @@ function bindControls(pyodide) {
     if (returnable.length) sendBack(returnable[Math.floor(Math.random() * returnable.length)]);
   });
   const sliders = [["arrivals", "arrivals_per_minute", 1], ["tnt", "tnt_share", 100],
-                   ["failure", "defuse_failure", 100], ["returns", "returns_share", 100]];
+                   ["failure", "defuse_failure", 100], ["returns", "returns_share", 100],
+                   ["salvage", "salvage_share", 100]];
   for (const [id, setting, scale] of sliders) {
     $(id).addEventListener("input", () => {
       $(`${id}-out`).textContent = $(id).value;

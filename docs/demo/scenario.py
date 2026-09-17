@@ -45,15 +45,23 @@ GRAPH = Graph(Document("brick-sorter", version="1", namespace="demo"), (
          retry=Retry(limit=3, delay="8s", backoff="exponential")),
     Node("reject", parents=("quarantine", "defuse"), need=1,
          on={"quarantine": ("failed",), "defuse": ("failed",)}),
-    Node("pack", parents=("sort", "defuse")),
-))
+    # One crate needs an extra step: `polish` belongs to everyone and is
+    # OPTIONAL, and the crate that does not want it gives it a grace, so
+    # `settle` skips it. A channel changes settings, never the structure.
+    Node("polish", parents=("sort",), optional=True),
+    Node("pack", parents=("polish", "defuse")),
+), channels={"salvage": {"polish": {"grace": "2s"}}})
 # --8<-- [end:graph]
 
 #: Where each station stands on the floor, in layers left to right.
 LAYOUT = {
     "inbox": (0, 1), "scan": (1, 1), "sort": (2, 0), "quarantine": (2, 2),
-    "defuse": (3, 2), "pack": (4, 0), "reject": (4, 2),
+    "polish": (3, 0), "defuse": (3, 2), "pack": (4, 0), "reject": (4, 2),
 }
+
+#: Where a brick comes from. Salvage bricks are not polished — the channel
+#: gives `polish` a grace, and the janitor skips it for them.
+CRATES = ("factory", "salvage")
 
 #: How long a sorted brick is kept back after its pass — the inbox lane's cooldown.
 COOLDOWN = 30.0
@@ -70,6 +78,7 @@ class Brick:
     tnt: bool
     born: float
     version: int = 1
+    crate: str = "factory"
 
 
 @dataclass
@@ -89,9 +98,11 @@ class Settings:
     squad_delay: float = 25.0
     returns_share: float = 0.15
     workers: dict[str, int] = field(default_factory=lambda: {
-        "scan": 2, "sort": 2, "defuse": 1, "pack": 2, "reject": 1})
+        "scan": 2, "sort": 2, "polish": 1, "defuse": 1, "pack": 2, "reject": 1})
     durations: dict[str, float] = field(default_factory=lambda: {
-        "scan": 3.0, "sort": 4.0, "defuse": 7.0, "pack": 4.0, "reject": 2.5})
+        "scan": 3.0, "sort": 4.0, "polish": 5.0, "defuse": 7.0, "pack": 4.0,
+        "reject": 2.5})
+    salvage_share: float = 0.4
 
 
 class World:
@@ -129,13 +140,20 @@ class World:
     # -- what visitors do -------------------------------------------------------
 
     def add_bricks(self, count: int, tnt: bool | None = None) -> None:
-        added = []
+        added, salvage = [], []
         for _ in range(count):
             is_tnt = self.rng.random() < self.settings.tnt_share if tnt is None else tnt
             colour = self.rng.choice(COLOURS)
-            self.bricks[self._next_id] = Brick(self._next_id, colour, is_tnt, self.elapsed)
+            crate = "salvage" if self.rng.random() < self.settings.salvage_share else "factory"
+            self.bricks[self._next_id] = Brick(self._next_id, colour, is_tnt, self.elapsed,
+                                               crate=crate)
             added.append(self._next_id)
+            if crate == "salvage":
+                salvage.append(self._next_id)
             self._next_id += 1
+        if salvage:
+            self.journal.enroll(salvage, "salvage")
+            self._log(f'journal.enroll({salvage}, "salvage")')
         if added:
             self.journal.arrive("inbox", added, ref="v1")
             self._log(f'journal.arrive("inbox", {added}, ref="v1")')
@@ -240,9 +258,15 @@ class World:
         candidates = self._active()
         for node, workers in self.settings.workers.items():
             free = workers - busy.get(node, 0)
-            if free <= 0 or not candidates:
+            # The polisher only takes factory bricks: WHICH subjects a worker
+            # offers is the application's own sentence. The salvage channel's
+            # grace is the safety net — the janitor skips the node for them,
+            # so nothing waits forever.
+            eligible = ([b for b in candidates if self.bricks[b].crate == "factory"]
+                        if node == "polish" else candidates)
+            if free <= 0 or not eligible:
                 continue
-            lease = self.journal.claim(node, free, candidates=candidates)
+            lease = self.journal.claim(node, free, candidates=eligible)
             if not lease:
                 continue
             self._log(f'journal.claim("{node}", {free}, candidates=…)  # {list(lease)}')
@@ -297,7 +321,7 @@ class World:
         ready = claimable_nodes(GRAPH.nodes, progress)
         if "quarantine" in ready:
             return "shelf", "quarantine"
-        order = ["scan", "sort", "defuse", "reject", "pack"]
+        order = ["scan", "sort", "polish", "defuse", "reject", "pack"]
         for name in order:
             if name in ready:
                 return "queue", name
@@ -316,6 +340,7 @@ class World:
             entry = {
                 "id": brick.id, "colour": brick.colour if revealed else None, "tnt": brick.tnt,
                 "revealed": revealed, "place": place, "node": node, "version": brick.version,
+                "crate": brick.crate,
                 "retries": self.journal.retries(brick.id, "defuse") if brick.tnt else 0,
             }
             if place == "inbox":
@@ -341,6 +366,7 @@ class World:
                 "defuse_failure": self.settings.defuse_failure,
                 "squad_auto": self.settings.squad_auto,
                 "returns_share": self.settings.returns_share,
+                "salvage_share": self.settings.salvage_share,
             },
             "returnable": sorted(self.gone)[-60:],
         }
@@ -351,7 +377,7 @@ class World:
             return json.dumps(None)
         return json.dumps({
             "id": brick_id, "colour": brick.colour if self._revealed(brick) else None,
-            "tnt": brick.tnt, "version": brick.version,
+            "tnt": brick.tnt, "version": brick.version, "crate": brick.crate,
             "progress": self.journal.progress(brick_id),
             "history": self.journal.history(brick_id),
         })

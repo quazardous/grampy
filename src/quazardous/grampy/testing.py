@@ -554,6 +554,32 @@ class JournalContract:
         assert journal.settings("call", "slow").lease == "5h"
         assert journal.settings("call", None).lease == "1h"
 
+    def test_a_source_that_needs_an_extra_step_skips_it_elsewhere(self, harness, clock):
+        """THE DOCUMENTED WAY to give one source a step the others do not
+        take (docs/rules.md): the node is optional for everyone, and the
+        channel that does not want it gives it a grace, so `settle` skips
+        it — `skipped` satisfies what follows."""
+        graph = Graph(Document("offers"), (
+            Node("scrape"),
+            Node("enrich", parents=("scrape",), optional=True),
+            Node("publish", parents=("enrich",)),
+        ), channels={"plain": {"enrich": {"grace": "1s"}}})
+        journal = harness.journal(graph, clock)
+        journal.enroll(["plain1"], "plain")
+        clock.now = "2026-01-01T00:00:00+00:00"
+        self._run(harness, journal, "scrape", ["rich1", "plain1"])
+
+        clock.now = "2026-01-01T00:00:05+00:00"
+        assert journal.settle(harness.candidates(["rich1", "plain1"])) == {
+            "enrich": {NODE_SKIPPED: 1}}, "only the channel with a grace"
+        assert journal.progress("plain1")["enrich"] == NODE_SKIPPED
+        assert "enrich" not in journal.progress("rich1"), "no grace: never skipped alone"
+
+        # What follows goes on for the skipped one, and waits for the other.
+        assert self._claim(harness, journal, "publish", ["plain1", "rich1"]) == ["plain1"]
+        self._run(harness, journal, "enrich", ["rich1"])
+        assert self._claim(harness, journal, "publish", ["rich1"]) == ["rich1"]
+
     def test_a_channel_changes_retries_leases_timeouts_and_graces(self, harness, clock):
         journal = harness.journal(self._channelled(), clock)
         journal.enroll(["slow"], "slow")

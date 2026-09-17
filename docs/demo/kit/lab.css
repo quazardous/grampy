@@ -318,6 +318,8 @@ select { padding: 7px 10px; }
 .brick .badge rect { fill: var(--accent); }
 .brick .badge text { font: 600 7.5px "IBM Plex Mono", monospace; fill: var(--accent-ink); }
 .brick.versioned .badge { display: inline; }
+.brick .mark { display: none; fill: var(--accent); stroke: #fff; stroke-width: 0.8; }
+.brick.marked .mark { display: inline; }
 .brick .debris { display: none; }
 .brick .debris path { fill: #5b6570; stroke: #2e353c; stroke-width: 0.6; }
 .brick .debris .ember { fill: #c2551f; }

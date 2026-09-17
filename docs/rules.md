@@ -108,6 +108,47 @@ Presets carry the names other tools use: `Lane.throttle` (Graphile Worker's
 changes, for that channel only, a node's `retry`, `lease`, `timeout`, `grace`,
 `rate`, `concurrency` or `lane` settings — never the structure.
 
+### One source needs an extra step
+
+A channel never adds a node: the workflow would differ per source, and so
+would its joins, its migrations and its drawing. Three ways to get the same
+result, cheapest first.
+
+**1. Declare the step for everyone, skip it where it does not apply.** An
+`optional` node is satisfied by being `skipped`, so nothing downstream waits
+for it:
+
+```python
+GRAPH = Graph(Document("offers"), (
+    Node("scrape"),
+    Node("enrich", parents=("scrape",), optional=True),   # only some sources
+    Node("publish", parents=("enrich",)),
+), channels={"plain-source": {"enrich": {"grace": "1s"}}})   # …skipped there
+```
+
+- for the sources that need it, a worker claims `enrich` as usual;
+- for `plain-source`, `journal.settle(candidates)` skips it once its grace has
+  passed — a second, so at the first janitor pass.
+
+The two halves work together: the **worker** offers only the subjects of the
+sources that want the step — which subjects it offers is its own sentence —
+and the **grace** is the safety net, so the ones nobody will take are skipped
+instead of waiting forever. A worker that offered every subject would claim
+the step before the grace ever elapsed.
+
+Without a grace the node is never skipped on its own, and the application can
+still skip it explicitly for the subjects it chooses:
+`journal.skip("enrich", candidates=…)`.
+
+**2. The routes really differ: a `choice` on the channel.** Put a choice node
+first and conclude it with the branch that source takes; the other branches,
+and whatever only they lead to, are `omitted` in the same write, and a join
+further down still proceeds.
+
+**3. Almost nothing is shared: a second graph.** Another `Document`, its own
+nodes, and those subjects pinned to it. Two graphs mean two things to keep
+alive — worth it only when they really are two workflows.
+
 ## Rate limits and concurrency
 
 `Node("summarise", parents=("fetch",), rate=(Rate(100, "1m"), Rate(1000, "1h",

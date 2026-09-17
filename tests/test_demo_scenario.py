@@ -107,3 +107,28 @@ def test_a_sorted_brick_sent_back_twice_runs_once_more_with_its_last_version(sce
     history = world.journal.history(1)
     assert [e["lease"] for e in history if e["status"] == "entered"] == ["v1", "v3"]
     assert any(e["node"] == "pack" and e["reason"] == "arrival" for e in history)
+
+
+def test_salvage_bricks_skip_the_polish_station(scenario):
+    """The demo shows the documented way to give one source an extra step:
+    `polish` is optional for everyone, and the salvage channel's grace makes
+    the janitor skip it."""
+    world = scenario.World(seed=2, settings=scenario.Settings(
+        arrivals_per_minute=0.0, tnt_share=0.0, returns_share=0.0, salvage_share=1.0))
+    world.add_bricks(1)
+    assert world.journal.channel(1) == "salvage"
+    for _ in range(200):
+        world.tick(1.0)
+        if world.journal.progress(1).get("pack") == "done":
+            break
+    assert world.journal.progress(1)["polish"] == "skipped"
+
+    fresh = scenario.World(seed=2, settings=scenario.Settings(
+        arrivals_per_minute=0.0, tnt_share=0.0, returns_share=0.0, salvage_share=0.0))
+    fresh.add_bricks(1)
+    assert fresh.journal.channel(1) is None
+    for _ in range(200):
+        fresh.tick(1.0)
+        if fresh.journal.progress(1).get("pack") == "done":
+            break
+    assert fresh.journal.progress(1)["polish"] == "done", "a factory brick is polished"

@@ -77,6 +77,7 @@
     const badge = el("g", { class: "badge", transform: "translate(13,-9)" }, g);
     el("rect", { width: 20, height: 10, rx: 5 }, badge);
     text(badge, { x: 10, y: 7.6, "text-anchor": "middle" }, "");
+    el("circle", { class: "mark", cx: 2.6, cy: -2.4, r: 2.4 }, g);
     const debris = el("g", { class: "debris" }, g);
     el("path", { d: "M1,9 L6,3 L11,6 L9,12 L3,13 Z" }, debris);
     el("path", { d: "M12,4 L19,2 L23,8 L17,12 Z" }, debris);
@@ -90,7 +91,9 @@
     return g;
   }
 
-  function paint(g, brick, revealed, colours) {
+  // `marked` shows where a subject comes from: a small dot on its corner.
+  function paint(g, brick, revealed, colours, marked = false) {
+    g.classList.toggle("marked", Boolean(marked));
     g.classList.toggle("tnt", Boolean(brick.tnt));
     g.classList.toggle("unknown", !revealed);
     for (const colour of colours) g.classList.toggle(colour, revealed && brick.colour === colour);
