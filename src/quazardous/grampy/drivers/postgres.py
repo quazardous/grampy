@@ -353,7 +353,7 @@ class PostgresDriver:
         if policies is not None:
             named = [c for c in policies if c is not None]
             with_policy = sa.select(self._rev_subject).where(r.c.policy.in_(named))
-            test = self._subject.in_(with_policy)
+            test: sa.ColumnElement[bool] = self._subject.in_(with_policy)
             if None in policies:
                 test = sa.or_(test, self._subject.not_in(
                     sa.select(self._rev_subject).where(r.c.policy.is_not(None))))

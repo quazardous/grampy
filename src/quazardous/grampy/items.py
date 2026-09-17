@@ -146,15 +146,22 @@ class Items:
         return written
 
     def arrive(self, name: str, items: Sequence[Any], *,
-               urgent: bool = False) -> dict[Any, str]:
-        """These items arrive in a lane, each bringing its own `ref_of`."""
+               urgent: bool = False) -> dict[str, int]:
+        """These items arrive in a lane, each bringing its own `ref_of`.
+
+        One call per distinct ref, and the counts are ADDED — the journal
+        reports `{"queued": n, "merged": n, "skipped": n}` per call, and what
+        comes back here is the whole batch.
+        """
         by_ref: dict[str | None, list[Any]] = {}
         for item in items:
             by_ref.setdefault(self.adapter.ref_of(item), []).append(
                 self.adapter.id_of(item))
-        outcome: dict[Any, str] = {}
+        outcome: dict[str, int] = {}
         for ref, ids in by_ref.items():
-            outcome.update(self.journal.arrive(name, ids, ref=ref, urgent=urgent))
+            for kind, count in self.journal.arrive(
+                    name, ids, ref=ref, urgent=urgent).items():
+                outcome[kind] = outcome.get(kind, 0) + count
         return outcome
 
     # -- take and finish ---------------------------------------------------
@@ -182,7 +189,8 @@ class Items:
         lease = self.journal.claim(name, limit, candidates=candidates)
         loaded = ({s: given[s] for s in lease if s in given} if given
                   else self._loaded(lease))
-        keep, give_up = [], []
+        keep: list[Any] = []
+        give_up: list[Any] = []
         for item in loaded.values():
             (keep if self.adapter.applies(item, name) else give_up).append(item)
         if give_up:

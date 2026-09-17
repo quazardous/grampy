@@ -230,3 +230,20 @@ def test_the_janitor_pass_speaks_items_too(world):
     # `settle` reports per node, and takes items rather than ids.
     assert isinstance(items.settle(bricks), dict)
     assert [b.id for b in items.claim("pack", 10, candidates=bricks[:2])] == [2]
+
+
+def test_arrivals_of_different_versions_are_counted_together():
+    """One call per distinct ref, but ONE set of counts: adding them, not
+    letting the last ref's counts replace the others'."""
+    from quazardous.grampy import Lane
+
+    graph = Graph(Document("lane"), (
+        Node("inbox", lane=Lane.throttle(cooldown="1h")),
+        Node("work", parents=("inbox",)),
+    ))
+    bricks = [Brick(1, stamp="v1"), Brick(2, stamp="v2"), Brick(3, stamp="v3")]
+    items = Items(NodeJournal(MemoryDriver(), graph), Bricks(bricks))
+
+    counts = items.arrive("inbox", bricks)
+    assert counts["queued"] == 3, "three refs, three groups, three arrivals"
+    assert sum(counts.values()) == 3, "nothing lost between the groups"
