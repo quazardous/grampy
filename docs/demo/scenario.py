@@ -3,8 +3,9 @@
 Nothing here decides a workflow rule: the journal does. This module only
 plays the factory around it — bricks arriving, workers taking a claim and
 finishing it after a while, a defuser that sometimes fails, a bomb squad
-that answers a call, sorted bricks sent back for another pass — and reports, for each brick, where the journal says it
-stands, so the page can draw it there.
+that answers a call, sorted bricks sent back for another pass — and reports,
+for each brick, where the journal says it stands, so the page can draw it
+there.
 
     world = World(seed=7)
     world.tick(seconds=2)          # advance the factory, returns the state
