@@ -32,6 +32,7 @@ from quazardous.grampy.diagram import overlay
 from quazardous.grampy.drivers.memory import MemoryDriver
 from quazardous.grampy.timing import Retry
 
+# --8<-- [start:graph]
 #: The factory, as grampy sees it.
 GRAPH = Graph(Document("brick-sorter", version="1", namespace="demo"), (
     Node("scan", choice=True, lease="30s"),
@@ -43,6 +44,7 @@ GRAPH = Graph(Document("brick-sorter", version="1", namespace="demo"), (
          on={"quarantine": ("failed",), "defuse": ("failed",)}),
     Node("pack", parents=("sort", "defuse")),
 ))
+# --8<-- [end:graph]
 
 #: Where each station stands on the floor, in layers left to right.
 LAYOUT = {

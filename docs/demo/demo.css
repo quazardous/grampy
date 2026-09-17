@@ -315,6 +315,28 @@ select { padding: 7px 10px; }
 .puff .smoke { fill: #7d858b; animation: smoke 1.1s ease-out both; transform-box: fill-box; transform-origin: center; }
 @keyframes smoke { from { transform: scale(0.4); opacity: 0.85; } to { transform: scale(2.2) translateY(-6px); opacity: 0; } }
 
+/* -- code -------------------------------------------------------------------------- */
+
+.code h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.1em; margin: 0 0 8px; color: var(--muted); }
+.code-lead, .code-links { margin: 0 0 12px; max-width: 75ch; }
+.code-links { margin: 12px 0 0; font-size: 14px; color: var(--muted); }
+.code-panels { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 440px), 1fr)); }
+.code-panel { margin: 0; min-width: 0; display: grid; gap: 6px; align-content: start; }
+.code-panel figcaption { font-size: 13px; font-weight: 600; }
+.code-panel pre {
+  margin: 0;
+  padding: 14px 16px;
+  background: var(--tnt);
+  color: #d7dfda;
+  border-radius: 8px;
+  overflow-x: auto;
+  font: 12.5px/1.6 "IBM Plex Mono", ui-monospace, monospace;
+}
+.code-panel .kw { color: #ff9e7a; }
+.code-panel .str { color: #b5e08c; }
+.code-panel .com { color: #8a969b; font-style: italic; }
+.code-panel .cls { color: var(--hazard); }
+
 /* -- legend -------------------------------------------------------------------------- */
 
 .legend ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }

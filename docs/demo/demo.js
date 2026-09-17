@@ -417,6 +417,44 @@ function showDetail() {
     ${history ? `<ol>${history}</ol>` : '<p class="hint">Nothing archived yet.</p>'}`;
 }
 
+// -- the code panel -------------------------------------------------------------
+
+// The graph shown is cut out of scenario.py, the file the page runs: it
+// cannot drift from what the line does.
+async function showGraphSource() {
+  const box = $("graph-source");
+  try {
+    const response = await fetch("scenario.py");
+    if (!response.ok) throw new Error(response.statusText);
+    const source = await response.text();
+    const block = source.match(/# --8<-- \[start:graph\]\n([\s\S]*?)# --8<-- \[end:graph\]/);
+    if (!block) throw new Error("no graph block");
+    const imports = "from quazardous.grampy import Document, Graph, Node\n" +
+                    "from quazardous.grampy.timing import Retry\n\n";
+    box.innerHTML = highlight(imports + block[1].trimEnd());
+  } catch (error) {
+    box.textContent = `scenario.py could not be read (${error.message}).`;
+  }
+}
+
+function highlight(code) {
+  const pattern = /(#[^\n]*)|("(?:[^"\\]|\\.)*")|\b(from|import|for|in|None|True|False)\b|\b(Graph|Document|Node|Retry|NodeJournal|SqliteDriver)\b/g;
+  let out = "", last = 0;
+  for (const m of code.matchAll(pattern)) {
+    out += escapeHtml(code.slice(last, m.index));
+    const kind = m[1] ? "com" : m[2] ? "str" : m[3] ? "kw" : "cls";
+    out += `<span class="${kind}">${escapeHtml(m[0])}</span>`;
+    last = m.index + m[0].length;
+  }
+  return out + escapeHtml(code.slice(last));
+}
+
+function highlightStatic() {
+  for (const box of document.querySelectorAll(".code-panel code.python:not(#graph-source)")) {
+    box.innerHTML = highlight(box.textContent);
+  }
+}
+
 // -- wiring ---------------------------------------------------------------------
 
 function step() {
@@ -476,4 +514,6 @@ async function main() {
   }
 }
 
+highlightStatic();
+showGraphSource();
 main();

@@ -14,7 +14,7 @@
 <header class="masthead">
   <div class="brand">
     <h1>Brick Sorter</h1>
-    <p>A sorting line run by <a href="https://github.com/quazardous/grampy">grampy</a> — the real library, executing in your browser. Every brick is a subject, every tray a node, and the line sorts bricks by colour. A TNT brick hides its colour: defused, it shows it and gets sorted; past saving, it goes to waste.</p>
+    <p>A sorting line run by <a href="https://github.com/quazardous/grampy">grampy</a> — the real library, executing in your browser. Every brick is a subject, every tray a node, and the line sorts bricks by colour. A TNT brick hides its colour: defused, it shows it and gets sorted; past saving, it goes to waste. <a href="#code">See the code</a>.</p>
   </div>
   <dl class="tally" aria-live="polite">
     <div><dt>Clock</dt><dd id="clock">--:--:--</dd></div>
@@ -79,6 +79,38 @@
     </section>
   </aside>
 </main>
+
+<section class="code" id="code" aria-labelledby="code-title">
+  <h2 id="code-title">The code behind the line</h2>
+  <p class="code-lead">This is the whole workflow — six nodes as data, read from <a href="https://github.com/quazardous/grampy/blob/main/docs/demo/scenario.py">scenario.py</a>, the file running above. Everything else a worker needs is two calls.</p>
+  <div class="code-panels">
+    <figure class="code-panel">
+      <figcaption>1 · Declare the graph</figcaption>
+      <pre><code id="graph-source" class="python">Loading scenario.py…</code></pre>
+    </figure>
+    <figure class="code-panel">
+      <figcaption>2 · Run it on your storage</figcaption>
+      <pre><code class="python">from quazardous.grampy import NodeJournal
+from quazardous.grampy.drivers.sqlite import SqliteDriver, schema
+
+for statement in schema():
+    conn.execute(statement)
+journal = NodeJournal(SqliteDriver(conn), GRAPH)
+
+# A worker: take up to 10 bricks the sort station can work on…
+lease = journal.claim("sort", 10, candidates=["b1", "b2", "b3"])
+for brick in lease:
+    ...  # your work
+# …and report, with the lease's token.
+journal.conclude("sort", lease, token=lease.token)
+
+# A janitor, every few seconds: waits, timeouts, dead workers.
+journal.settle(candidates=["b1", "b2", "b3"])
+journal.expire()</code></pre>
+    </figure>
+  </div>
+  <p class="code-links"><code>pip install grampy-q</code> · <a href="https://github.com/quazardous/grampy#readme">README</a> · <a href="https://github.com/quazardous/grampy/blob/main/docs/demo/scenario.py">the full demo scenario</a></p>
+</section>
 
 <section class="legend" aria-label="How the line maps to grampy">
   <h2>What you are looking at</h2>
