@@ -153,6 +153,9 @@ class JournalDriver(Protocol):
     `(subject, node) → status, started_at, finished_at`, one row per pair,
     and on one REVISION per subject — 0 for a subject never forgotten.
 
+    A SUBJECT IS THE APPLICATION'S ID: unique, stable, an `int` or a `str`,
+    stored and returned exactly as given — never converted, built or split.
+
     A driver NEVER validates against the graph, never decides what is
     claimable — the journal does both — and never commits.
     """

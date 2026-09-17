@@ -50,6 +50,8 @@ First release, planned as 0.1.0. Installed as `grampy-q`, imported as
 - Validate a graph at startup: unknown parents, duplicate names, cycles,
   several entry points, a state posted by two nodes and joins that could
   never be met are rejected before any work is claimed.
+- Identify subjects with your own ids, integers or strings, given back
+  exactly as they were given.
 - Ask which nodes a subject can start next, as a pure function of its
   progress — no storage needed.
 - Claim a node for a batch of subjects on behalf of remote workers, then

@@ -9,7 +9,7 @@ from quazardous.grampy.testing import JournalContract
 
 
 class MemoryHarness:
-    def journal(self, dag, clock):
+    def journal(self, dag, clock, subject_type=str):
         return NodeJournal(MemoryDriver(), dag, clock=clock)
 
     def candidates(self, subjects):

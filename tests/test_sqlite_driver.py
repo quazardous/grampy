@@ -28,7 +28,7 @@ class SqliteHarness:
         self.tmp_path = tmp_path
         self.count = 0
 
-    def journal(self, dag, clock):
+    def journal(self, dag, clock, subject_type=str):
         conn = sqlite3.connect(":memory:")
         for statement in schema():
             conn.execute(statement)

@@ -53,6 +53,11 @@ journal.claim("crop", 10, candidates=["s1", "s2"])            # ['s1'] — s2 st
 
 ## The rules
 
+- **A subject is identified by the application.** Its id is unique, stable,
+  and an integer or a string; grampy stores it and gives it back exactly as
+  given, never builds nor splits one. The storage's subject column follows
+  the application's type (`BIGINT`, `TEXT`…). The contract runs with both.
+
 - A node is **claimable** when it has no row, no descendant has started,
   and it is **joined**: by default every parent is `done`, `skipped` or
   `omitted`; `failed` satisfies nobody.

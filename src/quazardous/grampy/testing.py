@@ -16,7 +16,10 @@ Usage, in a test module (pytest is only needed here):
 
 A harness provides:
 
-    journal(dag, clock)          a NodeJournal on EMPTY storage
+    journal(dag, clock, subject_type=str)
+                                 a NodeJournal on EMPTY storage whose subjects
+                                 are `str` or `int` (the storage's subject
+                                 column typed accordingly)
     candidates(subjects)         the driver's candidates, in this order
     seed(journal, subject, progress)
                                  write rows directly, bypassing the API
@@ -503,22 +506,44 @@ class JournalContract:
 
     # -- the model, confronted at random ----------------------------------------
 
-    def test_the_driver_follows_the_model_on_random_graphs(self, harness):
+    @pytest.mark.parametrize("subject_type", [str, int], ids=["str-subjects", "int-subjects"])
+    def test_the_driver_follows_the_model_on_random_graphs(self, harness, subject_type):
         """Random graphs, random sequences of claim, conclude, skip, adopt,
         forget and release; after every step the driver must hold exactly
         what a few lines of Python over `dag.claimable` say it should.
 
         The sweep above covers the claim rule on one graph; this covers the
-        OPERATIONS, in orders nobody would think of writing."""
+        OPERATIONS, in orders nobody would think of writing — with string
+        subjects and with integer subjects, the two kinds of id the journal
+        promises to take as they are."""
         pytest.importorskip("hypothesis")
         from hypothesis import HealthCheck, settings
         from hypothesis.stateful import run_state_machine_as_test
 
         run_state_machine_as_test(
-            _model_machine(harness),
+            _model_machine(harness, subject_type),
             settings=settings(max_examples=40, stateful_step_count=25,
                               deadline=None, derandomize=True,
                               suppress_health_check=list(HealthCheck)))
+
+    # -- subject ids -----------------------------------------------------------
+
+    def test_integer_ids_come_back_as_integers(self, harness, clock):
+        """THE ID IS THE APPLICATION'S, taken and given back as it is: an
+        integer never comes back as the string of its digits."""
+        journal = harness.journal(FLAKY, clock, subject_type=int)
+        big = 2**40
+        lease = self._claim(harness, journal, "prepare", [3, big, 1])
+        assert sorted(lease) == [1, 3, big]
+        assert all(type(s) is int for s in lease)
+        assert journal.conclude("prepare", [3, big], token=lease.token) == 2
+        assert journal.progress(big) == {"prepare": NODE_DONE}
+        lease = self._claim(harness, journal, "call", [big])
+        assert lease == [big]
+        journal.fail("call", [big], token=lease.token)
+        assert journal.retries(big, "call") == 1
+        assert journal.forget("prepare", [big]) == 1
+        assert [e["node"] for e in journal.history(big)] == ["call", "prepare"]
 
     # -- concurrency -----------------------------------------------------------
     #
@@ -612,11 +637,7 @@ class JournalContract:
             store.close()
 
 
-#: The subjects every random sequence plays with — few, so that they collide.
-_SUBJECTS = ("s0", "s1", "s2", "s3")
-
-
-def _model_machine(harness: Any) -> Any:
+def _model_machine(harness: Any, subject_type: type = str) -> Any:
     """A Hypothesis state machine: one random graph per run, one journal on
     it, and the MODEL — `{subject: {node: (status, started_at, lease)}}` —
     moved by the rule written as plainly as possible."""
@@ -672,6 +693,9 @@ def _model_machine(harness: Any) -> Any:
                               optional=not choice and draw(st.booleans())))
         return tuple(nodes)
 
+    # Few subjects, so that they collide; ids given back EXACTLY as given.
+    _SUBJECTS: tuple[Any, ...] = (
+        ("s0", "s1", "s2", "s3") if subject_type is str else (0, 7, 42, 10**12))
     subjects = st.lists(st.sampled_from(_SUBJECTS), max_size=6)
 
     class Machine(RuleBasedStateMachine):
@@ -680,7 +704,7 @@ def _model_machine(harness: Any) -> Any:
             self.dag = dag
             self.clock = Clock("2026-01-01T00:00:00+00:00")
             self.ticks = 0
-            self.journal = harness.journal(dag, self.clock)
+            self.journal = harness.journal(dag, self.clock, subject_type=subject_type)
             self.model: dict[str, dict[str, tuple[str, str, Any]]] = {
                 s: {} for s in _SUBJECTS}
             self.tokens: list[str] = []

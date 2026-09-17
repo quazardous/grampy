@@ -24,11 +24,15 @@ from quazardous.grampy.testing import JournalContract  # noqa: E402
 _TABLES = itertools.count()
 
 
-def node_table(metadata, name):
+def _type(subject_type):
+    return sa.BigInteger if subject_type is int else sa.Text
+
+
+def node_table(metadata, name, subject_type=str):
     """A node table whose subject column is NOT called `request_id`."""
     return sa.Table(
         name, metadata,
-        sa.Column("subject", sa.Text, primary_key=True),
+        sa.Column("subject", _type(subject_type), primary_key=True),
         sa.Column("node", sa.Text, primary_key=True),
         sa.Column("status", sa.Text, nullable=False),
         sa.Column("started_at", sa.Text, nullable=False),
@@ -36,10 +40,10 @@ def node_table(metadata, name):
         sa.Column("lease", sa.Text))
 
 
-def history_table(metadata, name):
+def history_table(metadata, name, subject_type=str):
     return sa.Table(
         name, metadata,
-        sa.Column("subject", sa.Text, nullable=False),
+        sa.Column("subject", _type(subject_type), nullable=False),
         sa.Column("node", sa.Text, nullable=False),
         sa.Column("status", sa.Text, nullable=False),
         sa.Column("started_at", sa.Text, nullable=False),
@@ -49,18 +53,20 @@ def history_table(metadata, name):
         sa.Column("reason", sa.Text, nullable=False))
 
 
-def revision_table(metadata, name):
+def revision_table(metadata, name, subject_type=str):
     return sa.Table(
         name, metadata,
-        sa.Column("subject", sa.Text, primary_key=True),
+        sa.Column("subject", _type(subject_type), primary_key=True),
         sa.Column("revision", sa.Integer, nullable=False))
 
 
-def ordered_subjects(subjects):
-    """An ordered `SELECT subject` over literal values."""
+def ordered_subjects(subjects, subject_type=str):
+    """An ordered `SELECT subject` over literal values, typed like the
+    subject column — even when empty, or PostgreSQL refuses to compare."""
+    kind = _type(subject_type)
     if not subjects:
-        return sa.select(sa.cast(sa.null(), sa.Text).label("subject")).where(sa.false())
-    values = sa.values(sa.column("subject", sa.Text), sa.column("rank", sa.Integer),
+        return sa.select(sa.cast(sa.null(), kind).label("subject")).where(sa.false())
+    values = sa.values(sa.column("subject", kind), sa.column("rank", sa.Integer),
                        name="candidates").data([(s, i) for i, s in enumerate(subjects)])
     return sa.select(values.c.subject).order_by(values.c.rank)
 
@@ -68,19 +74,21 @@ def ordered_subjects(subjects):
 class PostgresHarness:
     def __init__(self, conn):
         self.conn = conn
+        self.subject_type = str
 
-    def journal(self, dag, clock):
+    def journal(self, dag, clock, subject_type=str):
+        self.subject_type = subject_type
         metadata, n = sa.MetaData(), next(_TABLES)
-        table = node_table(metadata, f"grampy_nodes_{n}")
-        revisions = revision_table(metadata, f"grampy_revisions_{n}")
-        history = history_table(metadata, f"grampy_history_{n}")
+        table = node_table(metadata, f"grampy_nodes_{n}", subject_type)
+        revisions = revision_table(metadata, f"grampy_revisions_{n}", subject_type)
+        history = history_table(metadata, f"grampy_history_{n}", subject_type)
         metadata.create_all(self.conn)
         return NodeJournal(
             PostgresDriver(self.conn.execute, table, revisions, history, subject="subject"),
             dag, clock=clock)
 
     def candidates(self, subjects):
-        return ordered_subjects(subjects)
+        return ordered_subjects(subjects, self.subject_type)
 
     def seed(self, journal, subject, progress):
         for name, status in progress.items():
