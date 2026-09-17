@@ -36,7 +36,8 @@ For usage questions, open an issue on the tracker and label it `question`.
    GRAMPY_TEST_PG_DSN=postgresql+psycopg://user:pass@localhost/test pytest
    ```
 
-4. Lint with `ruff check`.
+4. Lint with `ruff check`, and type-check with
+   `cd src && mypy --explicit-package-bases --namespace-packages quazardous/grampy`.
 5. Add a line to `CHANGELOG.md` under `[Unreleased]` if a user would
    notice the change.
 6. Open the PR. Describe the **what** and the **why**; mechanical diff
@@ -74,6 +75,29 @@ to say why.
 Implement the `quazardous.grampy.journal.JournalDriver` protocol, then subclass
 `quazardous.grampy.testing.JournalContract` with a `harness` fixture, as
 `tests/test_memory_driver.py` does.
+
+## How to release
+
+Maintainers only. Nothing is uploaded by hand: a tag does it.
+
+1. Move the `[Unreleased]` entries of `CHANGELOG.md` under
+   `## [X.Y.Z] - YYYY-MM-DD` (SemVer: any `Added` is at least a minor bump).
+2. Set `__version__ = "X.Y.Z"` in `src/quazardous/grampy/__init__.py`.
+3. Commit, then tag and push the tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+4. The `release` workflow builds the sdist and the wheel, runs
+   `twine check`, checks that the tag matches the version, runs the tests
+   against the **installed** wheel, and publishes to TestPyPI.
+5. Approve the `pypi` environment in GitHub: the same files go to PyPI,
+   then a GitHub release is created with the CHANGELOG section.
+
+A version uploaded to PyPI can never be uploaded again, even after being
+deleted: a mistake costs a version number.
+
+One-time setup (repository owner): on pypi.org and test.pypi.org, add a
+*pending trusted publisher* for project `grampy-q`, owner `quazardous`,
+repository `grampy`, workflow `release.yml`, environment `pypi`
+(`testpypi` on TestPyPI); in the GitHub repository settings, create the
+`testpypi` and `pypi` environments, the latter with a required reviewer.
 
 ## Commit messages
 

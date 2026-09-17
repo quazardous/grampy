@@ -77,7 +77,7 @@ def source_state(name: str, dag: tuple[Node, ...], *, entry: str) -> str:
             to_visit.extend(by_name[current].parents)
     latest = {p for p in producers
               if not any(p in ancestors(other, dag) for other in producers)}
-    states = {by_name[p].state for p in latest}
+    states = {state for p in latest if (state := by_name[p].state) is not None}
     if not states:
         return entry
     if len(states) > 1:

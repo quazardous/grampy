@@ -3,19 +3,41 @@ name = "grampy-q"
 dynamic = ["version"]
 description = "A small workflow graph (DAG) and node journal for work queues, with pluggable storage drivers"
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "David Berlioz" }]
 requires-python = ">=3.10"
+keywords = ["workflow", "dag", "queue", "state machine", "petri net", "postgresql", "sqlite"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: System :: Distributed Computing",
+    "Typing :: Typed",
+]
 # The core has NO dependency: the graph, the claim rule and the journal
 # logic are plain Python. Only the postgres driver needs SQLAlchemy.
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/quazardous/grampy"
+Source = "https://github.com/quazardous/grampy"
+Issues = "https://github.com/quazardous/grampy/issues"
+Changelog = "https://github.com/quazardous/grampy/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 postgres = ["sqlalchemy>=2.0"]
 test = ["pytest>=8", "hypothesis>=6.100"]
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.dynamic]
@@ -27,6 +49,9 @@ where = ["src"]
 # distributions; grampy lives at quazardous.grampy.
 namespaces = true
 include = ["quazardous.grampy*"]
+
+[tool.setuptools.package-data]
+"quazardous.grampy" = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

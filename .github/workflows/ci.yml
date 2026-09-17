@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff mypy
+      - run: ruff check
+      - name: mypy
+        working-directory: src
+        run: mypy --python-version 3.10 --ignore-missing-imports --explicit-package-bases --namespace-packages quazardous/grampy
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13"]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: grampy
+          POSTGRES_DB: grampy_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      # The PostgreSQL contract must never be skipped in CI.
+      GRAMPY_TEST_PG_DSN: postgresql+psycopg://postgres:grampy@localhost:5432/grampy_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e ".[test,postgres]" "psycopg[binary]"
+      - run: pytest -o addopts="" -q

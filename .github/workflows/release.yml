@@ -1,0 +1,90 @@
+name: release
+
+# A tag vX.Y.Z builds, checks and publishes that version: TestPyPI first,
+# then PyPI after a manual approval on the `pypi` environment, then a
+# GitHub release carrying the CHANGELOG section. No secret is stored: PyPI
+# trusts this workflow through OIDC (Trusted Publishing).
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build twine
+      - run: python -m build
+      - run: twine check --strict dist/*
+      - name: The tag names the version being built
+        run: |
+          version=$(python -c "import email, zipfile, glob; w = glob.glob('dist/*.whl')[0]; m = [n for n in zipfile.ZipFile(w).namelist() if n.endswith('METADATA')][0]; print(email.message_from_bytes(zipfile.ZipFile(w).read(m))['Version'])")
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME != version $version"; exit 1; }
+      - name: The installed wheel passes the tests, not only the sources
+        run: |
+          python -m venv /tmp/wheel
+          /tmp/wheel/bin/pip install dist/*.whl pytest hypothesis
+          cd tests && /tmp/wheel/bin/python -m pytest -o addopts="" -o pythonpath="" -q --rootdir . .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  testpypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  pypi:
+    needs: testpypi
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    needs: pypi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Release notes from the CHANGELOG section of this version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" {on=1; next}
+            on && /^## \[/ {exit}
+            on {print}
+          ' CHANGELOG.md > notes.md
+          test -s notes.md || { echo "no CHANGELOG section for $version"; exit 1; }
+      - run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --notes-file notes.md
+        env:
+          GH_TOKEN: ${{ github.token }}
