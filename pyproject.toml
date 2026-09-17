@@ -19,10 +19,14 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.dynamic]
-version = { attr = "grampy.__version__" }
+version = { attr = "quazardous.grampy.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+# `quazardous` is a PEP 420 namespace: no __init__.py, shared with other
+# distributions; grampy lives at quazardous.grampy.
+namespaces = true
+include = ["quazardous.grampy*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

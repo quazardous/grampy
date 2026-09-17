@@ -20,7 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-First release, planned as 0.1.0.
+First release, planned as 0.1.0. Installed as `grampy-q`, imported as
+`from quazardous import grampy`.
 
 ### Added
 

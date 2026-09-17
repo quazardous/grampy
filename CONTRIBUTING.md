@@ -47,16 +47,18 @@ For usage questions, open an issue on the tracker and label it `question`.
 These keep grampy small and storage-agnostic. A PR that breaks one needs
 to say why.
 
+- **`quazardous` stays a namespace.** No `__init__.py` in `src/quazardous/`:
+  other distributions may install beside grampy under the same prefix.
 - **The core imports only the standard library.** Only
-  `grampy.drivers.postgres` may import SQLAlchemy, and only
-  `grampy.testing` may import pytest and Hypothesis. `tests/test_isolation.py` enforces
+  `quazardous.grampy.drivers.postgres` may import SQLAlchemy, and only
+  `quazardous.grampy.testing` may import pytest and Hypothesis. `tests/test_isolation.py` enforces
   it.
 - **Python 3.10 compatible.** No `match`/`case`, no 3.11+ syntax or
   standard-library additions.
 - **The rule lives in the core, not in the drivers.** What is claimable is
-  decided by the journal with `grampy.dag`, in Python. A driver stores rows
+  decided by the journal with `quazardous.grampy.dag`, in Python. A driver stores rows
   and offers a few atomic operations; it may pre-filter what it reads,
-  never decide. Every driver passes `grampy.testing.JournalContract`
+  never decide. Every driver passes `quazardous.grampy.testing.JournalContract`
   unchanged.
 - **No guarantee rests on one storage's mechanism.** A guarantee is written
   in the driver protocol and proven by the shared contract, concurrency
@@ -69,8 +71,8 @@ to say why.
 
 ## Adding a driver
 
-Implement the `grampy.journal.JournalDriver` protocol, then subclass
-`grampy.testing.JournalContract` with a `harness` fixture, as
+Implement the `quazardous.grampy.journal.JournalDriver` protocol, then subclass
+`quazardous.grampy.testing.JournalContract` with a `harness` fixture, as
 `tests/test_memory_driver.py` does.
 
 ## Commit messages

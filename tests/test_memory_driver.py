@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import pytest
 
-from grampy import NodeJournal
-from grampy.drivers.memory import MemoryDriver, Row
-from grampy.testing import JournalContract
+from quazardous.grampy import NodeJournal
+from quazardous.grampy.drivers.memory import MemoryDriver, Row
+from quazardous.grampy.testing import JournalContract
 
 
 class MemoryHarness:

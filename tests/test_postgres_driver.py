@@ -17,9 +17,9 @@ pytestmark = pytest.mark.skipif(not DSN, reason="GRAMPY_TEST_PG_DSN is not set")
 
 sa = pytest.importorskip("sqlalchemy")
 
-from grampy import NodeJournal  # noqa: E402
-from grampy.drivers.postgres import PostgresDriver  # noqa: E402
-from grampy.testing import JournalContract  # noqa: E402
+from quazardous.grampy import NodeJournal  # noqa: E402
+from quazardous.grampy.drivers.postgres import PostgresDriver  # noqa: E402
+from quazardous.grampy.testing import JournalContract  # noqa: E402
 
 _TABLES = itertools.count()
 

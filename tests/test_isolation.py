@@ -1,8 +1,8 @@
 """The package imports what it says it imports — read from the source.
 
     the core                   the standard library and itself
-    grampy.drivers.postgres    + sqlalchemy
-    grampy.testing             + pytest, hypothesis
+    quazardous.grampy.drivers.postgres    + sqlalchemy
+    quazardous.grampy.testing             + pytest, hypothesis
 """
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import ast
 import sys
 from pathlib import Path
 
-PACKAGE = Path(__file__).resolve().parents[1] / "src" / "grampy"
+PACKAGE = Path(__file__).resolve().parents[1] / "src" / "quazardous" / "grampy"
 
 EXTRA = {
     "drivers/postgres.py": {"sqlalchemy"},
@@ -31,7 +31,7 @@ def top_level_imports(path: Path) -> set[str]:
 def test_every_module_imports_only_what_it_declares():
     files = sorted(PACKAGE.rglob("*.py"))
     assert len(files) >= 7, "the scan must actually see the package"
-    allowed_everywhere = set(sys.stdlib_module_names) | {"grampy"}
+    allowed_everywhere = set(sys.stdlib_module_names) | {"quazardous"}
     for path in files:
         name = path.relative_to(PACKAGE).as_posix()
         extra = top_level_imports(path) - allowed_everywhere - EXTRA.get(name, set())
@@ -42,3 +42,9 @@ def test_the_scan_sees_a_foreign_import(tmp_path):
     sample = tmp_path / "sample.py"
     sample.write_text("import os\nfrom somewhere.other import thing\n", encoding="utf-8")
     assert top_level_imports(sample) == {"os", "somewhere"}
+
+
+def test_quazardous_stays_a_namespace():
+    """No `__init__.py` in `quazardous/`: other distributions install their
+    own package beside grampy under the same prefix (PEP 420)."""
+    assert not (PACKAGE.parent / "__init__.py").exists()

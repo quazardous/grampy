@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from grampy import (
+from quazardous.grampy import (
     DagError,
     Node,
     allowed_transitions,

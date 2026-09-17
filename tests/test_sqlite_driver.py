@@ -5,9 +5,9 @@ import sqlite3
 
 import pytest
 
-from grampy import NodeJournal
-from grampy.drivers.sqlite import Query, SqliteDriver, schema
-from grampy.testing import JournalContract
+from quazardous.grampy import NodeJournal
+from quazardous.grampy.drivers.sqlite import Query, SqliteDriver, schema
+from quazardous.grampy.testing import JournalContract
 
 
 def ordered_subjects(subjects):
@@ -105,6 +105,6 @@ def test_candidates_may_be_plain_subjects():
     conn = sqlite3.connect(":memory:")
     for statement in schema():
         conn.execute(statement)
-    from grampy import Node
+    from quazardous.grampy import Node
     journal = NodeJournal(SqliteDriver(conn), (Node("a"),))
     assert sorted(journal.claim("a", 5, candidates=["x", "y"])) == ["x", "y"]

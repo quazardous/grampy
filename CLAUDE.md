@@ -16,6 +16,11 @@ tracker IDs (`#NNN`) or the vocabulary of the application that uses it.
 Use the generic terms: subject, node, run. Context about that application
 belongs in `CLAUDE.local.md` (not versioned) or on the tracker thread.
 
+## Package layout
+
+Distribution `grampy-q`, import `quazardous.grampy`. `src/quazardous/` is a
+PEP 420 namespace: never add an `__init__.py` there.
+
 ## Keep the core dependency-free and 3.10-compatible
 
 The core imports only the standard library (`tests/test_isolation.py`
@@ -24,12 +29,12 @@ checks it). The main consumer runs Python 3.10: no `match`/`case`, no
 
 ## Drivers follow the contract
 
-The claim rule lives in the core (`grampy.dag`, applied by
-`grampy.journal`); drivers store rows and offer atomic operations, they
+The claim rule lives in the core (`quazardous.grampy.dag`, applied
+by `quazardous.grampy.journal`); drivers store rows and offer atomic operations, they
 never decide. No guarantee may depend on a storage-specific mechanism: it
 is defined in the driver protocol and proven by the shared contract,
 concurrency tests included. A change to the journal or a driver must pass
-`grampy.testing.JournalContract` on every driver — PostgreSQL when
+`quazardous.grampy.testing.JournalContract` on every driver — PostgreSQL when
 `GRAMPY_TEST_PG_DSN` is set. Say explicitly when PostgreSQL was not run.
 
 ## Changelog

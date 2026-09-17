@@ -4,11 +4,12 @@ A small workflow graph for work queues that already live in a storage —
 a database, a key-value store, or plain memory: the storage is a driver.
 
 ```bash
-pip install grampy-q              # imported as `grampy`
+pip install grampy-q              # from quazardous import grampy
 pip install "grampy-q[postgres]"  # + the PostgreSQL driver (SQLAlchemy)
 ```
 
-(`grampy` was already taken on PyPI; the *q* is for queue.)
+The package lives in the `quazardous` namespace; the distribution is
+`grampy-q` (`grampy` was already taken on PyPI; the *q* is for queue).
 
 You declare a DAG of nodes. Each *subject* (a job, a request, a file…)
 goes through the nodes; a **node journal** records, per subject and per
@@ -19,8 +20,8 @@ graph decides what becomes claimable next — forks run in parallel, joins
 wait for all their parents.
 
 ```python
-from grampy import Node, NodeJournal, check_dag
-from grampy.drivers.memory import MemoryDriver
+from quazardous.grampy import Node, NodeJournal, check_dag
+from quazardous.grampy.drivers.memory import MemoryDriver
 
 DAG = (
     Node("fetch", working="fetching", state="fetched"),
@@ -40,15 +41,15 @@ journal.claim("crop", 10, candidates=["s1", "s2"])            # ['s1'] — s2 st
 
 | module | what it does |
 |---|---|
-| `grampy.dag` | `Node`, the statuses, `check_dag`, and the **pure** claim rule: `claimable`, `claimable_nodes`, `descendants`, `ancestors` |
-| `grampy.graph` | the graph **as data**: `Graph(Document(name, version), nodes)`, a canonical dict / JSON form, strict reading with the path of every error |
-| `grampy.timing` | durations (`30s`, `10m`, `7d`), ISO instants, `Retry` and its backoff |
-| `grampy.states` | derived from the graph: `replay_targets`, `replayed_after`, `to_undo`, `source_state`, `allowed_transitions` |
-| `grampy.journal` | `NodeJournal` — the logic (validation, rule inputs, clock) over a `JournalDriver` protocol |
-| `grampy.drivers.memory` | dict-based, deterministic, no dependency — the reference driver |
-| `grampy.drivers.sqlite` | standard-library `sqlite3` on tables you declare (`schema()` gives the DDL); one writer at a time, and the same contract |
-| `grampy.drivers.postgres` | SQLAlchemy Core on tables **you** declare; candidates read page by page, rows inserted only if the subject's revision is unchanged |
-| `grampy.testing` | `JournalContract`, the test suite every driver must pass — concurrency included |
+| `quazardous.grampy.dag` | `Node`, the statuses, `check_dag`, and the **pure** claim rule: `claimable`, `claimable_nodes`, `descendants`, `ancestors` |
+| `quazardous.grampy.graph` | the graph **as data**: `Graph(Document(name, version), nodes)`, a canonical dict / JSON form, strict reading with the path of every error |
+| `quazardous.grampy.timing` | durations (`30s`, `10m`, `7d`), ISO instants, `Retry` and its backoff |
+| `quazardous.grampy.states` | derived from the graph: `replay_targets`, `replayed_after`, `to_undo`, `source_state`, `allowed_transitions` |
+| `quazardous.grampy.journal` | `NodeJournal` — the logic (validation, rule inputs, clock) over a `JournalDriver` protocol |
+| `quazardous.grampy.drivers.memory` | dict-based, deterministic, no dependency — the reference driver |
+| `quazardous.grampy.drivers.sqlite` | standard-library `sqlite3` on tables you declare (`schema()` gives the DDL); one writer at a time, and the same contract |
+| `quazardous.grampy.drivers.postgres` | SQLAlchemy Core on tables **you** declare; candidates read page by page, rows inserted only if the subject's revision is unchanged |
+| `quazardous.grampy.testing` | `JournalContract`, the test suite every driver must pass — concurrency included |
 
 ## The rules
 
@@ -104,7 +105,7 @@ postgres — the first column is the subject, the order is the priority.
 
 ```python
 import sqlalchemy as sa
-from grampy.drivers.postgres import PostgresDriver
+from quazardous.grampy.drivers.postgres import PostgresDriver
 
 nodes = sa.Table("job_nodes", metadata,
     sa.Column("job_id", sa.Text, primary_key=True),
@@ -127,8 +128,8 @@ eligible = sa.select(jobs.c.job_id).where(jobs.c.state != "done").order_by(jobs.
 journal.claim("fetch", 50, candidates=eligible)
 ```
 
-Writing a driver: implement `grampy.journal.JournalDriver` — a few storage
-operations, no rule — and subclass `grampy.testing.JournalContract` with a
+Writing a driver: implement `quazardous.grampy.journal.JournalDriver` — a few storage
+operations, no rule — and subclass `quazardous.grampy.testing.JournalContract` with a
 harness fixture, see `tests/test_memory_driver.py`. The contract includes
 concurrency tests written in sessions (open, act, commit): how your storage
 stays correct under them is up to it, the outcome is not.

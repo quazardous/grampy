@@ -1,5 +1,7 @@
 """grampy — a small workflow graph for queues that already live in a storage.
 
+    from quazardous import grampy          # distribution: grampy-q
+
     grampy.dag        the graph and the pure claim rule
     grampy.graph      the graph as data: a versioned document, JSON in and out
     grampy.states     replays and allowed transitions, derived from the graph

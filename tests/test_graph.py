@@ -7,8 +7,16 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from grampy import NODE_CONCLUDED, DagError, Document, Graph, GraphFormatError, Loop, Node
-from grampy.timing import Retry
+from quazardous.grampy import (
+    NODE_CONCLUDED,
+    DagError,
+    Document,
+    Graph,
+    GraphFormatError,
+    Loop,
+    Node,
+)
+from quazardous.grampy.timing import Retry
 
 DIAMOND = (
     Node("start", working="starting", state="started"),

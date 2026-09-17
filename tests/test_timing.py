@@ -5,7 +5,7 @@ import random
 
 import pytest
 
-from grampy.timing import Retry, seconds, shift
+from quazardous.grampy.timing import Retry, seconds, shift
 
 
 @pytest.mark.parametrize("given, expected", [
