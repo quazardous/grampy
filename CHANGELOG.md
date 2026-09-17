@@ -57,8 +57,13 @@ First release, planned as 0.1.0. Installed as `grampy-q`, imported as
   graph version it started on, and a migration moves the subjects that fit
   the new version — or refuses them all, saying which do not and why.
 - Run one workflow for several sources: give subjects a channel, and let a
-  channel change retries, leases, timeouts and grace periods without
+  channel change retries, leases, timeouts, grace periods and rate limits without
   changing the steps themselves.
+- Protect a costly resource anywhere in a workflow: give a node rate limits
+  (several bands at once, such as 100 a minute and 1000 an hour, with bursts)
+  and a cap on how many subjects it works at the same time, shared by all
+  channels or counted per channel. Workers claiming at the same moment never
+  go past them, on any storage.
 - The journal reads the time from the storage — the database server for
   PostgreSQL — so that workers on different machines agree on what is due.
 - Declare bounded loops: a node that fails (or ends another chosen way)

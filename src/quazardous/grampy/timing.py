@@ -3,6 +3,8 @@
     seconds      "90", "30s", "10m", "2h", "7d" or a number → seconds
     shift        an ISO instant moved by a number of seconds, same format
     Retry        a declared retry policy: how many times, how long to wait
+    Rate         a rate limit band: so many per period, with a burst
+    admit        how many of a batch a set of bands lets through now (GCRA)
 
 ────────────────────────────────────────────────────────────────────────
 INSTANTS ARE TEXT, AND THEY COMPARE AS TEXT
@@ -15,6 +17,7 @@ knowing what a date is. `shift` keeps that format.
 """
 from __future__ import annotations
 
+import math
 import random
 import re
 from dataclasses import dataclass
@@ -93,3 +96,56 @@ class Retry:
         if self.jitter:
             base *= 1 + (rng or random).uniform(-self.jitter, self.jitter)
         return max(base, 0.0)
+
+
+@dataclass(frozen=True)
+class Rate:
+    """A RATE LIMIT BAND: at most `limit` per `period`, spread evenly, with up
+    to `burst` at once (default: `limit` — a full period's worth). Several
+    bands on one node all apply: `(Rate(100, "1m"), Rate(1000, "1h"))`.
+
+    Kept as the GENERIC CELL RATE ALGORITHM (ITU-T I.371): one number per
+    band, the theoretical arrival time of the next cell, instead of a
+    counter and a window to refresh."""
+
+    limit: int
+    period: float | int | str
+    burst: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.limit < 1:
+            raise ValueError(f"a rate needs limit >= 1, got {self.limit}")
+        if seconds(self.period) <= 0:
+            raise ValueError(f"a rate needs a period that lasts, got {self.period!r}")
+        if self.burst is not None and self.burst < 1:
+            raise ValueError(f"a burst is at least 1, got {self.burst}")
+
+    @property
+    def interval(self) -> float:
+        """T: the time one cell costs."""
+        return seconds(self.period) / self.limit
+
+    @property
+    def tolerance(self) -> float:
+        """τ: how far ahead of schedule the band lets cells run."""
+        return ((self.burst or self.limit) - 1) * self.interval
+
+
+def admit(bands: tuple[Rate, ...], tats: list[float | None], now: float,
+          want: int) -> tuple[int, list[float]]:
+    """How many of `want` cells the bands let through at `now`, and each
+    band's new theoretical arrival time once they are taken.
+
+    Per band, with `lag = max(TAT, now) − now`, the cells that fit are
+    `⌊(τ + T − lag) / T⌋`; the batch takes the smallest count over the bands,
+    and EVERY band advances by that count — a cell refused by one band
+    consumes nothing in the others. A band never used has `TAT = None`."""
+    if want <= 0 or not bands:
+        return max(want, 0), [t if t is not None else now for t in tats]
+    fits = want
+    for band, tat in zip(bands, tats, strict=True):
+        lag = max(tat if tat is not None else now, now) - now
+        fits = min(fits, max(0, math.floor((band.tolerance + band.interval - lag)
+                                           / band.interval + 1e-9)))
+    return fits, [max(tat if tat is not None else now, now) + fits * band.interval
+                  for band, tat in zip(bands, tats, strict=True)]

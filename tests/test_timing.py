@@ -5,7 +5,7 @@ import random
 
 import pytest
 
-from quazardous.grampy.timing import Retry, seconds, shift
+from quazardous.grampy.timing import Rate, Retry, admit, seconds, shift
 
 
 @pytest.mark.parametrize("given, expected", [
@@ -52,3 +52,46 @@ def test_jitter_stays_within_its_fraction():
 def test_a_retry_that_cannot_hold_is_refused(kwargs):
     with pytest.raises(ValueError):
         Retry(**kwargs)
+
+
+# ── GCRA ──────────────────────────────────────────────────────────────
+
+
+def test_a_fresh_band_lets_its_burst_through_then_spaces_cells():
+    band = Rate(limit=6, period="1m")               # T = 10 s, burst 6
+    k, (tat,) = admit((band,), [None], now=0.0, want=10)
+    assert k == 6 and tat == 60.0
+    assert admit((band,), [tat], now=0.0, want=1)[0] == 0
+    assert admit((band,), [tat], now=10.0, want=5)[0] == 1
+    assert admit((band,), [tat], now=35.0, want=5)[0] == 3
+
+
+def test_burst_one_spreads_evenly():
+    band = Rate(limit=60, period="1m", burst=1)     # T = 1 s
+    k, (tat,) = admit((band,), [None], now=100.0, want=5)
+    assert (k, tat) == (1, 101.0)
+    assert admit((band,), [tat], now=100.5, want=5)[0] == 0
+    assert admit((band,), [tat], now=101.0, want=5)[0] == 1
+
+
+def test_every_band_applies_and_advances_by_what_passed():
+    minute, hour = Rate(3, "1m"), Rate(5, "1h")
+    k, tats = admit((minute, hour), [None, None], now=0.0, want=10)
+    assert k == 3 and tats == [60.0, 3 * 720.0]
+    k, tats = admit((minute, hour), tats, now=60.0, want=10)
+    assert k == 2, "the hour band has 2 left though the minute band has 3"
+    assert tats == [60.0 + 2 * 20.0, 5 * 720.0]
+
+
+def test_nothing_admitted_consumes_nothing():
+    band = Rate(2, "1m")
+    k, (tat,) = admit((band,), [120.0], now=0.0, want=4)
+    assert k == 0 and tat == 120.0
+
+
+@pytest.mark.parametrize("kwargs", [{"limit": 0, "period": "1m"},
+                                    {"limit": 1, "period": "0s"},
+                                    {"limit": 1, "period": "1m", "burst": 0}])
+def test_a_rate_that_cannot_hold_is_refused(kwargs):
+    with pytest.raises(ValueError):
+        Rate(**kwargs)

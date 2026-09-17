@@ -23,6 +23,7 @@ two tables it expects, for an application that wants them as they are:
                 `(subject, node)` as primary key; timestamps ISO-8601 text
     revisions   subject (primary key), revision (integer), channel, version (text)
     history     the node table's columns, plus archived_at and reason
+    limits      key (text, primary key), value (real): rate and concurrency state
 
 Names are identifiers checked against `[A-Za-z_][A-Za-z0-9_]*`: they are
 written into SQL, never taken from users.
@@ -55,6 +56,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, NamedTuple
 
@@ -80,9 +82,10 @@ class Query(NamedTuple):
 
 
 def schema(table: str = "grampy_nodes", revisions: str = "grampy_revisions",
-           history: str = "grampy_history", subject: str = "subject") -> list[str]:
+           history: str = "grampy_history", subject: str = "subject",
+           limits: str = "grampy_limits") -> list[str]:
     """The `CREATE TABLE` statements the driver expects."""
-    for name in (table, revisions, history, subject):
+    for name in (table, revisions, history, subject, limits):
         _check(name)
     return [
         f"CREATE TABLE IF NOT EXISTS {table} ("
@@ -96,6 +99,7 @@ def schema(table: str = "grampy_nodes", revisions: str = "grampy_revisions",
         f"{subject} NOT NULL, node TEXT NOT NULL, status TEXT NOT NULL, "
         f"started_at TEXT NOT NULL, finished_at TEXT, lease TEXT, "
         f"archived_at TEXT NOT NULL, reason TEXT NOT NULL)",
+        f"CREATE TABLE IF NOT EXISTS {limits} (key TEXT NOT NULL PRIMARY KEY, value REAL)",
     ]
 
 
@@ -104,9 +108,10 @@ class SqliteDriver:
 
     def __init__(self, conn: sqlite3.Connection, *, table: str = "grampy_nodes",
                  revisions: str = "grampy_revisions", history: str = "grampy_history",
-                 subject: str = "subject") -> None:
-        for name in (table, revisions, history, subject):
+                 subject: str = "subject", limits: str = "grampy_limits") -> None:
+        for name in (table, revisions, history, subject, limits):
             _check(name)
+        self.limits_table = limits
         self.conn = conn
         self.table, self.revisions, self.subject = table, revisions, subject
         self.history_table = history
@@ -220,6 +225,48 @@ class SqliteDriver:
                       + " WHERE version IS NOT NULL AND version != ?)")
             params.append(version)
         return self._take_away(where, tuple(params), now=now, reason="release")
+
+    @contextmanager
+    def guard(self, keys: list[str]) -> Iterator[None]:
+        """A write takes SQLite's database lock, held to the commit: the
+        claim that follows reads after every writer before it."""
+        for key in sorted(keys):
+            self.conn.execute(
+                f"INSERT INTO {self.limits_table} (key, value) VALUES (?, NULL) "
+                f"ON CONFLICT (key) DO UPDATE SET key = excluded.key", (key,))
+        yield
+
+    def limits(self, keys: list[str]) -> dict[str, float]:
+        out: dict[str, float] = {}
+        for chunk in _chunks(keys):
+            marks = ", ".join("?" * len(chunk))
+            out.update((k, float(v)) for k, v in self.conn.execute(
+                f"SELECT key, value FROM {self.limits_table} "
+                f"WHERE key IN ({marks}) AND value IS NOT NULL", chunk).fetchall())
+        return out
+
+    def set_limits(self, values: dict[str, float]) -> None:
+        for key, value in sorted(values.items()):
+            self.conn.execute(
+                f"INSERT INTO {self.limits_table} (key, value) VALUES (?, ?) "
+                f"ON CONFLICT (key) DO UPDATE SET value = excluded.value", (key, value))
+
+    def running(self, name: str, channels: tuple[str | None, ...] | None) -> int:
+        sql = f"SELECT COUNT(*) FROM {self.table} t WHERE node = ? AND status = ?"
+        params: list[Any] = [name, NODE_RUNNING]
+        if channels is not None:
+            named = [c for c in channels if c is not None]
+            tests = []
+            if named:
+                marks = ", ".join("?" * len(named))
+                tests.append(f"t.{self.subject} IN (SELECT {self.subject} FROM "
+                             f"{self.revisions} WHERE channel IN ({marks}))")
+                params += named
+            if None in channels:
+                tests.append(f"t.{self.subject} NOT IN (SELECT {self.subject} FROM "
+                             f"{self.revisions} WHERE channel IS NOT NULL)")
+            sql += " AND (" + (" OR ".join(tests) or "0") + ")"
+        return int(self.conn.execute(sql, params).fetchone()[0])
 
     def pin(self, subjects: list[Any], version: str) -> int:
         count = 0

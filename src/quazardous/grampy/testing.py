@@ -63,7 +63,7 @@ from .dag import (
 )
 from .graph import Document, Graph
 from .journal import MigrationError
-from .timing import Retry, seconds, shift
+from .timing import Rate, Retry, seconds, shift
 
 #: A fork, a join, an optional branch — the diamond.
 DIAMOND = (
@@ -641,6 +641,78 @@ class JournalContract:
             v2.migrate(["s1"], self.V1, {"crop": "trim", "fetch": "trim"})
         with pytest.raises(ValueError, match="does not have"):
             v2.migrate(["s1"], self.V1, {"ghost": "trim", "crop": "trim"})
+
+    # -- rate and concurrency ------------------------------------------------------
+
+    def test_concurrency_caps_what_runs_at_once(self, harness, clock):
+        journal = harness.journal((Node("gpu", concurrency=2),), clock)
+        first = self._claim(harness, journal, "gpu", ["a", "b", "c", "d"])
+        assert len(first) == 2
+        assert self._claim(harness, journal, "gpu", ["a", "b", "c", "d"]) == []
+        journal.conclude("gpu", [first[0]], token=first.token)
+        assert len(self._claim(harness, journal, "gpu", ["a", "b", "c", "d"])) == 1
+
+    def test_rate_bands_let_through_their_burst_then_their_pace(self, harness, clock):
+        journal = harness.journal((Node("call", rate=(Rate(3, "1m"), Rate(4, "1h"))),), clock)
+        subjects = [f"s{i}" for i in range(10)]
+        clock.now = "2026-01-01T00:00:00+00:00"
+        assert len(self._claim(harness, journal, "call", subjects)) == 3
+        assert self._claim(harness, journal, "call", subjects) == []
+        clock.now = "2026-01-01T00:00:20+00:00"
+        assert len(self._claim(harness, journal, "call", subjects)) == 1, "20 s buys one"
+        clock.now = "2026-01-01T00:05:00+00:00"
+        assert self._claim(harness, journal, "call", subjects) == [], (
+            "the minute band is full again, the hour band is spent")
+
+    def test_per_channel_gives_each_channel_its_own_budget(self, harness, clock):
+        graph = Graph(Document("api"), (Node("call", concurrency=1, per="channel"),),
+                      channels={"big": {"call": {"concurrency": 3}}})
+        journal = harness.journal(graph, clock)
+        journal.enroll(["b1", "b2", "b3", "b4"], "big")
+        journal.enroll(["s1", "s2"], "small")
+        taken = self._claim(harness, journal, "call", ["b1", "b2", "b3", "b4", "s1", "s2", "x"])
+        assert sorted(taken, key=str) == ["b1", "b2", "b3", "s1", "x"], (
+            "3 for big, 1 for small, 1 for the subjects without a channel")
+
+    def test_a_claim_racing_another_never_exceeds_the_concurrency(self, harness, clock):
+        """One claim takes the whole budget and has not committed yet; a second
+        claim runs meanwhile. Whatever the storage blocks on, the second must
+        not count the budget as free."""
+        store = harness.store((Node("gpu", concurrency=3),), clock)
+        subjects = [f"s{i:02d}" for i in range(10)]
+        try:
+            first = store.session()
+            second = store.session()
+            mine, theirs = first.candidates(subjects[:5]), second.candidates(subjects[5:])
+            assert len(first.journal.claim("gpu", 3, candidates=mine)) == 3
+            _race(lambda: second.journal.claim("gpu", 3, candidates=theirs),
+                  second.commit, first.commit)
+            check = store.session()
+            try:
+                assert check.journal.counts("gpu")["running"] == 3
+            finally:
+                check.rollback()
+        finally:
+            store.close()
+
+    def test_concurrent_claimers_never_exceed_the_concurrency(self, harness, clock):
+        store = harness.store((Node("gpu", concurrency=3),), clock)
+        subjects = [f"s{i:02d}" for i in range(30)]
+        try:
+            def work(i: int) -> None:
+                for _ in range(8):
+                    session = store.session()
+                    session.journal.claim("gpu", 2, candidates=session.candidates(subjects))
+                    session.commit()
+
+            _run_threads([lambda i=i: work(i) for i in range(4)])
+            check = store.session()
+            try:
+                assert check.journal.counts("gpu")["running"] == 3
+            finally:
+                check.rollback()
+        finally:
+            store.close()
 
     # -- skip ----------------------------------------------------------------
 

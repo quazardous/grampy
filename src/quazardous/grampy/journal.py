@@ -99,6 +99,7 @@ from __future__ import annotations
 import random
 import secrets
 from collections.abc import Callable, Iterable, Iterator
+from contextlib import AbstractContextManager
 from datetime import datetime, timezone
 from typing import Any, NamedTuple, Protocol
 
@@ -119,7 +120,7 @@ from .dag import (
     omitted_by,
 )
 from .graph import Graph
-from .timing import seconds, shift
+from .timing import admit, seconds, shift
 
 #: HOW MANY CANDIDATES A CLAIM READS AT ONCE, at least — more when the
 #: limit is higher. A page is one read and at most one write.
@@ -268,6 +269,24 @@ class JournalDriver(Protocol):
         """The storage's clock, in the journal's format (`utc_now`): ONE
         source of time for every process writing to the same storage."""
 
+    def guard(self, keys: list[str]) -> AbstractContextManager[None]:
+        """SERIALISE writers on `keys` — sorted — from entering the block
+        until the caller's transaction ends (for a storage without
+        transactions, until the block ends). What a claim under a rate or
+        concurrency limit reads and writes inside it, no other claim on the
+        same keys can interleave."""
+
+    def limits(self, keys: list[str]) -> dict[str, float]:
+        """`{key: value}` of the stored limiter state, keys never set left out."""
+
+    def set_limits(self, values: dict[str, float]) -> None:
+        """Store limiter state, creating the keys as needed."""
+
+    def running(self, name: str, channels: tuple[str | None, ...] | None) -> int:
+        """How many rows of `name` are RUNNING — of subjects whose channel is
+        in `channels` (None in it stands for "no channel"), or of all
+        subjects when `channels` is None."""
+
     def progress(self, subject: Any) -> dict[str, str]:
         """`{node: status}` for one subject."""
 
@@ -333,6 +352,7 @@ class NodeJournal:
         parents = n.parents if require_parents and not n.custom_join else ()
         now = self._clock()
         chosen: list[tuple[Any, int]] = []
+        channel_of: dict[Any, str | None] = {}
         seen: set[Any] = set()
         for page in self.driver.scan(candidates, name=name,
                                      nodes=(name, *n.parents, *after),
@@ -345,6 +365,7 @@ class NodeJournal:
                 seen.add(e.subject)
                 if self._takable(n, after, _due_away(name, e, now), require_parents):
                     chosen.append((e.subject, e.revision))
+                    channel_of[e.subject] = e.channel
                     if len(chosen) >= limit:
                         break
             if len(chosen) >= limit:
@@ -354,11 +375,66 @@ class NodeJournal:
         # other. The price: a subject refused by the write (another claimer
         # took it, a revision moved) is not replaced — under contention a
         # claim may take fewer than `limit`, never a wrong one.
-        taken = (self.driver.insert_if_unchanged(
-                     name, chosen, status=NODE_RUNNING, now=now, lease=token)
-                 if chosen else [])
+        if chosen and self._limited(n):
+            taken = self._claim_within_limits(n, chosen, channel_of, now, token)
+        else:
+            taken = (self.driver.insert_if_unchanged(
+                         name, chosen, status=NODE_RUNNING, now=now, lease=token)
+                     if chosen else [])
         self._pin(taken)
         return Lease(taken, token)
+
+    def _limited(self, n: Node) -> bool:
+        return bool(n.rate) or n.concurrency is not None or any(
+            v.rate or v.concurrency is not None for _, v in self._variants(n.name))
+
+    def _claim_within_limits(self, n: Node, chosen: list[tuple[Any, int]],
+                             channel_of: dict[Any, str | None], now: str,
+                             token: str) -> list[Any]:
+        """RATE AND CONCURRENCY, decided here, kept by the storage's guard.
+
+        Candidates are grouped by budget — one for the node, or one per
+        channel with `per="channel"`. Under the guard of every budget's keys,
+        each group is cut to what `concurrency` leaves free and what the rate
+        bands let through (`timing.admit`), written, and the bands advance by
+        what was actually taken."""
+        groups: dict[str | None, list[tuple[Any, int]]] = {}
+        for subject, revision in chosen:
+            budget = channel_of.get(subject) if n.per == "channel" else None
+            groups.setdefault(budget, []).append((subject, revision))
+        keys: dict[str | None, tuple[Node, list[str], str]] = {}
+        for budget in groups:
+            seen_by = self.settings(n.name, budget) if n.per == "channel" else n
+            prefix = f"{n.name}|{budget if budget is not None else '*'}"
+            keys[budget] = (seen_by, [f"rate|{prefix}|{i}" for i in range(len(seen_by.rate))],
+                            f"running|{prefix}")
+        guarded = sorted({k for _, bands, lock in keys.values() for k in (*bands, lock)})
+        instant = datetime.fromisoformat(now).timestamp()
+        taken: list[Any] = []
+        with self.driver.guard(guarded):
+            stored = self.driver.limits([k for _, bands, _ in keys.values() for k in bands])
+            advanced: dict[str, float] = {}
+            for budget, group in sorted(groups.items(), key=lambda g: str(g[0])):
+                seen_by, band_keys, _ = keys[budget]
+                allowed = len(group)
+                if seen_by.concurrency is not None:
+                    busy = self.driver.running(
+                        n.name, None if n.per != "channel" else (budget,))
+                    allowed = min(allowed, max(0, seen_by.concurrency - busy))
+                if seen_by.rate:
+                    allowed, _ = admit(seen_by.rate, [stored.get(k) for k in band_keys],
+                                       instant, allowed)
+                written = self.driver.insert_if_unchanged(
+                    n.name, group[:allowed], status=NODE_RUNNING, now=now,
+                    lease=token) if allowed else []
+                taken += written
+                if seen_by.rate:
+                    _, tats = admit(seen_by.rate, [stored.get(k) for k in band_keys],
+                                    instant, len(written))
+                    advanced.update(zip(band_keys, tats, strict=True))
+            if advanced:
+                self.driver.set_limits(advanced)
+        return taken
 
     def _mine(self, entry: Entry) -> bool:
         return self.version is None or entry.version in (None, self.version)

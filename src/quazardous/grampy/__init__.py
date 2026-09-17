@@ -45,13 +45,13 @@ from .states import (
     source_state,
     to_undo,
 )
-from .timing import Retry
+from .timing import Rate, Retry
 
 __version__ = "0.1.0"
 
 __all__ = [
     "NODE_CONCLUDED", "NODE_DONE", "NODE_FAILED", "NODE_OMITTED", "NODE_RUNNING",
-    "NODE_SATISFYING", "NODE_SCHEDULED", "NODE_SKIPPED", "Retry", "DagError",
+    "NODE_SATISFYING", "NODE_SCHEDULED", "NODE_SKIPPED", "Rate", "Retry", "DagError",
     "Document", "Graph", "GraphFormatError",
     "JournalDriver", "Lease", "Loop", "MigrationError", "Node", "accepts", "joined", "omitted_by",
     "NodeJournal", "allowed_transitions", "ancestors", "check_dag", "claimable",

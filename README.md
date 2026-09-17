@@ -11,7 +11,7 @@ pip install "grampy-q[postgres]"  # + the PostgreSQL driver (SQLAlchemy)
 **[Try the brick sorter →](https://quazardous.github.io/grampy/)** — a sorting
 line where TNT bricks get quarantined, defused with retries or rejected, run by
 the real grampy in your browser. Locally: `python docs/demo/build.py && python -m
-http.server -d docs/demo`.
+http.server 8765 -d docs/demo` (then http://localhost:8765).
 
 The package lives in the `quazardous` namespace; the distribution is
 `grampy-q` (`grampy` was already taken on PyPI; the *q* is for queue).
@@ -94,7 +94,15 @@ journal.claim("crop", 10, candidates=["s1", "s2"])            # ['s1'] — s2 st
 - **Channels: one workflow, several sources.** `journal.enroll(subjects,
   "partner-a")` records a subject's channel; a `Graph(..., channels={"partner-a":
   {"call": {"retry": Retry(5, "1m")}}})` changes, for that channel only, a
-  node's `retry`, `lease`, `timeout` or `grace` — never the structure.
+  node's `retry`, `lease`, `timeout`, `grace`, `rate` or `concurrency` — never
+  the structure.
+- **Rate limits and concurrency, on any node.** `Node("summarise",
+  parents=("fetch",), rate=(Rate(100, "1m"), Rate(1000, "1h", burst=50)),
+  concurrency=4)` — a claim takes no more than every band lets through
+  (GCRA, one number stored per band) nor more than 4 rows running at once.
+  `per="channel"` gives each channel its own budget. The journal decides; the
+  driver only guards the budget's keys while it does, so two claimers never
+  overspend it.
 - **Versions and migration.** A journal on a `Graph` pins each subject to
   its `document.version` and leaves the subjects of other versions alone, so
   v1 and v2 run side by side. `journal_v2.migrate(subjects, V1, {"crop": "trim",
@@ -166,8 +174,13 @@ history = sa.Table("job_node_history", metadata,
     sa.Column("archived_at", sa.Text, nullable=False),
     sa.Column("reason", sa.Text, nullable=False))
 
+limits = sa.Table("job_limits", metadata,        # only for nodes with rate/concurrency
+    sa.Column("key", sa.Text, primary_key=True),
+    sa.Column("value", sa.Float))
+
 journal = NodeJournal(
-    PostgresDriver(conn.execute, nodes, revisions, history, subject="job_id"), DAG)
+    PostgresDriver(conn.execute, nodes, revisions, history, subject="job_id",
+                   limits=limits), DAG)
 eligible = sa.select(jobs.c.job_id).where(jobs.c.state != "done").order_by(jobs.c.priority)
 journal.claim("fetch", 50, candidates=eligible)
 ```

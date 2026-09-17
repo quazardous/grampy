@@ -1,7 +1,7 @@
 """Pack what the demo page loads into Pyodide: grampy's sources and the scenario.
 
     python docs/demo/build.py              # writes docs/demo/dist/grampy-demo.zip
-    python -m http.server -d docs/demo     # then open http://localhost:8000
+    python -m http.server 8765 -d docs/demo   # then open http://localhost:8765
 
 The page runs the grampy of this checkout, not a published release.
 """

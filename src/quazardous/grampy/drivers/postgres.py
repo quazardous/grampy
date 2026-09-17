@@ -20,6 +20,8 @@ none. It needs two `sqlalchemy.Table`s sharing a subject column (named by
     history     the rows taken away: the node table's columns, plus
                 `archived_at` and `reason` (text); append-only, no key
                 required.
+    limits      optional, needed by nodes with a `rate` or a `concurrency`:
+                `key` (text, primary key) and `value` (double precision).
 
 ────────────────────────────────────────────────────────────────────────
 THE CONNECTION IS INJECTED TOO, AS AN `execute`
@@ -75,6 +77,7 @@ reads `-1` would pass for "nothing done".
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import Any
 
 import sqlalchemy as sa
@@ -127,7 +130,7 @@ class PostgresDriver:
 
     def __init__(self, execute: Callable[[Any], Any], table: sa.Table,
                  revisions: sa.Table, history: sa.Table, *,
-                 subject: str = "request_id") -> None:
+                 subject: str = "request_id", limits: sa.Table | None = None) -> None:
         for t, needed in ((table, REQUIRED_COLUMNS), (revisions, REVISION_COLUMNS),
                           (history, HISTORY_COLUMNS)):
             missing = [c for c in (subject, *needed) if c not in t.c]
@@ -139,6 +142,10 @@ class PostgresDriver:
         self.table = table
         self.revisions = revisions
         self.history_table = history
+        if limits is not None and any(c not in limits.c for c in ("key", "value")):
+            raise ValueError(f"table {limits.name!r} lacks key or value — a limits table "
+                             f"needs both")
+        self.limits_table = limits
         self._subject = table.c[subject]
         self._rev_subject = revisions.c[subject]
 
@@ -299,6 +306,52 @@ class PostgresDriver:
                 sa.select(self._rev_subject).where(r.c.version.is_not(None),
                                                    r.c.version != version)))
         return self._take_away(where, now=now, reason="release")
+
+    @contextmanager
+    def guard(self, keys: list[str]) -> Iterator[None]:
+        """Transaction-scoped advisory locks, taken in a statement of their
+        own before the claim reads anything: that claim's statements then
+        see every commit of the claimer they waited for."""
+        self._need_limits()
+        for key in sorted(keys):
+            self._execute(sa.select(sa.func.pg_advisory_xact_lock(
+                sa.func.hashtextextended(key, 0))))
+        yield
+
+    def limits(self, keys: list[str]) -> dict[str, float]:
+        table = self._need_limits()
+        return {row[0]: float(row[1]) for row in self._execute(
+            sa.select(table.c.key, table.c.value).where(table.c.key.in_(list(keys)))
+        ).fetchall() if row[1] is not None}
+
+    def set_limits(self, values: dict[str, float]) -> None:
+        table = self._need_limits()
+        if not values:
+            return
+        insert = postgresql.insert(table).values(
+            [{"key": k, "value": v} for k, v in sorted(values.items())])
+        self._execute(insert.on_conflict_do_update(
+            index_elements=["key"], set_={"value": insert.excluded.value}))
+
+    def running(self, name: str, channels: tuple[str | None, ...] | None) -> int:
+        t, r = self.table, self.revisions
+        query = sa.select(sa.func.count()).select_from(t).where(
+            t.c.node == name, t.c.status == NODE_RUNNING)
+        if channels is not None:
+            named = [c for c in channels if c is not None]
+            with_channel = sa.select(self._rev_subject).where(r.c.channel.in_(named))
+            test = self._subject.in_(with_channel)
+            if None in channels:
+                test = sa.or_(test, self._subject.not_in(
+                    sa.select(self._rev_subject).where(r.c.channel.is_not(None))))
+            query = query.where(test)
+        return int(self._execute(query).scalar())
+
+    def _need_limits(self) -> sa.Table:
+        if self.limits_table is None:
+            raise ValueError("this graph limits rate or concurrency: give the "
+                             "PostgresDriver a `limits` table")
+        return self.limits_table
 
     def pin(self, subjects: list[Any], version: str) -> int:
         r = self.revisions

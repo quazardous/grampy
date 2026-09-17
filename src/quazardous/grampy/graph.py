@@ -35,7 +35,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .dag import DagError, Loop, Node, check_dag
-from .timing import Retry
+from .timing import Rate, Retry
 
 #: THE FORMAT THIS VERSION READS AND WRITES.
 DSL = "grampy/1"
@@ -46,7 +46,7 @@ _NODE_FLAGS = ("optional", "once", "choice")
 #: Parents, joins, choices, loops and waits are the workflow; how long to
 #: wait, how often to retry, how long a lease lasts are how a source is
 #: treated.
-OVERRIDABLE = ("retry", "lease", "timeout", "grace")
+OVERRIDABLE = ("retry", "lease", "timeout", "grace", "rate", "concurrency")
 _NODE_LABELS = ("working", "state")
 
 
@@ -91,6 +91,12 @@ class Graph:
                     raise DagError(
                         f"channel {channel!r} changes {refused} on {name!r} — a channel "
                         f"changes only {list(OVERRIDABLE)}, never the structure")
+                shared = sorted({"rate", "concurrency"} & set(settings))
+                base = next(n for n in self.nodes if n.name == name)
+                if shared and base.per != "channel":
+                    raise DagError(
+                        f"channel {channel!r} changes {shared} on {name!r}, whose budget is "
+                        f"shared by every channel — declare per='channel' first")
             check_dag(self.variant(channel))
 
     def variant(self, channel: str | None) -> tuple[Node, ...]:
@@ -122,6 +128,12 @@ class Graph:
                     spec[key] = getattr(n, key)
             if n.retry is not None:
                 spec["retry"] = _retry_to_dict(n.retry)
+            if n.rate:
+                spec["rate"] = [_rate_to_dict(band) for band in n.rate]
+            if n.concurrency is not None:
+                spec["concurrency"] = n.concurrency
+            if n.per != "all":
+                spec["per"] = n.per
             for flag in _NODE_FLAGS:
                 if getattr(n, flag):
                     spec[flag] = True
@@ -132,7 +144,7 @@ class Graph:
                                "nodes": nodes}
         if self.channels:
             out["channels"] = {
-                channel: {name: {key: _retry_to_dict(value) if key == "retry" else value
+                channel: {name: {key: _setting_to_dict(key, value)
                                  for key, value in settings.items()}
                           for name, settings in overrides.items()}
                 for channel, overrides in self.channels.items()}
@@ -167,7 +179,7 @@ class Graph:
             path = f"$.nodes.{name}"
             spec = _mapping(raw, path, required=(),
                             allowed=("parents", "on", "need", "loop", "retry", "lease",
-                                     "wait", "timeout", "grace",
+                                     "wait", "timeout", "grace", "rate", "concurrency", "per",
                                      *_NODE_LABELS, *_NODE_FLAGS))
             parents = spec.get("parents", [])
             if not isinstance(parents, list):
@@ -209,7 +221,12 @@ class Graph:
                 _duration(spec.get(key), f"{path}.{key}")
             if "wait" in spec:
                 _string(spec["wait"], f"{path}.wait")
+            rate = _rates_from(spec["rate"], f"{path}.rate") if "rate" in spec else ()
+            concurrency = _count(spec.get("concurrency"), f"{path}.concurrency")
+            per = spec.get("per", "all")
+            _string(per, f"{path}.per")
             nodes.append(Node(name, parents=tuple(parents), loop=loop, retry=retry,
+                              rate=rate, concurrency=concurrency, per=per,
                               lease=spec.get("lease"), wait=spec.get("wait"),
                               timeout=spec.get("timeout"), grace=spec.get("grace"),
                               working=spec.get("working"), state=spec.get("state"),
@@ -231,6 +248,10 @@ class Graph:
                 for key, value in settings.items():
                     if key == "retry":
                         parsed[key] = _retry_from(value, f"{path}.retry")
+                    elif key == "rate":
+                        parsed[key] = _rates_from(value, f"{path}.rate")
+                    elif key == "concurrency":
+                        parsed[key] = _count(value, f"{path}.concurrency")
                     else:
                         _duration(value, f"{path}.{key}")
                         parsed[key] = value
@@ -253,6 +274,41 @@ def _retry_to_dict(retry: Retry) -> dict[str, Any]:
     if retry.jitter:
         out["jitter"] = retry.jitter
     return out
+
+
+def _rate_to_dict(band: Rate) -> dict[str, Any]:
+    out: dict[str, Any] = {"limit": band.limit, "period": band.period}
+    if band.burst is not None:
+        out["burst"] = band.burst
+    return out
+
+
+def _setting_to_dict(key: str, value: Any) -> Any:
+    if key == "retry":
+        return _retry_to_dict(value)
+    if key == "rate":
+        return [_rate_to_dict(band) for band in value]
+    return value
+
+
+def _rates_from(value: Any, path: str) -> tuple[Rate, ...]:
+    if not isinstance(value, list):
+        raise GraphFormatError(f"{path}: expected a list of bands")
+    bands = []
+    for i, raw in enumerate(value):
+        spec = _mapping(raw, f"{path}[{i}]", required=("limit", "period"),
+                        allowed=("limit", "period", "burst"))
+        try:
+            bands.append(Rate(**spec))
+        except (TypeError, ValueError) as exc:
+            raise GraphFormatError(f"{path}[{i}]: {exc}") from exc
+    return tuple(bands)
+
+
+def _count(value: Any, path: str) -> int | None:
+    if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+        raise GraphFormatError(f"{path}: expected an integer")
+    return value
 
 
 def _retry_from(value: Any, path: str) -> Retry:

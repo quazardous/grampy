@@ -53,6 +53,13 @@ def history_table(metadata, name, subject_type=str):
         sa.Column("reason", sa.Text, nullable=False))
 
 
+def limits_table(metadata, name):
+    return sa.Table(
+        name, metadata,
+        sa.Column("key", sa.Text, primary_key=True),
+        sa.Column("value", sa.Float))
+
+
 def revision_table(metadata, name, subject_type=str):
     return sa.Table(
         name, metadata,
@@ -84,15 +91,18 @@ class PostgresHarness:
         table = node_table(metadata, f"grampy_nodes_{n}", subject_type)
         revisions = revision_table(metadata, f"grampy_revisions_{n}", subject_type)
         history = history_table(metadata, f"grampy_history_{n}", subject_type)
+        limits = limits_table(metadata, f"grampy_limits_{n}")
         metadata.create_all(self.conn)
         return NodeJournal(
-            PostgresDriver(self.conn.execute, table, revisions, history, subject="subject"),
+            PostgresDriver(self.conn.execute, table, revisions, history, subject="subject",
+                           limits=limits),
             dag, clock=clock)
 
     def journal_on(self, journal, dag, clock):
         d = journal.driver
         return NodeJournal(PostgresDriver(self.conn.execute, d.table, d.revisions,
-                                          d.history_table, subject="subject"),
+                                          d.history_table, subject="subject",
+                                          limits=d.limits_table),
                            dag, clock=clock)
 
     def candidates(self, subjects):
@@ -123,6 +133,7 @@ class PostgresStore:
         self.table = node_table(self.metadata, f"grampy_shared_{n}")
         self.revisions = revision_table(self.metadata, f"grampy_shared_revisions_{n}")
         self.history = history_table(self.metadata, f"grampy_shared_history_{n}")
+        self.limits = limits_table(self.metadata, f"grampy_shared_limits_{n}")
         self.metadata.create_all(engine)
 
     def session(self):
@@ -138,7 +149,7 @@ class PostgresSession:
         self.transaction = self.conn.begin()
         self.journal = NodeJournal(
             PostgresDriver(self.conn.execute, store.table, store.revisions,
-                           store.history, subject="subject"),
+                           store.history, subject="subject", limits=store.limits),
             store.dag, clock=store.clock)
 
     def candidates(self, subjects):

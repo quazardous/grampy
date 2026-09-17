@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -50,6 +51,7 @@ class MemoryDriver:
         self.revisions: dict[Any, int] = {}
         self.channel_of: dict[Any, str] = {}
         self.version_of: dict[Any, str] = {}
+        self.limiter: dict[str, float] = {}
         self.archive: list[tuple[Any, dict[str, Any]]] = []
         self._lock = threading.RLock()
 
@@ -173,6 +175,26 @@ class MemoryDriver:
     def channels(self, subjects: list[Any]) -> dict[Any, str]:
         with self._lock:
             return {s: self.channel_of[s] for s in subjects if s in self.channel_of}
+
+    @contextmanager
+    def guard(self, keys: list[str]) -> Iterator[None]:
+        """Memory has no transaction: the lock is held for the block."""
+        with self._lock:
+            yield
+
+    def limits(self, keys: list[str]) -> dict[str, float]:
+        with self._lock:
+            return {k: self.limiter[k] for k in keys if k in self.limiter}
+
+    def set_limits(self, values: dict[str, float]) -> None:
+        with self._lock:
+            self.limiter.update(values)
+
+    def running(self, name: str, channels: tuple[str | None, ...] | None) -> int:
+        with self._lock:
+            return sum(1 for (s, n), row in self.rows.items()
+                       if n == name and row.status == NODE_RUNNING
+                       and (channels is None or self.channel_of.get(s) in channels))
 
     def pin(self, subjects: list[Any], version: str) -> int:
         with self._lock:

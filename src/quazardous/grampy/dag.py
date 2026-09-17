@@ -36,7 +36,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-from .timing import Retry, seconds
+from .timing import Rate, Retry, seconds
 
 
 class DagError(ValueError):
@@ -154,6 +154,11 @@ class Node:
     `grace` gives an optional node that long, once its parents concluded,
     before `journal.settle` skips it.
 
+    `rate` (bands of `timing.Rate`) and `concurrency` protect what the node
+    uses: a claim takes no more than the bands let through, nor more than
+    `concurrency` rows running at once. `per="channel"` gives each channel
+    its own budget; `per="all"` shares one.
+
     `retry` declares what a failure does first (`timing.Retry`): archived,
     and the node scheduled again after a delay, a bounded number of times.
     Only past the retries does the failure stand — and a loop or a failure
@@ -175,9 +180,13 @@ class Node:
     wait: str | None = None
     timeout: float | int | str | None = None
     grace: float | int | str | None = None
+    rate: tuple[Rate, ...] = ()
+    concurrency: int | None = None
+    per: str = "all"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "parents", tuple(self.parents))
+        object.__setattr__(self, "rate", tuple(self.rate))
         object.__setattr__(self, "on", _Frozen(
             (parent, tuple(statuses)) for parent, statuses in dict(self.on).items()))
 
@@ -413,6 +422,15 @@ def check_dag(dag: tuple[Node, ...]) -> None:
                     f"worked, so it cannot take {unfit}")
         elif n.timeout is not None:
             raise DagError(f"node {n.name!r}: a timeout needs a wait")
+        if n.per not in ("all", "channel"):
+            raise DagError(f"node {n.name!r}: per={n.per!r} — expected 'all' or 'channel'")
+        if n.concurrency is not None and n.concurrency < 1:
+            raise DagError(f"node {n.name!r}: concurrency {n.concurrency} — at least 1")
+        if any(not isinstance(band, Rate) for band in n.rate):
+            raise DagError(f"node {n.name!r}: rate takes Rate bands")
+        if n.wait is not None and (n.rate or n.concurrency is not None):
+            raise DagError(f"node {n.name!r} waits: it is never claimed, so it takes no "
+                           f"rate or concurrency")
         if n.grace is not None and not n.optional:
             raise DagError(f"node {n.name!r}: grace skips an optional node — this one is not")
 
