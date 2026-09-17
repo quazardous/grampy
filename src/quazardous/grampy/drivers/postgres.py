@@ -25,7 +25,8 @@ none. It needs two `sqlalchemy.Table`s sharing a subject column (named by
                 `key` (text, primary key) and `value` (double precision).
     arrivals    optional, needed by graphs with a lane: the subject and `node`
                 as primary key, `ref` (nullable text), `place` and
-                `arrived_at` (text), `urgent` (boolean).
+                `arrived_at` (text), `urgent` (boolean), `refs` (nullable
+                text) — every version waiting, for a lane that keeps them.
 
 ────────────────────────────────────────────────────────────────────────
 THE CONNECTION IS INJECTED TOO, AS AN `execute`
@@ -104,7 +105,7 @@ REVISION_COLUMNS = ("revision", "policy", "version")
 #: THE COLUMNS THE HISTORY TABLE MUST CARRY, besides the subject.
 HISTORY_COLUMNS = (*REQUIRED_COLUMNS, "archived_at", "reason")
 #: THE COLUMNS THE ARRIVALS TABLE MUST CARRY, besides the subject.
-ARRIVAL_COLUMNS = ("node", "ref", "place", "arrived_at", "urgent")
+ARRIVAL_COLUMNS = ("node", "ref", "place", "arrived_at", "urgent", "refs")
 
 
 def _ranked(candidates: Any) -> Any:
@@ -485,16 +486,19 @@ class PostgresDriver:
         return len(rows)
 
     def arrive(self, name: str, subjects: list[Any], *, ref: str | None, now: str,
-               merge: str, position: str, urgent: bool) -> dict[Any, str]:
+               merge: str, position: str, urgent: bool,
+               refs: str | None = None) -> dict[Any, str]:
         """One upsert; `xmax = 0` tells a row inserted from a row updated."""
         a = self._need_arrivals()
         subject = a.c[self._subject.key]
         insert = postgresql.insert(a).values(
             [{self._subject.key: s, "node": name, "ref": ref, "place": now,
-              "arrived_at": now, "urgent": urgent} for s in sorted(subjects)])
+              "arrived_at": now, "urgent": urgent, "refs": refs} for s in sorted(subjects)])
         merged: dict[str, Any] = {"urgent": sa.or_(a.c.urgent, insert.excluded.urgent)}
-        if merge == "last":
+        if merge in ("last", "set"):
             merged["ref"] = insert.excluded.ref
+        if merge == "set":
+            merged["refs"] = insert.excluded.refs
         if position == "last":
             merged["place"] = insert.excluded.place
         rows = self._execute(
@@ -506,9 +510,11 @@ class PostgresDriver:
     def arrivals(self, subjects: list[Any], name: str) -> dict[Any, Arrival]:
         a = self._need_arrivals()
         subject = a.c[self._subject.key]
-        return {row[0]: Arrival(row[1], row[2], row[3], bool(row[4])) for row in self._execute(
-            sa.select(subject, a.c.ref, a.c.place, a.c.arrived_at, a.c.urgent)
-            .where(a.c.node == name, subject.in_(list(subjects)))).fetchall()}
+        return {row[0]: Arrival(row[1], row[2], row[3], bool(row[4]), row[5])
+                for row in self._execute(
+                    sa.select(subject, a.c.ref, a.c.place, a.c.arrived_at, a.c.urgent,
+                              a.c.refs)
+                    .where(a.c.node == name, subject.in_(list(subjects)))).fetchall()}
 
     def enter(self, name: str, entries: list[tuple[Any, int]], *,
               archive: tuple[str, ...], now: str) -> list[Any]:

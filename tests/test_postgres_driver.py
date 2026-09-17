@@ -68,7 +68,8 @@ def arrivals_table(metadata, name, subject_type=str):
         sa.Column("ref", sa.Text),
         sa.Column("place", sa.Text, nullable=False),
         sa.Column("arrived_at", sa.Text, nullable=False),
-        sa.Column("urgent", sa.Boolean, nullable=False))
+        sa.Column("urgent", sa.Boolean, nullable=False),
+        sa.Column("refs", sa.Text))
 
 
 def revision_table(metadata, name, subject_type=str):
@@ -96,7 +97,7 @@ class PostgresHarness:
         self.conn = conn
         self.subject_type = str
 
-    def journal(self, dag, clock, subject_type=str):
+    def journal(self, dag, clock, subject_type=str, mergers=None):
         self.subject_type = subject_type
         metadata, n = sa.MetaData(), next(_TABLES)
         table = node_table(metadata, f"grampy_nodes_{n}", subject_type)
@@ -108,7 +109,7 @@ class PostgresHarness:
         return NodeJournal(
             PostgresDriver(self.conn.execute, table, revisions, history, subject="subject",
                            limits=limits, arrivals=arrivals),
-            dag, clock=clock)
+            dag, clock=clock, mergers=mergers)
 
     def journal_on(self, journal, dag, clock):
         d = journal.driver

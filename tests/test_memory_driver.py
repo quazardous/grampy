@@ -9,8 +9,8 @@ from quazardous.grampy.testing import JournalContract
 
 
 class MemoryHarness:
-    def journal(self, dag, clock, subject_type=str):
-        return NodeJournal(MemoryDriver(), dag, clock=clock)
+    def journal(self, dag, clock, subject_type=str, mergers=None):
+        return NodeJournal(MemoryDriver(), dag, clock=clock, mergers=mergers)
 
     def journal_on(self, journal, dag, clock):
         return NodeJournal(journal.driver, dag, clock=clock)

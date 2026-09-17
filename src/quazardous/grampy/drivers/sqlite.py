@@ -25,8 +25,9 @@ two tables it expects, for an application that wants them as they are:
     revisions   subject (primary key), revision (integer), policy, version (text)
     history     the node table's columns, plus archived_at and reason
     limits      key (text, primary key), value (real): rate and concurrency state
-    arrivals    subject, node, ref, place, arrived_at (text), urgent (integer) —
-                `(subject, node)` as primary key: what waits in a lane
+    arrivals    subject, node, ref, place, arrived_at (text), urgent (integer),
+                refs (text) — `(subject, node)` as primary key: what waits in
+                a lane, `refs` holding every version for a lane that keeps them
 
 Names are identifiers checked against `[A-Za-z_][A-Za-z0-9_]*`: they are
 written into SQL, never taken from users.
@@ -105,7 +106,7 @@ def schema(table: str = "grampy_nodes", revisions: str = "grampy_revisions",
         f"CREATE TABLE IF NOT EXISTS {limits} (key TEXT NOT NULL PRIMARY KEY, value REAL)",
         f"CREATE TABLE IF NOT EXISTS {arrivals} ("
         f"{subject} NOT NULL, node TEXT NOT NULL, ref TEXT, place TEXT NOT NULL, "
-        f"arrived_at TEXT NOT NULL, urgent INTEGER NOT NULL DEFAULT 0, "
+        f"arrived_at TEXT NOT NULL, urgent INTEGER NOT NULL DEFAULT 0, refs TEXT, "
         f"PRIMARY KEY ({subject}, node))",
     ]
 
@@ -310,7 +311,8 @@ class SqliteDriver:
         waiting = []
         for old in rename:
             waiting += self.conn.execute(
-                f"SELECT node, ref, place, arrived_at, urgent FROM {self.arrivals_table} "
+                f"SELECT node, ref, place, arrived_at, urgent, refs "
+                f"FROM {self.arrivals_table} "
                 f"WHERE {self.subject} = ? AND node = ?", (subject, old)).fetchall()
             self.conn.execute(
                 f"DELETE FROM {self.arrivals_table} WHERE {self.subject} = ? AND node = ?",
@@ -318,8 +320,8 @@ class SqliteDriver:
         for old, *rest in waiting:
             self.conn.execute(
                 f"INSERT INTO {self.arrivals_table} "
-                f"({self.subject}, node, ref, place, arrived_at, urgent) "
-                f"VALUES (?, ?, ?, ?, ?, ?)", (subject, rename[old], *rest))
+                f"({self.subject}, node, ref, place, arrived_at, urgent, refs) "
+                f"VALUES (?, ?, ?, ?, ?, ?, ?)", (subject, rename[old], *rest))
         columns = f"{self.subject}, node, status, started_at, finished_at, lease"
         moved = []
         for old in rename:
@@ -393,23 +395,27 @@ class SqliteDriver:
         return len(subjects)
 
     def arrive(self, name: str, subjects: list[Any], *, ref: str | None, now: str,
-               merge: str, position: str, urgent: bool) -> dict[Any, str]:
+               merge: str, position: str, urgent: bool,
+               refs: str | None = None) -> dict[Any, str]:
         """The insert takes the write lock; the merge that may follow sees
         every commit before it."""
         out: dict[Any, str] = {}
         for subject in subjects:
             if self.conn.execute(
                     f"INSERT INTO {self.arrivals_table} "
-                    f"({self.subject}, node, ref, place, arrived_at, urgent) "
-                    f"VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
-                    (subject, name, ref, now, now, int(urgent))).rowcount == 1:
+                    f"({self.subject}, node, ref, place, arrived_at, urgent, refs) "
+                    f"VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                    (subject, name, ref, now, now, int(urgent), refs)).rowcount == 1:
                 out[subject] = "queued"
                 continue
             sets = ["urgent = MAX(urgent, ?)"]
             params: list[Any] = [int(urgent)]
-            if merge == "last":
+            if merge in ("last", "set"):
                 sets.append("ref = ?")
                 params.append(ref)
+            if merge == "set":
+                sets.append("refs = ?")
+                params.append(refs)
             if position == "last":
                 sets.append("place = ?")
                 params.append(now)
@@ -423,11 +429,11 @@ class SqliteDriver:
         out: dict[Any, Arrival] = {}
         for chunk in _chunks(subjects):
             marks = ", ".join("?" * len(chunk))
-            for subject, ref, place, arrived_at, urgent in self.conn.execute(
-                    f"SELECT {self.subject}, ref, place, arrived_at, urgent "
+            for subject, ref, place, arrived_at, urgent, refs in self.conn.execute(
+                    f"SELECT {self.subject}, ref, place, arrived_at, urgent, refs "
                     f"FROM {self.arrivals_table} WHERE node = ? AND {self.subject} IN ({marks})",
                     (name, *chunk)).fetchall():
-                out[subject] = Arrival(ref, place, arrived_at, bool(urgent))
+                out[subject] = Arrival(ref, place, arrived_at, bool(urgent), refs)
         return out
 
     def enter(self, name: str, entries: list[tuple[Any, int]], *,

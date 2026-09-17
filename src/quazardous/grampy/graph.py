@@ -309,7 +309,8 @@ def _lane_to_dict(lane: Lane) -> dict[str, Any]:
             if getattr(lane, key) != getattr(default, key)}
 
 
-_LANE_KEYS = ("merge", "position", "cooldown", "delay", "max_wait", "while_running")
+_LANE_KEYS = ("merge", "position", "cooldown", "delay", "max_wait",
+              "while_running", "max_size")
 
 
 def _lane_from(value: Any, path: str) -> Lane:
@@ -319,6 +320,8 @@ def _lane_from(value: Any, path: str) -> Lane:
             _string(raw[key], f"{path}.{key}")
     for key in ("cooldown", "delay", "max_wait"):
         _duration(raw.get(key), f"{path}.{key}")
+    if "max_size" in raw and not isinstance(raw["max_size"], int):
+        raise GraphFormatError(f"{path}.max_size: {raw['max_size']!r} is not a whole number")
     return Lane(**raw)
 
 

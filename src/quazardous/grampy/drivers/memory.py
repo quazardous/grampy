@@ -256,19 +256,22 @@ class MemoryDriver:
         return len(subjects)
 
     def arrive(self, name: str, subjects: list[Any], *, ref: str | None, now: str,
-               merge: str, position: str, urgent: bool) -> dict[Any, str]:
+               merge: str, position: str, urgent: bool,
+               refs: str | None = None) -> dict[Any, str]:
         out: dict[Any, str] = {}
         with self._lock:
             for subject in subjects:
                 current = self.waiting.get((subject, name))
                 if current is None:
-                    self.waiting[(subject, name)] = Arrival(ref, now, now, urgent)
+                    self.waiting[(subject, name)] = Arrival(ref, now, now, urgent, refs)
                     out[subject] = "queued"
                     continue
+                # `set`: the journal worked out ref and refs under the guard.
                 self.waiting[(subject, name)] = Arrival(
-                    ref if merge == "last" else current.ref,
+                    ref if merge in ("last", "set") else current.ref,
                     now if position == "last" else current.place,
-                    current.arrived_at, current.urgent or urgent)
+                    current.arrived_at, current.urgent or urgent,
+                    refs if merge == "set" else current.refs)
                 out[subject] = "merged"
         return out
 

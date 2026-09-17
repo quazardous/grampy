@@ -98,6 +98,7 @@ decides where the transaction ends, because it knows what it put in it.
 """
 from __future__ import annotations
 
+import json
 import random
 import secrets
 from collections.abc import Callable, Iterable, Iterator
@@ -128,6 +129,16 @@ from .timing import admit, seconds, shift
 #: HOW MANY CANDIDATES A CLAIM READS AT ONCE, at least — more when the
 #: limit is higher. A page is one read and at most one write.
 PAGE = 200
+
+
+def _encode_refs(refs: tuple[str, ...]) -> str | None:
+    """The refs a lane keeps, as the text a driver stores. `None` when there
+    is nothing to keep, so a lane that keeps one version stores no list."""
+    return json.dumps(list(refs)) if refs else None
+
+
+def _decode_refs(stored: str | None) -> tuple[str, ...]:
+    return tuple(json.loads(stored)) if stored else ()
 
 
 def utc_now() -> str:
@@ -168,12 +179,18 @@ class Entry(NamedTuple):
 class Arrival(NamedTuple):
     """A subject waiting in a lane: the version it brings (`ref`, opaque),
     its `place` in the lane, when it FIRST arrived, and whether it is
-    urgent."""
+    urgent.
+
+    `refs` holds EVERY version still waiting, for a lane that keeps them —
+    text the journal encodes and decodes, stored by the driver as it is.
+    `journal.refs(subject, node)` gives it back as a tuple.
+    """
 
     ref: str | None
     place: str
     arrived_at: str
     urgent: bool = False
+    refs: str | None = None
 
 
 class JournalDriver(Protocol):
@@ -277,7 +294,8 @@ class JournalDriver(Protocol):
         Return the count written."""
 
     def arrive(self, name: str, subjects: list[Any], *, ref: str | None, now: str,
-               merge: str, position: str, urgent: bool) -> dict[Any, str]:
+               merge: str, position: str, urgent: bool,
+               refs: str | None = None) -> dict[Any, str]:
         """ATOMICALLY per subject, the arrival of `name`: when none waits,
         store one — `ref`, place and first arrival at `now`, `urgent`; when
         one waits, merge — `ref` replaced when `merge` is "last", place moved
@@ -350,11 +368,14 @@ class NodeJournal:
 
     def __init__(self, driver: JournalDriver, dag: tuple[Node, ...] | Graph, *,
                  clock: Callable[[], str] | None = None,
-                 rng: random.Random | None = None) -> None:
+                 rng: random.Random | None = None,
+                 mergers: dict[str, Callable[[tuple[str, ...], str | None],
+                                             Any]] | None = None) -> None:
         """`dag` is a tuple of nodes, or a `Graph` whose policies change some
         settings per policy. `clock` defaults to the driver's
         (`JournalDriver.now`): workers on several machines then share one
-        time. `rng` spreads retry jitter."""
+        time. `rng` spreads retry jitter. `mergers` names the functions a
+        lane may merge with (`Lane(merge="fn:<name>")`)."""
         self.driver = driver
         self.graph = dag if isinstance(dag, Graph) else None
         self.dag = dag.nodes if isinstance(dag, Graph) else dag
@@ -366,6 +387,10 @@ class NodeJournal:
         self.version = dag.document.identity if isinstance(dag, Graph) else None
         self._clock = clock or driver.now
         self._rng = rng or random.Random()
+        #: THE MERGE FUNCTIONS A LANE MAY NAME. The graph stays data — it
+        #: holds `fn:<name>`, never the code — and the name is resolved here,
+        #: the way a named guard is resolved in a statechart.
+        self._mergers = dict(mergers or {})
 
     # -- take --------------------------------------------------------------
 
@@ -876,6 +901,10 @@ class NodeJournal:
                 continue
             groups.setdefault(lane, []).append(subject)
         for lane, group in groups.items():
+            if lane.keeps_every_ref:
+                for subject in group:
+                    self._keep_every_ref(name, subject, lane, ref, now, urgent, out)
+                continue
             outcome = self.driver.arrive(name, group, ref=ref, now=now, merge=lane.merge,
                                          position=lane.position, urgent=urgent)
             merged = [s for s in group if outcome.get(s) == "merged"]
@@ -887,10 +916,72 @@ class NodeJournal:
         self._pin(subjects)
         return out
 
+    def _keep_every_ref(self, name: str, subject: Any, lane: Lane, ref: str | None,
+                        now: str, urgent: bool, out: dict[str, int]) -> None:
+        """MERGE BY READING WHAT WAITS, THEN WRITING — under the driver's
+        guard, on this subject's place in this lane.
+
+        `first`, `last` and `dedupe` decide without looking, so one atomic
+        write does them. Keeping every ref, or asking a function, cannot:
+        two workers arriving at once would each start from the state before
+        the other, and one would overwrite the other's version. The guard is
+        the same one rate and concurrency take (`arrival|<node>|<subject>`).
+        """
+        merger = self._merger(lane)
+        with self.driver.guard([f"arrival|{name}|{subject}"]):
+            current = self.driver.arrivals([subject], name).get(subject)
+            kept = _decode_refs(current.refs) if current is not None else ()
+            wanted = tuple(merger(kept, ref))
+            dropped = [r for r in kept if r not in wanted]
+            outcome = self.driver.arrive(
+                name, [subject], ref=wanted[-1] if wanted else None, now=now,
+                merge="set", position=lane.position, urgent=urgent,
+                refs=_encode_refs(wanted))
+        if dropped:
+            # A REF LET GO IS STILL SAID: past `max_size`, or refused by the
+            # function, it leaves a trace rather than vanishing.
+            for gone in dropped:
+                self.driver.note([subject], name, status="dropped", reason="lane",
+                                 now=now, ref=gone)
+        if outcome.get(subject) == "merged":
+            self.driver.note([subject], name, status="merged", reason="lane", now=now,
+                             ref=ref)
+            out["merged"] += 1
+        else:
+            out["queued"] += 1
+
+    def _merger(self, lane: Lane) -> Callable[[tuple[str, ...], str | None], Any]:
+        """The function this lane merges with: `all`'s, or the application's
+        under the name the lane gives."""
+        named = lane.merger
+        if named is None:
+            size = lane.max_size
+            return lambda kept, arriving: (
+                (*kept, arriving) if arriving is not None else kept)[-size:]
+        try:
+            return self._mergers[named]
+        except KeyError:
+            raise ValueError(
+                f"lane merge {lane.merge!r} names a function the journal was not "
+                f"given — pass it as NodeJournal(..., mergers={{{named!r}: fn}}); "
+                f"it has {sorted(self._mergers)}") from None
+
     def arrival(self, subject: Any, name: str) -> Arrival | None:
         """What waits for this subject in the lane `name`, if anything."""
         node(name, self.dag)
         return self.driver.arrivals([subject], name).get(subject)
+
+    def refs(self, subject: Any, name: str) -> tuple[str, ...]:
+        """EVERY VERSION WAITING for this subject in the lane `name`, oldest
+        first — what a lane keeping them all has gathered.
+
+        A lane keeping one version gives that one; a subject with nothing
+        waiting gives nothing."""
+        arrival = self.arrival(subject, name)
+        if arrival is None:
+            return ()
+        kept = _decode_refs(arrival.refs)
+        return kept if kept else ((arrival.ref,) if arrival.ref is not None else ())
 
     def settle(self, candidates: Any) -> dict[str, dict[str, int]]:
         """CONCLUDE WHAT NO WORKER DOES, on the candidates, for every node:

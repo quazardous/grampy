@@ -97,8 +97,11 @@ class Loop:
 
 
 #: HOW A LANE MERGES A NEW ARRIVAL INTO ONE ALREADY WAITING, and where the
-#: merged arrival stands in the lane.
-LANE_MERGES = ("first", "last")
+#: merged arrival stands in the lane. A merge may also be `fn:<name>`, a
+#: function the journal is given — see `Lane.merge`.
+LANE_MERGES = ("first", "last", "all")
+#: WHAT NAMES A MERGE FUNCTION rather than one of the modes above.
+LANE_MERGE_FN = "fn:"
 LANE_POSITIONS = ("first", "last")
 #: WHAT AN ARRIVAL DOES WHILE A PASS OF THE SUBJECT IS STILL RUNNING.
 LANE_WHILE_RUNNING = ("queue", "skip")
@@ -114,7 +117,12 @@ class Lane:
     everything after it — is archived in the same write (reason `arrival`).
 
         merge          first: the arrival waiting keeps its `ref`, later ones
-                       are dropped; last: the latest `ref` wins
+                       are dropped; last: the latest `ref` wins; all: every
+                       `ref` is kept, in the order they arrived, at most
+                       `max_size` of them; `fn:<name>`: a function decides,
+                       given to the journal as `mergers={"<name>": fn}`
+        max_size       with `all`, how many refs are kept — beyond it the
+                       OLDEST is let go, and noted in the history
         position       first: a merged arrival keeps the place of the first;
                        last: it goes to the back, as if it had just arrived
         cooldown       not before this long after the previous pass ended —
@@ -133,6 +141,8 @@ class Lane:
         Lane.debounce(delay)      last version, to the back (Lodash debounce,
                                   Graphile Worker `replace`)
         Lane.dedupe()             first version, the rest dropped
+        Lane.batch(max_size)      every version, in order (the aggregator of
+                                  Enterprise Integration Patterns)
     """
 
     merge: str = "last"
@@ -141,6 +151,7 @@ class Lane:
     delay: float | int | str | None = None
     max_wait: float | int | str | None = None
     while_running: str = "queue"
+    max_size: int = 100
 
     def __post_init__(self) -> None:
         for name in ("cooldown", "delay", "max_wait"):
@@ -159,6 +170,24 @@ class Lane:
     @classmethod
     def dedupe(cls, cooldown: float | int | str | None = None) -> Lane:
         return cls(merge="first", position="first", cooldown=cooldown)
+
+    @classmethod
+    def batch(cls, cooldown: float | int | str | None = None, *,
+              max_size: int = 100, max_wait: float | int | str | None = None) -> Lane:
+        return cls(merge="all", position="first", cooldown=cooldown,
+                   max_wait=max_wait, max_size=max_size)
+
+    @property
+    def merger(self) -> str | None:
+        """The name of the function this lane merges with, if it does."""
+        return (self.merge[len(LANE_MERGE_FN):]
+                if self.merge.startswith(LANE_MERGE_FN) else None)
+
+    @property
+    def keeps_every_ref(self) -> bool:
+        """True when a merge has to read what waits before writing: the
+        journal does those under the driver's guard."""
+        return self.merge == "all" or self.merger is not None
 
 
 @dataclass(frozen=True)
@@ -565,12 +594,20 @@ def _check_lane(n: Node) -> None:
     assert lane is not None
     if not isinstance(lane, Lane):
         raise DagError(f"node {n.name!r}: lane takes a Lane")
-    for label, value, allowed in (("merge", lane.merge, LANE_MERGES),
-                                  ("position", lane.position, LANE_POSITIONS),
+    for label, value, allowed in (("position", lane.position, LANE_POSITIONS),
                                   ("while_running", lane.while_running, LANE_WHILE_RUNNING)):
         if value not in allowed:
             raise DagError(f"node {n.name!r}: lane {label}={value!r} — expected one of "
                            f"{list(allowed)}")
+    if lane.merge not in LANE_MERGES and not lane.merger:
+        raise DagError(f"node {n.name!r}: lane merge={lane.merge!r} — expected one of "
+                       f"{list(LANE_MERGES)}, or {LANE_MERGE_FN!r} and the name of a "
+                       f"function the journal is given")
+    if lane.merger == "":
+        raise DagError(f"node {n.name!r}: lane merge={lane.merge!r} names no function")
+    if lane.max_size < 1:
+        raise DagError(f"node {n.name!r}: lane max_size={lane.max_size!r} — keeping "
+                       f"fewer than one ref keeps nothing")
     for label in ("cooldown", "delay", "max_wait"):
         value = getattr(lane, label)
         if value is None:

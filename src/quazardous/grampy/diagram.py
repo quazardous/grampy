@@ -294,7 +294,13 @@ def _mermaid_shape(n: Node) -> tuple[str, str]:
 def _describe_lane(n: Node) -> str:
     lane = n.lane
     assert lane is not None
-    words = [f"lane: {lane.merge} version, place of the {lane.position}"]
+    if lane.merger is not None:
+        head = f"lane: merged by {lane.merger}"
+    elif lane.merge == "all":
+        head = f"lane: every version, up to {lane.max_size}"
+    else:
+        head = f"lane: {lane.merge} version"
+    words = [f"{head}, place of the {lane.position}"]
     for label in ("cooldown", "delay", "max_wait"):
         if getattr(lane, label) is not None:
             words.append(f"{label.replace('_', ' ')} {getattr(lane, label)}")

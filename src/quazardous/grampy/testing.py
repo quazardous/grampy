@@ -36,6 +36,7 @@ A harness provides:
 from __future__ import annotations
 
 import itertools
+import json
 import threading
 from typing import Any
 
@@ -836,6 +837,46 @@ class JournalContract:
         journal.arrive("arrive", ["s1"], ref="v2")
         assert journal.arrival("s1", "arrive").ref == "v1"
 
+    def test_batch_keeps_every_version_in_the_order_they_came(self, harness, clock):
+        journal = harness.journal(_listing(merge="all"), clock)
+        for minute, ref in enumerate(("v1", "v2", "v3")):
+            clock.now = _at(minute)
+            journal.arrive("arrive", ["s1"], ref=ref)
+        assert journal.refs("s1", "arrive") == ("v1", "v2", "v3")
+        assert journal.arrival("s1", "arrive").ref == "v3", "the latest is still named"
+
+    def test_a_batch_past_its_size_lets_the_oldest_go_and_says_so(self, harness, clock):
+        journal = harness.journal(_listing(merge="all", max_size=2), clock)
+        for minute, ref in enumerate(("v1", "v2", "v3")):
+            clock.now = _at(minute)
+            journal.arrive("arrive", ["s1"], ref=ref)
+        assert journal.refs("s1", "arrive") == ("v2", "v3"), "the oldest was let go"
+        dropped = [e for e in journal.history("s1") if e["status"] == "dropped"]
+        assert [e["node"] for e in dropped] == ["arrive"], "and it left a trace"
+
+    def test_a_named_function_decides_what_the_lane_keeps(self, harness, clock):
+        """The graph holds the NAME; the journal holds the function."""
+        seen = []
+
+        def keep_the_ends(kept, arriving):
+            seen.append((kept, arriving))
+            whole = (*kept, arriving)
+            return whole[:1] + whole[-1:] if len(whole) > 2 else whole
+
+        journal = harness.journal(_listing(merge="fn:ends"), clock,
+                                  mergers={"ends": keep_the_ends})
+        for minute, ref in enumerate(("v1", "v2", "v3", "v4")):
+            clock.now = _at(minute)
+            journal.arrive("arrive", ["s1"], ref=ref)
+        assert journal.refs("s1", "arrive") == ("v1", "v4")
+        assert seen[0] == ((), "v1"), "asked with what waits and what arrives"
+        assert seen[-1] == (("v1", "v3"), "v4")
+
+    def test_a_lane_naming_a_function_the_journal_lacks_says_which(self, harness, clock):
+        journal = harness.journal(_listing(merge="fn:nowhere"), clock)
+        with pytest.raises(ValueError, match="nowhere"):
+            journal.arrive("arrive", ["s1"], ref="v1")
+
     def test_debounce_waits_for_quiet_and_max_wait_ends_it(self, harness, clock):
         journal = harness.journal(_listing(position="last", delay="10m", max_wait="25m"), clock)
         for minute in (0, 5, 10):
@@ -1168,6 +1209,36 @@ class JournalContract:
         setup.journal.arrive("arrive", ["s1"], ref="v2")
         setup.commit()
 
+    def test_two_versions_arriving_at_once_are_both_kept(self, harness, clock):
+        """A lane that keeps every version cannot decide with one write: it
+        reads what waits, merges, then writes. Two arrivals at the same
+        moment would otherwise each start from the state before the other,
+        and one would overwrite the other's version.
+
+        The journal therefore merges under the driver's guard. Remove it and
+        this fails on the storages that can really interleave — SQLite loses
+        v1, PostgreSQL likewise. The memory driver runs both arrivals in one
+        process, so it has no window to lose; the test holds there without
+        proving anything, which is worth knowing when reading a green run."""
+        store = harness.store(_listing(merge="all", max_size=10), clock)
+        try:
+            one, two = store.session(), store.session()
+
+            def second() -> None:
+                two.journal.arrive("arrive", ["s1"], ref="v2")
+
+            one.journal.arrive("arrive", ["s1"], ref="v1")
+            _race(second, two.commit, one.commit)
+
+            check = store.session()
+            try:
+                assert check.journal.refs("s1", "arrive") == ("v1", "v2"), (
+                    "both versions waited, neither overwrote the other")
+            finally:
+                check.rollback()
+        finally:
+            store.close()
+
     @pytest.mark.parametrize("first", ["worker", "door"])
     def test_a_lane_never_lets_a_version_in_over_a_claim(self, harness, clock, first):
         """The lane lets v2 in — archiving the pass — while a worker claims
@@ -1359,7 +1430,8 @@ def _model_machine(harness: Any, subject_type: type = str, lane_root: bool = Fal
             lane = None
             if root_lane or (not choice and loop is None and retry is None and wait is None
                              and draw(st.integers(0, 2)) == 0):
-                lane = Lane(merge=draw(st.sampled_from(("first", "last"))),
+                lane = Lane(merge=draw(st.sampled_from(("first", "last", "all"))),
+                            max_size=draw(st.integers(1, 3)),
                             position=draw(st.sampled_from(("first", "last"))),
                             cooldown=draw(st.one_of(st.none(), st.integers(5, 30))),
                             delay=draw(st.one_of(st.none(), st.integers(1, 4))),
@@ -1394,8 +1466,8 @@ def _model_machine(harness: Any, subject_type: type = str, lane_root: bool = Fal
                 s: [] for s in _SUBJECTS}
             self.passes: dict[tuple[str, str], int] = {}
             self.retried: dict[tuple[str, str], int] = {}
-            # (subject, lane) -> (ref, place, arrived_at, urgent)
-            self.waiting: dict[tuple[Any, str], tuple[Any, str, str, bool]] = {}
+            # (subject, lane) -> (ref, place, arrived_at, urgent, refs)
+            self.waiting: dict[tuple[Any, str], tuple[Any, str, str, bool, str | None]] = {}
 
         def _archive(self, s: str, name: str, reason: str) -> bool:
             row = self.model[s].pop(name, None)
@@ -1558,13 +1630,29 @@ def _model_machine(harness: Any, subject_type: type = str, lane_root: bool = Fal
                     self.archived[s].append((now, n.name, "skipped", "lane"))
                     expected["skipped"] += 1
                 elif current is None:
-                    self.waiting[(s, n.name)] = (ref, now, now, urgent)
+                    kept = (ref,) if lane.keeps_every_ref and ref is not None else ()
+                    self.waiting[(s, n.name)] = (
+                        kept[-1] if kept else ref, now, now, urgent, _refs_text(kept))
                     expected["queued"] += 1
+                elif lane.keeps_every_ref:
+                    # EVERY VERSION KEPT: read, merge, write — and what falls
+                    # past `max_size` leaves a note behind.
+                    was = _refs_of(current[4])
+                    kept = ((*was, ref) if ref is not None else was)[-lane.max_size:]
+                    for gone in [r for r in was if r not in kept]:
+                        self.archived[s].append((now, n.name, "dropped", "lane"))
+                        assert gone is not None
+                    self.waiting[(s, n.name)] = (
+                        kept[-1] if kept else None,
+                        now if lane.position == "last" else current[1],
+                        current[2], current[3] or urgent, _refs_text(kept))
+                    self.archived[s].append((now, n.name, "merged", "lane"))
+                    expected["merged"] += 1
                 else:
                     self.waiting[(s, n.name)] = (
                         ref if lane.merge == "last" else current[0],
                         now if lane.position == "last" else current[1],
-                        current[2], current[3] or urgent)
+                        current[2], current[3] or urgent, current[4])
                     self.archived[s].append((now, n.name, "merged", "lane"))
                     expected["merged"] += 1
             assert self.journal.arrive(n.name, candidates, ref=ref, urgent=urgent) == expected
@@ -1589,7 +1677,7 @@ def _model_machine(harness: Any, subject_type: type = str, lane_root: bool = Fal
                     continue
                 if not joined(n.name, self.dag, self._statuses(s)):
                     continue
-                ref, place, arrived_at, urgent = waiting
+                ref, place, arrived_at, urgent, _refs = waiting
                 ready = [place]
                 if lane.delay is not None:
                     ready.append(shift(place, seconds(lane.delay)))
@@ -1604,7 +1692,7 @@ def _model_machine(harness: Any, subject_type: type = str, lane_root: bool = Fal
             for _, _, s in sorted(due):
                 for x in self._pass(n):
                     self._archive(s, x, "arrival")
-                ref, place, arrived_at, urgent = self.waiting.pop((s, n.name))
+                ref, place, arrived_at, urgent, _refs = self.waiting.pop((s, n.name))
                 self.archived[s].append((now, n.name, "entered", "lane"))
                 self.model[s][n.name] = (NODE_DONE, arrived_at, None, now)
             return len(due)
@@ -1695,6 +1783,17 @@ def _model_machine(harness: Any, subject_type: type = str, lane_root: bool = Fal
                             (s, n.name)), f"{s} waiting in {n.name}"
 
     return Machine
+
+
+def _refs_text(refs: tuple[Any, ...]) -> str | None:
+    """What the journal stores for the versions a lane keeps — the model
+    spells it out itself rather than importing the journal's own encoder,
+    so a change there has to be a deliberate change here too."""
+    return json.dumps(list(refs)) if refs else None
+
+
+def _refs_of(stored: str | None) -> tuple[Any, ...]:
+    return tuple(json.loads(stored)) if stored else ()
 
 
 def _race(claim: Any, commit_claim: Any, commit_other: Any) -> None:

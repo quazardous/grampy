@@ -28,11 +28,11 @@ class SqliteHarness:
         self.tmp_path = tmp_path
         self.count = 0
 
-    def journal(self, dag, clock, subject_type=str):
+    def journal(self, dag, clock, subject_type=str, mergers=None):
         conn = sqlite3.connect(":memory:")
         for statement in schema():
             conn.execute(statement)
-        return NodeJournal(SqliteDriver(conn), dag, clock=clock)
+        return NodeJournal(SqliteDriver(conn), dag, clock=clock, mergers=mergers)
 
     def journal_on(self, journal, dag, clock):
         return NodeJournal(SqliteDriver(journal.driver.conn), dag, clock=clock)

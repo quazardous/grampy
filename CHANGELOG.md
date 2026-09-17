@@ -25,6 +25,15 @@ imported as `from quazardous import grampy`.
 
 ### Added
 
+- Lanes can keep every version a subject brings back, not just one:
+  `Lane.batch()` gathers them in the order they arrived, up to a size
+  you set, and `journal.refs()` reads the batch. Beyond that size the
+  oldest is let go, and the history says so.
+- Decide a merge yourself: a lane may name a function
+  (`Lane(merge="fn:my-rule")`) that the journal is given, and that says
+  what stays. The workflow document still holds only the name, so it
+  stays data. Merges that have to read before writing are serialised, so
+  two versions arriving at the same instant never overwrite each other.
 - Say a duration the way Python says one: `lease=timedelta(minutes=2)`
   works wherever `"2m"` did, and is written down in the same short text
   form, so a stored graph still reads well and still round-trips to JSON.

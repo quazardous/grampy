@@ -91,15 +91,53 @@ a new version of the subject in it, and `journal.settle(candidates)` lets it
 through once due — archiving the previous pass through what follows, in the
 same write.
 
-A version arriving while one waits is merged (`merge="first"|"last"`, keeping
-the first one's place or not); `cooldown` holds a subject back that long after
-its last pass ended, `delay` waits for quiet, `max_wait` caps both, an
-`urgent=True` arrival skips them, and a pass still running is never cut short
-(`while_running="queue"|"skip"`). A `rate` on the lane lets arrivals out in the
-order they came.
+A version arriving while one waits is merged; `cooldown` holds a subject back
+that long after its last pass ended, `delay` waits for quiet, `max_wait` caps
+both, an `urgent=True` arrival skips them, and a pass still running is never
+cut short (`while_running="queue"|"skip"`). A `rate` on the lane lets arrivals
+out in the order they came.
+
+### What a merge keeps
+
+| `merge` | |
+|---|---|
+| `"last"` | the latest version wins (`Lane.throttle`, `Lane.debounce`) |
+| `"first"` | the one waiting stays, later ones are dropped (`Lane.dedupe`) |
+| `"all"` | every version, oldest first, at most `max_size` (`Lane.batch`) |
+| `"fn:<name>"` | a function you give the journal decides |
+
+`journal.refs(subject, "arrive")` reads what waits — one version, or the
+whole batch in the order it came. Past `max_size` the oldest is let go, and
+the history says so.
+
+**A named function, and the graph stays data.** The document holds the
+**name**, never the code — as a statechart holds the name of a guard:
+
+```python
+def keep_the_ends(kept, arriving):
+    """`kept` is what waits, oldest first. Return what stays."""
+    whole = (*kept, arriving)
+    return whole[:1] + whole[-1:] if len(whole) > 2 else whole
+
+Node("arrive", lane=Lane(merge="fn:ends"))
+NodeJournal(driver, GRAPH, mergers={"ends": keep_the_ends})
+```
+
+The function sees **refs only**, never your objects: it is pure, and testable
+on its own. A name the journal was not given raises at the first arrival,
+saying which names it has.
+
+**Merges that read before writing are guarded.** `first` and `last` decide
+without looking, so one atomic write does them. Keeping every version, or
+asking a function, means read-merge-write — so the journal takes the
+driver's guard on `arrival|<node>|<subject>`, the same one rate and
+concurrency take. Two workers landing a version at the same moment therefore
+both keep theirs; the shared contract proves it, and proves it fails without
+the guard.
 
 Presets carry the names other tools use: `Lane.throttle` (Graphile Worker's
-`preserve_run_at`), `Lane.debounce`, `Lane.dedupe`.
+`preserve_run_at`), `Lane.debounce`, `Lane.dedupe`, `Lane.batch` (the
+aggregator of Enterprise Integration Patterns).
 
 ## Policies: one workflow, different limits
 
