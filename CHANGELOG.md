@@ -20,7 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-First release, planned as 0.1.0. Installed as `grampy-q`, imported as
+## [0.1.0] - 2026-09-17
+
+First release. Installed as `grampy-q`, imported as
 `from quazardous import grampy`.
 
 ### Added
@@ -106,10 +108,14 @@ First release, planned as 0.1.0. Installed as `grampy-q`, imported as
   tests and prototypes.
 - SQLite driver on the standard library alone, for small deployments and
   tests against a real file shared by several processes.
-- PostgreSQL driver (SQLAlchemy Core) working on three tables you declare —
-  node rows, one revision per subject, and the history — with eligibility
-  expressed as your own `SELECT`.
+- PostgreSQL driver (SQLAlchemy Core) working on tables you declare — node
+  rows, one revision per subject, the history, and two more only when a
+  workflow needs them (rate and concurrency state, lane arrivals) — with
+  eligibility expressed as your own `SELECT`.
 - A shared contract test suite any new driver can subclass to prove it
   behaves like the reference, including concurrency tests (competing
   claimers, claims racing a requeue) and random sequences of operations on
   random graphs checked step by step against the rule.
+
+[Unreleased]: https://github.com/quazardous/grampy/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/quazardous/grampy/releases/tag/v0.1.0
