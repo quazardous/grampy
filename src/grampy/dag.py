@@ -36,6 +36,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+from .timing import Retry
+
 
 class DagError(ValueError):
     """A graph that does not hold together, or a node nobody declared."""
@@ -54,6 +56,10 @@ class DagError(ValueError):
 #: for deciding. (A child of an omitted node never gets there: it is omitted
 #: with it — see `omitted_by`.)
 NODE_RUNNING = "running"
+#: WAITING TO BE TAKEN AGAIN — a retry's row: `started_at` is when it is
+#: due. Until then it holds the node like a running row; once due, a claim
+#: takes it as if the row were absent.
+NODE_SCHEDULED = "scheduled"
 NODE_DONE = "done"
 NODE_SKIPPED = "skipped"
 NODE_OMITTED = "omitted"
@@ -135,6 +141,11 @@ class Node:
     `loop` declares a way back (`Loop`): the graph stays acyclic, the cycle
     is an edge the journal takes, bounded, and every pass is kept in the
     history.
+
+    `retry` declares what a failure does first (`timing.Retry`): archived,
+    and the node scheduled again after a delay, a bounded number of times.
+    Only past the retries does the failure stand — and a loop or a failure
+    edge see it.
     """
 
     name: str
@@ -147,6 +158,7 @@ class Node:
     need: int | None = None
     choice: bool = False
     loop: Loop | None = None
+    retry: Retry | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "parents", tuple(self.parents))

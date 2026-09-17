@@ -20,8 +20,15 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from ..dag import NODE_DONE, NODE_OMITTED, NODE_RUNNING, NODE_SATISFYING, NODE_SKIPPED
-from ..journal import Entry
+from ..dag import (
+    NODE_DONE,
+    NODE_OMITTED,
+    NODE_RUNNING,
+    NODE_SATISFYING,
+    NODE_SCHEDULED,
+    NODE_SKIPPED,
+)
+from ..journal import Entry, utc_now
 
 
 @dataclass
@@ -57,23 +64,34 @@ class MemoryDriver:
 
     # -- write -------------------------------------------------------------
 
+    def now(self) -> str:
+        return utc_now()
+
     def scan(self, candidates: Any, *, name: str, nodes: tuple[str, ...],
-             parents: tuple[str, ...], page: int) -> Iterator[list[Entry]]:
+             parents: tuple[str, ...], page: int, now: str) -> Iterator[list[Entry]]:
         """No pre-filter: every candidate is read, the journal decides."""
         subjects = list(candidates)
         for start in range(0, len(subjects), page):
             with self._lock:
-                yield [Entry(subject, self.revisions.get(subject, 0),
-                             {n: self.rows[(subject, n)].status for n in nodes
-                              if (subject, n) in self.rows})
-                       for subject in subjects[start:start + page]]
+                entries = []
+                for subject in subjects[start:start + page]:
+                    held = {n: self.rows[(subject, n)] for n in nodes
+                            if (subject, n) in self.rows}
+                    entries.append(Entry(
+                        subject, self.revisions.get(subject, 0),
+                        {n: row.status for n, row in held.items()},
+                        {n: row.started_at for n, row in held.items()
+                         if row.status == NODE_SCHEDULED}))
+            yield entries
 
     def insert_if_unchanged(self, name: str, entries: list[tuple[Any, int]], *,
                             status: str, now: str, lease: str | None) -> list[Any]:
         taken: list[Any] = []
         with self._lock:
             for subject, revision in entries:
-                if (subject, name) in self.rows:
+                current = self.rows.get((subject, name))
+                if current is not None and not (
+                        current.status == NODE_SCHEDULED and current.started_at <= now):
                     continue
                 if self.revisions.get(subject, 0) != revision:
                     continue
@@ -84,7 +102,7 @@ class MemoryDriver:
 
     def conclude(self, name: str, subjects: list[Any], *, status: str,
                  now: str, lease: str | None, omit: tuple[str, ...],
-                 reset: tuple[str, ...]) -> int:
+                 reset: tuple[str, ...], reschedule: str | None) -> int:
         count = 0
         with self._lock:
             for subject in subjects:
@@ -100,6 +118,9 @@ class MemoryDriver:
                     self.revisions[subject] = self.revisions.get(subject, 0) + 1
                     for other in reset:
                         self._take_away(subject, other, now=now, reason="loop")
+                if reschedule is not None:
+                    self._take_away(subject, name, now=now, reason="retry")
+                    self.rows[(subject, name)] = Row(NODE_SCHEDULED, reschedule)
                 count += 1
         return count
 
@@ -140,12 +161,12 @@ class MemoryDriver:
             entries = [dict(e) for s, e in self.archive if s == subject]
         return sorted(entries, key=lambda e: (e["archived_at"], e["node"]))
 
-    def loops(self, subjects: list[Any], name: str) -> dict[Any, int]:
+    def archived(self, subjects: list[Any], name: str, reason: str) -> dict[Any, int]:
         wanted = set(subjects)
         counts: dict[Any, int] = {}
         with self._lock:
             for s, e in self.archive:
-                if s in wanted and e["node"] == name and e["reason"] == "loop":
+                if s in wanted and e["node"] == name and e["reason"] == reason:
                     counts[s] = counts.get(s, 0) + 1
         return counts
 
@@ -163,7 +184,8 @@ class MemoryDriver:
         with self._lock:
             lines = [(row.finished_at or at, n, str(s), row)
                      for (s, n), row in self.rows.items()
-                     if str(s) in wanted and row.status not in (NODE_SKIPPED, NODE_OMITTED)]
+                     if str(s) in wanted
+                     and row.status not in (NODE_SKIPPED, NODE_OMITTED, NODE_SCHEDULED)]
         out: dict[str, list[list[Any]]] = {}
         for ended, n, subject, row in sorted(lines, key=lambda x: (x[0], x[1])):
             seconds = round(_epoch(ended) - _epoch(row.started_at), 1)

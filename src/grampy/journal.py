@@ -91,6 +91,7 @@ decides where the transaction ends, because it knows what it put in it.
 """
 from __future__ import annotations
 
+import random
 import secrets
 from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime, timezone
@@ -102,6 +103,7 @@ from .dag import (
     NODE_FAILED,
     NODE_OMITTED,
     NODE_RUNNING,
+    NODE_SCHEDULED,
     NODE_SKIPPED,
     Node,
     claimable,
@@ -110,6 +112,7 @@ from .dag import (
     node,
     omitted_by,
 )
+from .timing import shift
 
 #: HOW MANY CANDIDATES A CLAIM READS AT ONCE, at least — more when the
 #: limit is higher. A page is one read and at most one write.
@@ -141,6 +144,8 @@ class Entry(NamedTuple):
     subject: Any
     revision: int
     rows: dict[str, str]
+    #: `{node: due}` for the `scheduled` rows among `rows`.
+    due: dict[str, str] = {}
 
 
 class JournalDriver(Protocol):
@@ -153,32 +158,36 @@ class JournalDriver(Protocol):
     """
 
     def scan(self, candidates: Any, *, name: str, nodes: tuple[str, ...],
-             parents: tuple[str, ...], page: int) -> Iterator[list[Entry]]:
+             parents: tuple[str, ...], page: int, now: str) -> Iterator[list[Entry]]:
         """The candidates, IN THEIR ORDER, page by page — each with its
-        revision and its rows on `nodes`.
+        revision, its rows on `nodes`, and when its `scheduled` rows are due.
 
         A PRE-FILTER, NEVER A DECISION: the driver MAY leave out a candidate
-        that holds a row for `name`, or one of whose `parents` has no
-        `NODE_SATISFYING` row (`parents` is empty when the node joins in a
-        way a pre-filter cannot know). It must not leave out anything else."""
+        that holds a row for `name` — other than a `scheduled` row due by
+        `now` — or one of whose `parents` has no `NODE_SATISFYING` row
+        (`parents` is empty when the node joins in a way a pre-filter cannot
+        know). It must not leave out anything else."""
 
     def insert_if_unchanged(self, name: str, entries: list[tuple[Any, int]], *,
                             status: str, now: str, lease: str | None) -> list[Any]:
-        """ATOMICALLY, for each `(subject, revision)`: insert a `status` row
-        for `name`, holding `lease`, if the subject has no row for `name` AND
-        its revision is still `revision`. A `skipped` row is finished at
-        `now`. Return the subjects inserted."""
+        """ATOMICALLY, for each `(subject, revision)`: write a `status` row
+        for `name`, holding `lease`, started at `now`, if the subject's
+        revision is still `revision` AND it has no row for `name` — or only a
+        `scheduled` row due by `now`, which the new row replaces. A
+        `skipped` row is finished at `now`. Return the subjects written."""
 
     def conclude(self, name: str, subjects: list[Any], *, status: str,
                  now: str, lease: str | None, omit: tuple[str, ...],
-                 reset: tuple[str, ...]) -> int:
+                 reset: tuple[str, ...], reschedule: str | None) -> int:
         """Set `status` and `finished_at` on RUNNING rows only — and, unless
         `lease` is None, only on rows holding that lease. For every subject
         concluded, ATOMICALLY with it: insert an `omitted` row finished at
         `now` for each node of `omit` that has no row; then ARCHIVE with
         reason `loop` and delete the rows of every node of `reset` — the
         concluded row included when it is among them — raising the
-        subject's revision as `forget` does."""
+        subject's revision as `forget` does; or, when `reschedule` is given,
+        ARCHIVE the concluded row with reason `retry` and replace it with a
+        `scheduled` row started at `reschedule`, its due time."""
 
     def adopt(self, name: str, subjects: list[Any], *, now: str) -> int:
         """Insert `done` rows, never overwriting an existing row."""
@@ -197,9 +206,13 @@ class JournalDriver(Protocol):
         node): `node, status, started_at, finished_at, lease, archived_at,
         reason`."""
 
-    def loops(self, subjects: list[Any], name: str) -> dict[Any, int]:
-        """`{subject: rows of `name` archived with reason `loop`}`, subjects
+    def archived(self, subjects: list[Any], name: str, reason: str) -> dict[Any, int]:
+        """`{subject: rows of `name` archived with `reason`}`, subjects
         without any left out."""
+
+    def now(self) -> str:
+        """The storage's clock, in the journal's format (`utc_now`): ONE
+        source of time for every process writing to the same storage."""
 
     def progress(self, subject: Any) -> dict[str, str]:
         """`{node: status}` for one subject."""
@@ -220,10 +233,14 @@ class NodeJournal:
     """Progress per node, validated against ONE graph, stored by a driver."""
 
     def __init__(self, driver: JournalDriver, dag: tuple[Node, ...], *,
-                 clock: Callable[[], str] = utc_now) -> None:
+                 clock: Callable[[], str] | None = None,
+                 rng: random.Random | None = None) -> None:
+        """`clock` defaults to the driver's (`JournalDriver.now`): workers on
+        several machines then share one time. `rng` spreads retry jitter."""
         self.driver = driver
         self.dag = dag
-        self._clock = clock
+        self._clock = clock or driver.now
+        self._rng = rng or random.Random()
 
     # -- take --------------------------------------------------------------
 
@@ -254,14 +271,14 @@ class NodeJournal:
         seen: set[Any] = set()
         for page in self.driver.scan(candidates, name=name,
                                      nodes=(name, *n.parents, *after),
-                                     parents=parents, page=max(limit, PAGE)):
+                                     parents=parents, page=max(limit, PAGE), now=now):
             for e in page:
                 # A SUBJECT LISTED TWICE COUNTS ONCE: it would otherwise take
                 # a place in the limit and be refused by the write.
                 if e.subject in seen:
                     continue
                 seen.add(e.subject)
-                if self._takable(n, after, e.rows, require_parents):
+                if self._takable(n, after, _due_away(name, e, now), require_parents):
                     chosen.append((e.subject, e.revision))
                     if len(chosen) >= limit:
                         break
@@ -319,20 +336,39 @@ class NodeJournal:
         omit: tuple[str, ...] = ()
         subjects = _unique(subjects)
         now = self._clock()
+        touched = 0
+        if n.retry is not None and status == NODE_FAILED and branch is None:
+            # FIRST, THE RETRIES: under the limit, the failure is archived and
+            # the node scheduled again — later for later attempts.
+            tries = self.driver.archived(subjects, name, "retry")
+            by_due: dict[str, list[Any]] = {}
+            for s in subjects:
+                if tries.get(s, 0) < n.retry.limit:
+                    wait = n.retry.wait(tries.get(s, 0) + 1, self._rng)
+                    by_due.setdefault(shift(now, wait), []).append(s)
+            for due, group in by_due.items():
+                touched += self.driver.conclude(name, group, status=status, now=now,
+                                                lease=token, omit=(), reset=(),
+                                                reschedule=due)
+            retried = {s for group in by_due.values() for s in group}
+            subjects = [s for s in subjects if s not in retried]
+            if not subjects:
+                return touched
         if n.loop is not None and status in n.loop.on:
             # THE WAY BACK, per subject: under the bound, the conclusion sends
             # it to `loop.to` in the same write; at the bound, it stands.
             reset = (n.loop.to, *sorted(descendants(n.loop.to, self.dag)))
-            passes = self.driver.loops(subjects, n.loop.to)
+            passes = self.driver.archived(subjects, n.loop.to, "loop")
             back = [s for s in subjects if passes.get(s, 0) < n.loop.max]
             stay = [s for s in subjects if passes.get(s, 0) >= n.loop.max]
-            touched = 0
             if back:
                 touched += self.driver.conclude(name, back, status=status, now=now,
-                                                lease=token, omit=(), reset=reset)
+                                                lease=token, omit=(), reset=reset,
+                                                reschedule=None)
             if stay:
                 touched += self.driver.conclude(name, stay, status=status, now=now,
-                                                lease=token, omit=(), reset=())
+                                                lease=token, omit=(), reset=(),
+                                                reschedule=None)
             return touched
         if n.choice and status != NODE_FAILED:
             if branch is None:
@@ -344,8 +380,9 @@ class NodeJournal:
             raise ValueError(
                 f"`branch` given, but node {name!r} "
                 f"{'failed' if n.choice else 'is not a choice'}")
-        return self.driver.conclude(name, subjects, status=status, now=now,
-                                    lease=token, omit=omit, reset=())
+        return touched + self.driver.conclude(name, subjects, status=status, now=now,
+                                              lease=token, omit=omit, reset=(),
+                                              reschedule=None)
 
     def fail(self, name: str, subjects: list[Any], *, token: str | None,
              branch: str | None = None) -> int:
@@ -372,7 +409,7 @@ class NodeJournal:
         for page in self.driver.scan(candidates, name=name,
                                      nodes=(name, *n.parents),
                                      parents=() if n.custom_join else n.parents,
-                                     page=PAGE):
+                                     page=PAGE, now=now):
             chosen.update(dict.fromkeys(
                 (e.subject, e.revision) for e in page
                 if name not in e.rows and joined(name, self.dag, e.rows)))
@@ -431,7 +468,12 @@ class NodeJournal:
         """How many times a declared loop sent this subject back through
         `name` — what `Loop.max` bounds."""
         node(name, self.dag)
-        return self.driver.loops([subject], name).get(subject, 0)
+        return self.driver.archived([subject], name, "loop").get(subject, 0)
+
+    def retries(self, subject: Any, name: str) -> int:
+        """How many times a failure of `name` was retried for this subject."""
+        node(name, self.dag)
+        return self.driver.archived([subject], name, "retry").get(subject, 0)
 
     def stages(self, subjects: list[Any], *,
                at: str) -> dict[str, list[list[Any]]]:
@@ -447,7 +489,7 @@ class NodeJournal:
         node(name, self.dag)
         by_status = self.driver.status_counts(name)
         return {status: int(by_status.get(status, 0))
-                for status in (NODE_RUNNING, *NODE_CONCLUDED)}
+                for status in (NODE_RUNNING, NODE_SCHEDULED, *NODE_CONCLUDED)}
 
     def node_for_state(self, state: str) -> str | None:
         """The node whose WORKING state this is, if any.
@@ -460,6 +502,14 @@ class NodeJournal:
             if n.working == state:
                 return n.name
         return None
+
+
+def _due_away(name: str, entry: Entry, now: str) -> dict[str, str]:
+    """The rows the rule reads: a `scheduled` row of `name` due by `now`
+    counts as absent — the node may be taken again."""
+    if entry.rows.get(name) == NODE_SCHEDULED and entry.due.get(name, now) <= now:
+        return {k: v for k, v in entry.rows.items() if k != name}
+    return entry.rows
 
 
 def _unique(subjects: Iterable[Any]) -> list[Any]:

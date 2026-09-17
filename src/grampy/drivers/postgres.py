@@ -79,7 +79,14 @@ from typing import Any
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
-from ..dag import NODE_DONE, NODE_OMITTED, NODE_RUNNING, NODE_SATISFYING, NODE_SKIPPED
+from ..dag import (
+    NODE_DONE,
+    NODE_OMITTED,
+    NODE_RUNNING,
+    NODE_SATISFYING,
+    NODE_SCHEDULED,
+    NODE_SKIPPED,
+)
 from ..journal import Entry
 
 #: THE COLUMNS THE NODE TABLE MUST CARRY, besides the subject.
@@ -136,8 +143,14 @@ class PostgresDriver:
 
     # -- write -------------------------------------------------------------
 
+    def now(self) -> str:
+        """The server's clock at this statement, in the journal's format."""
+        return self._execute(sa.select(sa.func.to_char(
+            sa.func.timezone("UTC", sa.func.statement_timestamp()),
+            'YYYY-MM-DD"T"HH24:MI:SS"+00:00"'))).scalar()
+
     def scan(self, candidates: Any, *, name: str, nodes: tuple[str, ...],
-             parents: tuple[str, ...], page: int) -> Iterator[list[Entry]]:
+             parents: tuple[str, ...], page: int, now: str) -> Iterator[list[Entry]]:
         """Pre-filters in SQL what cannot be taken — a row for `name`, a
         parent not concluded — so that a page is mostly takable."""
         t, r = self.table, self.revisions
@@ -148,8 +161,9 @@ class PostgresDriver:
             sa.select(candidate, c.c.grampy_rank,
                       sa.func.coalesce(r.c.revision, 0))
             .select_from(c.outerjoin(r, self._rev_subject == candidate))
-            .where(~sa.exists().where(held.c[self._subject.key] == candidate,
-                                      held.c.node == name))
+            .where(~sa.exists().where(
+                held.c[self._subject.key] == candidate, held.c.node == name,
+                ~sa.and_(held.c.status == NODE_SCHEDULED, held.c.started_at <= now)))
             .order_by(c.c.grampy_rank)
             .limit(int(page)))
         if parents:
@@ -162,12 +176,15 @@ class PostgresDriver:
                 return
             last = found[-1][1]
             rows: dict[Any, dict[str, str]] = {f[0]: {} for f in found}
-            for subject, n, status in self._execute(
-                    sa.select(self._subject, t.c.node, t.c.status)
+            due: dict[Any, dict[str, str]] = {f[0]: {} for f in found}
+            for subject, n, status, started in self._execute(
+                    sa.select(self._subject, t.c.node, t.c.status, t.c.started_at)
                     .where(self._subject.in_(list(rows)),
                            t.c.node.in_(list(nodes)))).fetchall():
                 rows[subject][n] = status
-            yield [Entry(f[0], int(f[2]), rows[f[0]]) for f in found]
+                if status == NODE_SCHEDULED:
+                    due[subject][n] = started
+            yield [Entry(f[0], int(f[2]), rows[f[0]], due[f[0]]) for f in found]
             if len(found) < page:
                 return
 
@@ -197,17 +214,21 @@ class PostgresDriver:
         if status == NODE_SKIPPED:
             columns.append("finished_at")
             values.append(sa.literal(now))
+        insert = postgresql.insert(t).from_select(
+            columns, sa.select(*values).order_by(unchanged.c[self._rev_subject.key]))
+        # A `scheduled` row due by now is replaced; any other row wins.
         rows = self._execute(
-            postgresql.insert(t)
-            .from_select(columns, sa.select(*values)
-                         .order_by(unchanged.c[self._rev_subject.key]))
-            .on_conflict_do_nothing()
+            insert.on_conflict_do_update(
+                index_elements=[self._subject.key, "node"],
+                set_={c: insert.excluded[c] for c in columns[2:]}
+                | ({} if "finished_at" in columns else {"finished_at": None}),
+                where=sa.and_(t.c.status == NODE_SCHEDULED, t.c.started_at <= now))
             .returning(self._subject)).fetchall()
         return [row[0] for row in rows]
 
     def conclude(self, name: str, subjects: list[Any], *, status: str,
                  now: str, lease: str | None, omit: tuple[str, ...],
-                 reset: tuple[str, ...]) -> int:
+                 reset: tuple[str, ...], reschedule: str | None) -> int:
         """The omitted rows follow in a second statement of the same
         transaction: the concluded rows stay locked until it ends, and no
         other transaction sees the conclusion without its omissions."""
@@ -230,6 +251,12 @@ class PostgresDriver:
             self._raise_revisions(concluded)
             self._take_away(sa.and_(self._subject.in_(sorted(concluded)),
                                     t.c.node.in_(list(reset))), now=now, reason="loop")
+        if reschedule is not None and concluded:
+            self._take_away(sa.and_(self._subject.in_(sorted(concluded)), t.c.node == name),
+                            now=now, reason="retry")
+            self._execute(postgresql.insert(t).values(
+                [{self._subject.key: s, "node": name, "status": NODE_SCHEDULED,
+                  "started_at": reschedule} for s in sorted(concluded)]))
         return len(concluded)
 
     def adopt(self, name: str, subjects: list[Any], *, now: str) -> int:
@@ -292,12 +319,12 @@ class PostgresDriver:
             .where(h.c[self._subject.key] == subject)
             .order_by(h.c.archived_at, h.c.node)).fetchall()]
 
-    def loops(self, subjects: list[Any], name: str) -> dict[Any, int]:
+    def archived(self, subjects: list[Any], name: str, reason: str) -> dict[Any, int]:
         h = self.history_table
         subject = h.c[self._subject.key]
         return {row[0]: int(row[1]) for row in self._execute(
             sa.select(subject, sa.func.count())
-            .where(subject.in_(list(subjects)), h.c.node == name, h.c.reason == "loop")
+            .where(subject.in_(list(subjects)), h.c.node == name, h.c.reason == reason)
             .group_by(subject)).fetchall()}
 
     def status_counts(self, name: str) -> dict[str, int]:
@@ -320,7 +347,7 @@ class PostgresDriver:
                     sa.func.round(_epoch(ended) - _epoch(t.c.started_at), 1)
                     .label("seconds"))
                 .where(self._subject.in_(chunk),
-                       t.c.status.not_in((NODE_SKIPPED, NODE_OMITTED)))
+                       t.c.status.not_in((NODE_SKIPPED, NODE_OMITTED, NODE_SCHEDULED)))
                 .order_by(sa.literal_column("ended"), t.c.node)).fetchall()
             for r in rows:
                 out.setdefault(str(r[0]), []).append([r[1], r[3], r[4], r[2]])

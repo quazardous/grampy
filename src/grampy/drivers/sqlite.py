@@ -58,8 +58,15 @@ from collections.abc import Iterator
 from datetime import datetime
 from typing import Any, NamedTuple
 
-from ..dag import NODE_DONE, NODE_OMITTED, NODE_RUNNING, NODE_SATISFYING, NODE_SKIPPED
-from ..journal import Entry
+from ..dag import (
+    NODE_DONE,
+    NODE_OMITTED,
+    NODE_RUNNING,
+    NODE_SATISFYING,
+    NODE_SCHEDULED,
+    NODE_SKIPPED,
+)
+from ..journal import Entry, utc_now
 
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
@@ -105,8 +112,12 @@ class SqliteDriver:
 
     # -- write -------------------------------------------------------------
 
+    def now(self) -> str:
+        """SQLite has no server: every process shares the machine's clock."""
+        return utc_now()
+
     def scan(self, candidates: Any, *, name: str, nodes: tuple[str, ...],
-             parents: tuple[str, ...], page: int) -> Iterator[list[Entry]]:
+             parents: tuple[str, ...], page: int, now: str) -> Iterator[list[Entry]]:
         """No pre-filter: the journal decides on every candidate read."""
         subjects = self._candidates(candidates)
         while True:
@@ -128,15 +139,19 @@ class SqliteDriver:
                 f"SELECT ?, ?, ?, ?, ?, ? "
                 f"WHERE COALESCE((SELECT revision FROM {self.revisions} "
                 f"WHERE {self.subject} = ?), 0) = ? "
-                f"ON CONFLICT DO NOTHING",
-                (subject, name, status, now, finished, lease, subject, revision))
+                f"ON CONFLICT ({self.subject}, node) DO UPDATE SET "
+                f"status = excluded.status, started_at = excluded.started_at, "
+                f"finished_at = excluded.finished_at, lease = excluded.lease "
+                f"WHERE status = ? AND started_at <= ?",
+                (subject, name, status, now, finished, lease, subject, revision,
+                 NODE_SCHEDULED, now))
             if cur.rowcount == 1:
                 taken.append(subject)
         return taken
 
     def conclude(self, name: str, subjects: list[Any], *, status: str,
                  now: str, lease: str | None, omit: tuple[str, ...],
-                 reset: tuple[str, ...]) -> int:
+                 reset: tuple[str, ...], reschedule: str | None) -> int:
         count = 0
         for subject in subjects:
             sql = (f"UPDATE {self.table} SET status = ?, finished_at = ? "
@@ -159,6 +174,12 @@ class SqliteDriver:
                 for other in reset:
                     self._take_away("node = ? AND {s} = ?", (other, subject),
                                     now=now, reason="loop")
+            if reschedule is not None:
+                self._take_away("node = ? AND {s} = ?", (name, subject),
+                                now=now, reason="retry")
+                self.conn.execute(
+                    f"INSERT INTO {self.table} ({self.subject}, node, status, started_at) "
+                    f"VALUES (?, ?, ?, ?)", (subject, name, NODE_SCHEDULED, reschedule))
         return count
 
     def adopt(self, name: str, subjects: list[Any], *, now: str) -> int:
@@ -217,14 +238,14 @@ class SqliteDriver:
             f"WHERE {self.subject} = ? ORDER BY archived_at, node, rowid",
             (subject,)).fetchall()]
 
-    def loops(self, subjects: list[Any], name: str) -> dict[Any, int]:
+    def archived(self, subjects: list[Any], name: str, reason: str) -> dict[Any, int]:
         counts: dict[Any, int] = {}
         for chunk in _chunks(subjects):
             marks = ", ".join("?" * len(chunk))
             counts.update(self.conn.execute(
                 f"SELECT {self.subject}, COUNT(*) FROM {self.history_table} "
-                f"WHERE node = ? AND reason = 'loop' AND {self.subject} IN ({marks}) "
-                f"GROUP BY {self.subject}", (name, *chunk)).fetchall())
+                f"WHERE node = ? AND reason = ? AND {self.subject} IN ({marks}) "
+                f"GROUP BY {self.subject}", (name, reason, *chunk)).fetchall())
         return counts
 
     def status_counts(self, name: str) -> dict[str, int]:
@@ -239,8 +260,9 @@ class SqliteDriver:
             marks = ", ".join("?" * len(chunk))
             lines += self.conn.execute(
                 f"SELECT COALESCE(finished_at, ?), node, {self.subject}, started_at, status "
-                f"FROM {self.table} WHERE status NOT IN (?, ?) AND {self.subject} IN ({marks})",
-                (at, NODE_SKIPPED, NODE_OMITTED, *chunk)).fetchall()
+                f"FROM {self.table} WHERE status NOT IN (?, ?, ?) "
+                f"AND {self.subject} IN ({marks})",
+                (at, NODE_SKIPPED, NODE_OMITTED, NODE_SCHEDULED, *chunk)).fetchall()
         out: dict[str, list[list[Any]]] = {}
         for ended, n, subject, started, status in sorted(lines, key=lambda x: (x[0], x[1])):
             seconds = round(_epoch(ended) - _epoch(started), 1)
@@ -272,19 +294,22 @@ class SqliteDriver:
 
     def _entries(self, batch: list[Any], nodes: tuple[str, ...]) -> list[Entry]:
         rows: dict[Any, dict[str, str]] = {s: {} for s in batch}
+        due: dict[Any, dict[str, str]] = {s: {} for s in batch}
         revisions: dict[Any, int] = {}
         for chunk in _chunks(list(rows)):
             marks = ", ".join("?" * len(chunk))
             node_marks = ", ".join("?" * len(nodes))
-            for subject, n, status in self.conn.execute(
-                    f"SELECT {self.subject}, node, status FROM {self.table} "
+            for subject, n, status, started in self.conn.execute(
+                    f"SELECT {self.subject}, node, status, started_at FROM {self.table} "
                     f"WHERE {self.subject} IN ({marks}) AND node IN ({node_marks})",
                     (*chunk, *nodes)).fetchall():
                 rows[subject][n] = status
+                if status == NODE_SCHEDULED:
+                    due[subject][n] = started
             revisions.update(self.conn.execute(
                 f"SELECT {self.subject}, revision FROM {self.revisions} "
                 f"WHERE {self.subject} IN ({marks})", chunk).fetchall())
-        return [Entry(s, int(revisions.get(s, 0)), rows[s]) for s in batch]
+        return [Entry(s, int(revisions.get(s, 0)), rows[s], due[s]) for s in batch]
 
 
 def _check(name: str) -> None:

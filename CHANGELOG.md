@@ -35,6 +35,11 @@ First release, planned as 0.1.0.
   parents are enough (two engines out of three).
 - Keep the history: forgetting a node, releasing a lease or looping back
   archives the rows taken away, with when and why, readable per subject.
+- Declare retries: a failed node is scheduled again after a delay that
+  grows (constant, linear or exponential, capped, with jitter), a limited
+  number of times, before the failure counts.
+- The journal reads the time from the storage — the database server for
+  PostgreSQL — so that workers on different machines agree on what is due.
 - Declare bounded loops: a node that fails (or ends another chosen way)
   sends the subject back to an earlier node, at most a given number of
   times, after which the failure stands and can be escalated.

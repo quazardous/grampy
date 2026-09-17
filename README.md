@@ -42,6 +42,7 @@ journal.claim("crop", 10, candidates=["s1", "s2"])            # ['s1'] — s2 st
 |---|---|
 | `grampy.dag` | `Node`, the statuses, `check_dag`, and the **pure** claim rule: `claimable`, `claimable_nodes`, `descendants`, `ancestors` |
 | `grampy.graph` | the graph **as data**: `Graph(Document(name, version), nodes)`, a canonical dict / JSON form, strict reading with the path of every error |
+| `grampy.timing` | durations (`30s`, `10m`, `7d`), ISO instants, `Retry` and its backoff |
 | `grampy.states` | derived from the graph: `replay_targets`, `replayed_after`, `to_undo`, `source_state`, `allowed_transitions` |
 | `grampy.journal` | `NodeJournal` — the logic (validation, rule inputs, clock) over a `JournalDriver` protocol |
 | `grampy.drivers.memory` | dict-based, deterministic, no dependency — the reference driver |
@@ -64,6 +65,13 @@ journal.claim("crop", 10, candidates=["s1", "s2"])            # ['s1'] — s2 st
   loop=Loop(to="draft", max=3))`: a failed review sends the subject back to
   `draft`, in the same write, at most three times; after that the failure
   stands and a failure edge can escalate.
+- **Retries are declared.** `Node("call", retry=Retry(limit=3, delay="10s",
+  backoff="exponential", max_delay="5m", jitter=0.1))`: a failure is
+  archived and the node `scheduled` again; the row becomes claimable when
+  due. Past the limit the failure stands, for a loop or a failure edge.
+- **One clock.** The journal takes its time from the driver — the database
+  server for PostgreSQL — so workers on several machines agree on what is
+  due.
 - **An exclusive choice names its branch.** A `choice` node concludes with
   `branch=`; the other branches, and every node only they lead to, are
   written `omitted` in the same write. A join after the branches goes on.

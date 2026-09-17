@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .dag import Loop, Node, check_dag
+from .timing import Retry
 
 #: THE FORMAT THIS VERSION READS AND WRITES.
 DSL = "grampy/1"
@@ -86,6 +87,13 @@ class Graph:
                 spec["need"] = n.need
             if n.loop is not None:
                 spec["loop"] = {"to": n.loop.to, "max": n.loop.max, "on": list(n.loop.on)}
+            if n.retry is not None:
+                spec["retry"] = {"limit": n.retry.limit, "delay": n.retry.delay,
+                                 "backoff": n.retry.backoff}
+                if n.retry.max_delay is not None:
+                    spec["retry"]["max_delay"] = n.retry.max_delay
+                if n.retry.jitter:
+                    spec["retry"]["jitter"] = n.retry.jitter
             for flag in _NODE_FLAGS:
                 if getattr(n, flag):
                     spec[flag] = True
@@ -123,7 +131,7 @@ class Graph:
         for name, raw in specs.items():
             path = f"$.nodes.{name}"
             spec = _mapping(raw, path, required=(),
-                            allowed=("parents", "on", "need", "loop",
+                            allowed=("parents", "on", "need", "loop", "retry",
                                      *_NODE_LABELS, *_NODE_FLAGS))
             parents = spec.get("parents", [])
             if not isinstance(parents, list):
@@ -160,7 +168,16 @@ class Graph:
                 for i, status in enumerate(loop_on):
                     _string(status, f"{path}.loop.on[{i}]")
                 loop = Loop(to=raw_loop["to"], max=raw_loop["max"], on=tuple(loop_on))
-            nodes.append(Node(name, parents=tuple(parents), loop=loop,
+            retry = None
+            if "retry" in spec:
+                raw_retry = _mapping(spec["retry"], f"{path}.retry", required=("limit",),
+                                     allowed=("limit", "delay", "backoff", "max_delay",
+                                              "jitter"))
+                try:
+                    retry = Retry(**raw_retry)
+                except (TypeError, ValueError) as exc:
+                    raise GraphFormatError(f"{path}.retry: {exc}") from exc
+            nodes.append(Node(name, parents=tuple(parents), loop=loop, retry=retry,
                               working=spec.get("working"), state=spec.get("state"),
                               optional=spec.get("optional", False),
                               once=spec.get("once", False),

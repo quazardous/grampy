@@ -42,6 +42,7 @@ from .dag import (
     NODE_OMITTED,
     NODE_RUNNING,
     NODE_SATISFYING,
+    NODE_SCHEDULED,
     NODE_SKIPPED,
     DagError,
     Loop,
@@ -53,6 +54,7 @@ from .dag import (
     node,
     omitted_by,
 )
+from .timing import Retry, shift
 
 #: A fork, a join, an optional branch — the diamond.
 DIAMOND = (
@@ -98,6 +100,14 @@ REVIEW = (
     Node("review", parents=("draft",), loop=Loop(to="draft", max=2)),
     Node("publish", parents=("review",)),
     Node("escalate", parents=("review",), on={"review": ("failed",)}),
+)
+
+
+#: A call to a flaky service, retried twice with a doubling delay, then an alert.
+FLAKY = (
+    Node("prepare"),
+    Node("call", parents=("prepare",), retry=Retry(limit=2, delay="10s")),
+    Node("alert", parents=("call",), on={"call": ("failed",)}),
 )
 
 
@@ -359,6 +369,54 @@ class JournalContract:
         assert journal.progress("s1") == {"draft": NODE_DONE, "review": NODE_RUNNING}
         assert journal.history("s1") == []
 
+    # -- retries ---------------------------------------------------------------
+
+    def test_a_failure_is_retried_when_due_then_stands(self, harness, clock):
+        journal = harness.journal(FLAKY, clock)
+        clock.now = "2026-01-01T00:00:00+00:00"
+        self._run(harness, journal, "prepare", ["s1"])
+        lease = self._claim(harness, journal, "call", ["s1"])
+        assert journal.fail("call", ["s1"], token=lease.token) == 1
+        assert journal.progress("s1") == {"prepare": NODE_DONE, "call": NODE_SCHEDULED}
+        assert journal.counts("call")[NODE_SCHEDULED] == 1
+        assert self._claim(harness, journal, "call", ["s1"]) == [], "not due yet"
+        assert self._claim(harness, journal, "alert", ["s1"]) == [], "a retry is not a failure"
+
+        clock.now = "2026-01-01T00:00:10+00:00"
+        lease = self._claim(harness, journal, "call", ["s1"])
+        assert lease == ["s1"], "due after 10s"
+        journal.fail("call", ["s1"], token=lease.token)
+        clock.now = "2026-01-01T00:00:29+00:00"
+        assert self._claim(harness, journal, "call", ["s1"]) == [], "second wait is 20s"
+        clock.now = "2026-01-01T00:00:30+00:00"
+        lease = self._claim(harness, journal, "call", ["s1"])
+        journal.fail("call", ["s1"], token=lease.token)
+
+        assert journal.progress("s1") == {"prepare": NODE_DONE, "call": NODE_FAILED}
+        assert journal.retries("s1", "call") == 2
+        assert [e["reason"] for e in journal.history("s1")] == ["retry", "retry"]
+        assert self._claim(harness, journal, "alert", ["s1"]) == ["s1"]
+
+    def test_a_scheduled_row_closes_what_it_guards(self, harness, clock):
+        journal = harness.journal(FLAKY, clock)
+        clock.now = "2026-01-01T00:00:00+00:00"
+        self._run(harness, journal, "prepare", ["s1"])
+        lease = self._claim(harness, journal, "call", ["s1"])
+        journal.fail("call", ["s1"], token=lease.token)
+        clock.now = "2026-01-01T01:00:00+00:00"
+        assert journal.conclude("call", ["s1"], token=None) == 0, "a scheduled row is not held"
+        assert self._claim(harness, journal, "prepare", ["s1"]) == []
+        assert journal.forget("call", ["s1"]) == 1
+        assert [e["status"] for e in journal.history("s1")] == [NODE_FAILED, NODE_SCHEDULED]
+
+    def test_a_retry_refused_by_its_token_schedules_nothing(self, harness, clock):
+        journal = harness.journal(FLAKY, clock)
+        self._run(harness, journal, "prepare", ["s1"])
+        self._claim(harness, journal, "call", ["s1"])
+        assert journal.fail("call", ["s1"], token="stale") == 0
+        assert journal.progress("s1")["call"] == NODE_RUNNING
+        assert journal.history("s1") == []
+
     # -- skip ----------------------------------------------------------------
 
     def test_only_an_optional_node_is_skipped(self, harness, journal):
@@ -414,8 +472,8 @@ class JournalContract:
         harness.seed(journal, "b", {"start": NODE_DONE})
         harness.seed(journal, "c", {"start": NODE_FAILED})
         harness.seed(journal, "d", {"start": NODE_OMITTED})
-        assert journal.counts("start") == {NODE_RUNNING: 0, NODE_DONE: 2, NODE_SKIPPED: 0,
-                                           NODE_FAILED: 1, NODE_OMITTED: 1}
+        assert journal.counts("start") == {NODE_RUNNING: 0, NODE_SCHEDULED: 0, NODE_DONE: 2,
+                                           NODE_SKIPPED: 0, NODE_FAILED: 1, NODE_OMITTED: 1}
 
     def test_stages_measure_what_worked_in_order(self, harness, journal, clock):
         clock.now = "2026-01-01T00:00:00+00:00"
@@ -603,9 +661,14 @@ def _model_machine(harness: Any) -> Any:
                             on=tuple(draw(st.lists(st.sampled_from(
                                 (NODE_DONE, NODE_SKIPPED, NODE_FAILED)),
                                 min_size=1, max_size=2, unique=True))))
+            retry = None
+            if draw(st.integers(0, 3)) == 0:
+                retry = Retry(limit=draw(st.integers(1, 2)), delay=draw(st.integers(0, 3)),
+                              backoff=draw(st.sampled_from(("constant", "linear",
+                                                            "exponential"))))
             nodes.append(Node(spec["name"], parents=spec["parents"],
                               on=spec.get("on", {}), need=spec.get("need"),
-                              choice=choice, loop=loop,
+                              choice=choice, loop=loop, retry=retry,
                               optional=not choice and draw(st.booleans())))
         return tuple(nodes)
 
@@ -624,6 +687,7 @@ def _model_machine(harness: Any) -> Any:
             self.archived: dict[str, list[tuple[str, str, str, str]]] = {
                 s: [] for s in _SUBJECTS}
             self.passes: dict[tuple[str, str], int] = {}
+            self.retried: dict[tuple[str, str], int] = {}
 
         def _archive(self, s: str, name: str, reason: str) -> bool:
             row = self.model[s].pop(name, None)
@@ -652,7 +716,13 @@ def _model_machine(harness: Any) -> Any:
             self.tokens.append(got.token)
             expected: list[str] = []
             for s in candidates:
-                if len(expected) < limit and claimable(n.name, self.dag, self._statuses(s)):
+                statuses = self._statuses(s)
+                row = self.model[s].get(n.name)
+                if row and row[0] == NODE_SCHEDULED and row[1] <= self.clock.now:
+                    del statuses[n.name]          # due: as if absent
+                if len(expected) < limit and claimable(n.name, self.dag, statuses):
+                    if row and row[0] == NODE_SCHEDULED:
+                        del self.model[s][n.name]   # replaced, not archived
                     self.model[s][n.name] = (NODE_RUNNING, self.clock.now, got.token)
                     expected.append(s)
             assert sorted(got) == sorted(expected), f"claim {n.name} {candidates}"
@@ -674,6 +744,15 @@ def _model_machine(harness: Any) -> Any:
                 row = self.model[s].get(n.name)
                 if row and row[0] == NODE_RUNNING and token in (None, row[2]):
                     self.model[s][n.name] = (status, row[1], row[2])
+                    retries = self.retried.get((s, n.name), 0)
+                    if (n.retry is not None and status == NODE_FAILED
+                            and retries < n.retry.limit):
+                        self._archive(s, n.name, "retry")
+                        due = shift(self.clock.now, n.retry.wait(retries + 1))
+                        self.model[s][n.name] = (NODE_SCHEDULED, due, None)
+                        self.retried[(s, n.name)] = retries + 1
+                        expected += 1
+                        continue
                     for other in omit:
                         self.model[s].setdefault(other, (NODE_OMITTED, self.clock.now, None))
                     loop = n.loop
