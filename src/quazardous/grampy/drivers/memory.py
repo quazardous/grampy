@@ -49,6 +49,7 @@ class MemoryDriver:
         self.rows: dict[tuple[Any, str], Row] = {}
         self.revisions: dict[Any, int] = {}
         self.channel_of: dict[Any, str] = {}
+        self.version_of: dict[Any, str] = {}
         self.archive: list[tuple[Any, dict[str, Any]]] = []
         self._lock = threading.RLock()
 
@@ -85,7 +86,7 @@ class MemoryDriver:
                          if row.status == NODE_SCHEDULED},
                         {n: row.finished_at for n, row in held.items()
                          if row.finished_at is not None},
-                        self.channel_of.get(subject)))
+                        self.channel_of.get(subject), self.version_of.get(subject)))
             yield entries
 
     def insert_if_unchanged(self, name: str, entries: list[tuple[Any, int]], *,
@@ -146,13 +147,16 @@ class MemoryDriver:
                        if self._take_away(subject, name, now=now, reason="forget"))
 
     def release(self, name: str, *, older_than: str, now: str,
-                only: tuple[str, ...] | None = None, exclude: tuple[str, ...] = ()) -> int:
+                only: tuple[str, ...] | None = None, exclude: tuple[str, ...] = (),
+                version: str | None = None) -> int:
         with self._lock:
             stale = [key for key, row in self.rows.items()
                      if key[1] == name and row.status == NODE_RUNNING
                      and row.started_at < older_than
                      and (only is None or self.channel_of.get(key[0]) in only)
-                     and self.channel_of.get(key[0]) not in exclude]
+                     and self.channel_of.get(key[0]) not in exclude
+                     and (version is None
+                          or self.version_of.get(key[0]) in (None, version))]
             for subject, n in stale:
                 self._take_away(subject, n, now=now, reason="release")
             return len(stale)
@@ -169,6 +173,29 @@ class MemoryDriver:
     def channels(self, subjects: list[Any]) -> dict[Any, str]:
         with self._lock:
             return {s: self.channel_of[s] for s in subjects if s in self.channel_of}
+
+    def pin(self, subjects: list[Any], version: str) -> int:
+        with self._lock:
+            fresh = [s for s in subjects if s not in self.version_of]
+            for s in fresh:
+                self.version_of[s] = version
+            return len(fresh)
+
+    def versions(self, subjects: list[Any]) -> dict[Any, str]:
+        with self._lock:
+            return {s: self.version_of[s] for s in subjects if s in self.version_of}
+
+    def rewrite(self, subject: Any, *, rename: dict[str, str], drop: tuple[str, ...],
+                version: str, now: str) -> None:
+        with self._lock:
+            for name in drop:
+                self._take_away(subject, name, now=now, reason="migrate")
+            moved = {new: self.rows.pop((subject, old)) for old, new in rename.items()
+                     if (subject, old) in self.rows}
+            for new, row in moved.items():
+                self.rows[(subject, new)] = row
+            self.version_of[subject] = version
+            self.revisions[subject] = self.revisions.get(subject, 0) + 1
 
     # -- read --------------------------------------------------------------
 

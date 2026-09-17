@@ -34,6 +34,9 @@ class SqliteHarness:
             conn.execute(statement)
         return NodeJournal(SqliteDriver(conn), dag, clock=clock)
 
+    def journal_on(self, journal, dag, clock):
+        return NodeJournal(SqliteDriver(journal.driver.conn), dag, clock=clock)
+
     def candidates(self, subjects):
         return ordered_subjects(subjects)
 

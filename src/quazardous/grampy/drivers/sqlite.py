@@ -21,7 +21,7 @@ two tables it expects, for an application that wants them as they are:
 
     table       subject, node, status, started_at, finished_at, lease —
                 `(subject, node)` as primary key; timestamps ISO-8601 text
-    revisions   subject (primary key), revision (integer), channel (text)
+    revisions   subject (primary key), revision (integer), channel, version (text)
     history     the node table's columns, plus archived_at and reason
 
 Names are identifiers checked against `[A-Za-z_][A-Za-z0-9_]*`: they are
@@ -90,7 +90,8 @@ def schema(table: str = "grampy_nodes", revisions: str = "grampy_revisions",
         f"started_at TEXT NOT NULL, finished_at TEXT, lease TEXT, "
         f"PRIMARY KEY ({subject}, node))",
         f"CREATE TABLE IF NOT EXISTS {revisions} ("
-        f"{subject} NOT NULL PRIMARY KEY, revision INTEGER NOT NULL, channel TEXT)",
+        f"{subject} NOT NULL PRIMARY KEY, revision INTEGER NOT NULL, channel TEXT, "
+        f"version TEXT)",
         f"CREATE TABLE IF NOT EXISTS {history} ("
         f"{subject} NOT NULL, node TEXT NOT NULL, status TEXT NOT NULL, "
         f"started_at TEXT NOT NULL, finished_at TEXT, lease TEXT, "
@@ -202,7 +203,8 @@ class SqliteDriver:
         return count
 
     def release(self, name: str, *, older_than: str, now: str,
-                only: tuple[str, ...] | None = None, exclude: tuple[str, ...] = ()) -> int:
+                only: tuple[str, ...] | None = None, exclude: tuple[str, ...] = (),
+                version: str | None = None) -> int:
         where = "node = ? AND status = ? AND started_at < ?"
         params: list[Any] = [name, NODE_RUNNING, older_than]
         registry = f"SELECT {{s}} FROM {self.revisions} WHERE channel IN ({{marks}})"
@@ -213,7 +215,50 @@ class SqliteDriver:
             where += (" AND {s} NOT IN ("
                       + registry.replace("{marks}", ", ".join("?" * len(exclude))) + ")")
             params += list(exclude)
+        if version is not None:
+            where += (" AND {s} NOT IN (SELECT {s} FROM " + self.revisions
+                      + " WHERE version IS NOT NULL AND version != ?)")
+            params.append(version)
         return self._take_away(where, tuple(params), now=now, reason="release")
+
+    def pin(self, subjects: list[Any], version: str) -> int:
+        count = 0
+        for subject in subjects:
+            self.conn.execute(
+                f"INSERT INTO {self.revisions} ({self.subject}, revision) VALUES (?, 0) "
+                f"ON CONFLICT DO NOTHING", (subject,))
+            count += self.conn.execute(
+                f"UPDATE {self.revisions} SET version = ? "
+                f"WHERE {self.subject} = ? AND version IS NULL", (version, subject)).rowcount
+        return count
+
+    def versions(self, subjects: list[Any]) -> dict[Any, str]:
+        out: dict[Any, str] = {}
+        for chunk in _chunks(subjects):
+            marks = ", ".join("?" * len(chunk))
+            out.update(self.conn.execute(
+                f"SELECT {self.subject}, version FROM {self.revisions} "
+                f"WHERE {self.subject} IN ({marks}) AND version IS NOT NULL", chunk).fetchall())
+        return out
+
+    def rewrite(self, subject: Any, *, rename: dict[str, str], drop: tuple[str, ...],
+                version: str, now: str) -> None:
+        self._raise_revision(subject)
+        self.conn.execute(f"UPDATE {self.revisions} SET version = ? WHERE {self.subject} = ?",
+                          (version, subject))
+        for name in drop:
+            self._take_away("node = ? AND {s} = ?", (name, subject), now=now, reason="migrate")
+        columns = f"{self.subject}, node, status, started_at, finished_at, lease"
+        moved = []
+        for old in rename:
+            moved += self.conn.execute(
+                f"SELECT {columns} FROM {self.table} WHERE {self.subject} = ? AND node = ?",
+                (subject, old)).fetchall()
+            self.conn.execute(f"DELETE FROM {self.table} WHERE {self.subject} = ? AND node = ?",
+                              (subject, old))
+        for row in moved:
+            self.conn.execute(f"INSERT INTO {self.table} ({columns}) VALUES (?, ?, ?, ?, ?, ?)",
+                              (row[0], rename[row[1]], *row[2:]))
 
     def enroll(self, subjects: list[Any], channel: str | None) -> int:
         for subject in subjects:
@@ -348,6 +393,7 @@ class SqliteDriver:
         finished: dict[Any, dict[str, str]] = {s: {} for s in batch}
         revisions: dict[Any, int] = {}
         channel_of: dict[Any, str] = {}
+        version_of: dict[Any, str] = {}
         for chunk in _chunks(list(rows)):
             marks = ", ".join("?" * len(chunk))
             node_marks = ", ".join("?" * len(nodes))
@@ -361,14 +407,16 @@ class SqliteDriver:
                     due[subject][n] = started
                 if ended is not None:
                     finished[subject][n] = ended
-            for subject, revision, channel in self.conn.execute(
-                    f"SELECT {self.subject}, revision, channel FROM {self.revisions} "
+            for subject, revision, channel, version in self.conn.execute(
+                    f"SELECT {self.subject}, revision, channel, version FROM {self.revisions} "
                     f"WHERE {self.subject} IN ({marks})", chunk).fetchall():
                 revisions[subject] = revision
                 if channel is not None:
                     channel_of[subject] = channel
+                if version is not None:
+                    version_of[subject] = version
         return [Entry(s, int(revisions.get(s, 0)), rows[s], due[s], finished[s],
-                      channel_of.get(s)) for s in batch]
+                      channel_of.get(s), version_of.get(s)) for s in batch]
 
 
 def _check(name: str) -> None:

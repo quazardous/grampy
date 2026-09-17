@@ -95,6 +95,12 @@ journal.claim("crop", 10, candidates=["s1", "s2"])            # ['s1'] — s2 st
   "partner-a")` records a subject's channel; a `Graph(..., channels={"partner-a":
   {"call": {"retry": Retry(5, "1m")}}})` changes, for that channel only, a
   node's `retry`, `lease`, `timeout` or `grace` — never the structure.
+- **Versions and migration.** A journal on a `Graph` pins each subject to
+  its `document.version` and leaves the subjects of other versions alone, so
+  v1 and v2 run side by side. `journal_v2.migrate(subjects, V1, {"crop": "trim",
+  "old_step": None})` moves the subjects whose rows could have been written on
+  v2 — renamed, dropped nodes archived — or refuses them all, naming each one
+  that is not compliant and why.
 - **One clock.** The journal takes its time from the driver — the database
   server for PostgreSQL — so workers on several machines agree on what is
   due.
@@ -153,7 +159,8 @@ nodes = sa.Table("job_nodes", metadata,
 revisions = sa.Table("job_revisions", metadata,
     sa.Column("job_id", sa.Text, primary_key=True),
     sa.Column("revision", sa.Integer, nullable=False),
-    sa.Column("channel", sa.Text))
+    sa.Column("channel", sa.Text),
+    sa.Column("version", sa.Text))
 history = sa.Table("job_node_history", metadata,
     *[sa.Column(c.name, c.type) for c in nodes.columns],
     sa.Column("archived_at", sa.Text, nullable=False),

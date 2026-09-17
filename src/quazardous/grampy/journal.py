@@ -7,6 +7,7 @@
     release   give back the leases of a dead worker
     expire    give back every lease held longer than its node allows
     enroll    give subjects a channel, whose settings then apply to them
+    migrate   move subjects pinned to one graph version onto this one
     signal    record that an awaited event happened, for subjects
     settle    conclude waits and skip optional nodes past their grace
     history   every row forget, release or a loop took away, kept
@@ -156,6 +157,8 @@ class Entry(NamedTuple):
     finished: dict[str, str] = {}
     #: The subject's channel, None when it has none.
     channel: str | None = None
+    #: The graph version the subject is pinned to, None before its first write.
+    version: str | None = None
 
 
 class JournalDriver(Protocol):
@@ -212,15 +215,31 @@ class JournalDriver(Protocol):
         the old revision may succeed afterwards. Return the count deleted."""
 
     def release(self, name: str, *, older_than: str, now: str,
-                only: tuple[str, ...] | None = None, exclude: tuple[str, ...] = ()) -> int:
+                only: tuple[str, ...] | None = None, exclude: tuple[str, ...] = (),
+                version: str | None = None) -> int:
         """ARCHIVE with reason `release` and delete the RUNNING rows started
         before `older_than` — of subjects whose channel is in `only` when
         given, and not in `exclude` (a subject without channel is never in
-        either)."""
+        either) — and, when `version` is given, of subjects pinned to it or
+        to none."""
 
     def enroll(self, subjects: list[Any], channel: str | None) -> int:
         """Record each subject's channel in the registry (the revisions),
         creating its entry when needed. Return the count written."""
+
+    def pin(self, subjects: list[Any], version: str) -> int:
+        """Record `version` for the subjects that have none yet — never
+        overwrite one. Return the count newly pinned."""
+
+    def versions(self, subjects: list[Any]) -> dict[Any, str]:
+        """`{subject: version}` for the subjects pinned to one."""
+
+    def rewrite(self, subject: Any, *, rename: dict[str, str], drop: tuple[str, ...],
+                version: str, now: str) -> None:
+        """ATOMICALLY for one subject: archive with reason `migrate` and
+        delete the rows of `drop`, rename the rows of `rename` (old → new;
+        the journal guarantees no two land on one name), pin the subject to
+        `version` — overwriting — and raise its revision."""
 
     def channels(self, subjects: list[Any]) -> dict[Any, str]:
         """`{subject: channel}` for the subjects that have one."""
@@ -277,6 +296,10 @@ class NodeJournal:
         self.driver = driver
         self.graph = dag if isinstance(dag, Graph) else None
         self.dag = dag.nodes if isinstance(dag, Graph) else dag
+        #: SUBJECTS ARE PINNED TO THE VERSION THEY STARTED ON: a journal on a
+        #: `Graph` takes only subjects of its version, or not yet pinned, and
+        #: pins them on their first write. None for a tuple of nodes.
+        self.version = dag.document.version if isinstance(dag, Graph) else None
         self._clock = clock or driver.now
         self._rng = rng or random.Random()
 
@@ -317,7 +340,7 @@ class NodeJournal:
             for e in page:
                 # A SUBJECT LISTED TWICE COUNTS ONCE: it would otherwise take
                 # a place in the limit and be refused by the write.
-                if e.subject in seen:
+                if e.subject in seen or not self._mine(e):
                     continue
                 seen.add(e.subject)
                 if self._takable(n, after, _due_away(name, e, now), require_parents):
@@ -334,7 +357,15 @@ class NodeJournal:
         taken = (self.driver.insert_if_unchanged(
                      name, chosen, status=NODE_RUNNING, now=now, lease=token)
                  if chosen else [])
+        self._pin(taken)
         return Lease(taken, token)
+
+    def _mine(self, entry: Entry) -> bool:
+        return self.version is None or entry.version in (None, self.version)
+
+    def _pin(self, subjects: list[Any]) -> None:
+        if self.version is not None and subjects:
+            self.driver.pin(list(subjects), self.version)
 
     def _takable(self, n: Node, after: tuple[str, ...], rows: dict[str, str],
                  require_parents: bool) -> bool:
@@ -458,10 +489,12 @@ class NodeJournal:
                                      page=PAGE, now=now):
             chosen.update(dict.fromkeys(
                 (e.subject, e.revision) for e in page
-                if name not in e.rows and joined(name, self.dag, e.rows)))
+                if self._mine(e) and name not in e.rows and joined(name, self.dag, e.rows)))
         # One write, as for a claim.
-        return len(self.driver.insert_if_unchanged(
-            name, list(chosen), status=NODE_SKIPPED, now=now, lease=None)) if chosen else 0
+        written = self.driver.insert_if_unchanged(
+            name, list(chosen), status=NODE_SKIPPED, now=now, lease=None) if chosen else []
+        self._pin(written)
+        return len(written)
 
     def adopt(self, name: str, subjects: list[Any]) -> int:
         """Record work ALREADY DONE that the journal does not know.
@@ -477,7 +510,9 @@ class NodeJournal:
         node(name, self.dag)
         if not subjects:
             return 0
-        return self.driver.adopt(name, _unique(subjects), now=self._clock())
+        count = self.driver.adopt(name, _unique(subjects), now=self._clock())
+        self._pin(_unique(subjects))
+        return count
 
     # -- undo --------------------------------------------------------------
 
@@ -519,12 +554,12 @@ class NodeJournal:
             if n.lease is not None:
                 count += self.driver.release(
                     n.name, older_than=shift(now, -seconds(n.lease)), now=now,
-                    exclude=tuple(sorted(special)))
+                    exclude=tuple(sorted(special)), version=self.version)
             for channel, lease in special.items():
                 if lease is not None:
                     count += self.driver.release(
                         n.name, older_than=shift(now, -seconds(lease)), now=now,
-                        only=(channel,))
+                        only=(channel,), version=self.version)
             if count:
                 released[n.name] = count
         return released
@@ -535,7 +570,96 @@ class NodeJournal:
         them; the structure of the workflow stays the same for all."""
         if not subjects:
             return 0
-        return self.driver.enroll(_unique(subjects), channel)
+        count = self.driver.enroll(_unique(subjects), channel)
+        self._pin(_unique(subjects))
+        return count
+
+    def pinned(self, subject: Any) -> str | None:
+        """The graph version the subject is pinned to, None before its first
+        write."""
+        return self.driver.versions([subject]).get(subject)
+
+    def migrate(self, subjects: list[Any], source: Graph,
+                mapping: dict[str, str | None] | None = None) -> int:
+        """MOVE SUBJECTS FROM `source` — another version of this graph — ONTO
+        THIS ONE, or refuse them all.
+
+        `mapping` names what became of each source node: another name, or
+        `None` when it is gone (its rows are archived, reason `migrate`). A
+        node left out keeps its name, and must exist here.
+
+        A subject is COMPLIANT when its journal could have been written on
+        this graph: every row, once renamed, stands where the rule of this
+        graph lets a row stand — its parents joined (Rinderle, Reichert and
+        Dadam's compliance criterion, on the current rows only, which are
+        already the latest pass of any loop). A dropped node held by a worker
+        makes a subject non-compliant too.
+
+        ALL OR NOTHING: every subject is checked before anything is written;
+        one failure raises `MigrationError` naming each non-compliant subject
+        and why, and nothing moves. Subjects already on this version, or
+        pinned to a third one, are refused the same way. Return the count
+        migrated."""
+        if self.graph is None or self.version is None:
+            raise ValueError("migrate needs a journal built on a versioned Graph")
+        if source.document.version == self.version:
+            raise ValueError(f"the source is already version {self.version!r}")
+        mapping = dict(mapping or {})
+        here = {n.name for n in self.dag}
+        there = {n.name for n in source.nodes}
+        unknown = sorted(set(mapping) - there)
+        if unknown:
+            raise ValueError(f"mapping names nodes the source does not have: {unknown}")
+        full = {name: mapping.get(name, name) for name in there}
+        missing = sorted(name for name, target in full.items()
+                         if target is not None and target not in here)
+        if missing:
+            raise ValueError(f"source nodes with nowhere to go on version {self.version!r}: "
+                             f"{missing} — map them to a node or to None")
+        landed = [t for t in full.values() if t is not None]
+        if len(landed) != len(set(landed)):
+            raise ValueError("two source nodes are mapped onto the same node")
+
+        subjects = _unique(subjects)
+        pinned = self.driver.versions(subjects)
+        problems: dict[Any, str] = {}
+        plans: dict[Any, tuple[dict[str, str], tuple[str, ...]]] = {}
+        for subject in subjects:
+            if pinned.get(subject, source.document.version) != source.document.version:
+                problems[subject] = f"pinned to version {pinned[subject]!r}"
+                continue
+            progress = self.driver.progress(subject)
+            drop = tuple(sorted(name for name in progress if full.get(name, name) is None))
+            held = [name for name in drop if progress[name] in (NODE_RUNNING, NODE_SCHEDULED)]
+            if held:
+                problems[subject] = f"{held} would be dropped while held or scheduled"
+                continue
+            moved: dict[str, str] = {}
+            rename: dict[str, str] = {}
+            for name, status in progress.items():
+                target = full.get(name, name)
+                if target is not None:
+                    moved[target] = status
+                    if target != name:
+                        rename[name] = target
+            stray = sorted(name for name in moved if name not in here)
+            if stray:
+                problems[subject] = f"rows on {stray}, which version {self.version!r} lacks"
+                continue
+            unjoined = sorted(name for name in moved if not joined(name, self.dag, moved))
+            if unjoined:
+                problems[subject] = (f"{unjoined} could not have run on version "
+                                     f"{self.version!r}: their parents are not joined")
+                continue
+            plans[subject] = (rename, drop)
+        if problems:
+            raise MigrationError(problems)
+        now = self._clock()
+        target_version: str = self.version
+        for subject, (renamed, dropped) in plans.items():
+            self.driver.rewrite(subject, rename=renamed, drop=dropped,
+                                version=target_version, now=now)
+        return len(plans)
 
     def channel(self, subject: Any) -> str | None:
         """The subject's channel, None when it has none."""
@@ -597,7 +721,8 @@ class NodeJournal:
                            parents=() if n.custom_join else n.parents, page=PAGE, now=now)
                        for e in page]
             ready = list({e.subject: e for e in entries
-                          if claimable(n.name, self.dag, _due_away(n.name, e, now))}.values())
+                          if self._mine(e)
+                          and claimable(n.name, self.dag, _due_away(n.name, e, now))}.values())
             if not ready:
                 continue
             decided: dict[str, list[tuple[Any, int]]] = {}
@@ -624,6 +749,7 @@ class NodeJournal:
             for status, chosen in decided.items():
                 written = self.driver.insert_if_unchanged(n.name, chosen, status=status,
                                                           now=now, lease=None)
+                self._pin(written)
                 if written:
                     out.setdefault(n.name, {})[status] = len(written)
         return out
@@ -671,6 +797,17 @@ class NodeJournal:
             if n.working == state:
                 return n.name
         return None
+
+
+class MigrationError(ValueError):
+    """Subjects that cannot move to the new version — `problems` says why,
+    subject by subject. Nothing was written."""
+
+    def __init__(self, problems: dict[Any, str]) -> None:
+        self.problems = problems
+        lines = "; ".join(f"{s!r}: {why}" for s, why in list(problems.items())[:10])
+        more = f" (+{len(problems) - 10} more)" if len(problems) > 10 else ""
+        super().__init__(f"{len(problems)} subject(s) not compliant — {lines}{more}")
 
 
 def _joined_since(n: Node, entry: Entry) -> str | None:

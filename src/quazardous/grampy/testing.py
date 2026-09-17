@@ -17,6 +17,9 @@ Usage, in a test module (pytest is only needed here):
 A harness provides:
 
     journal(dag, clock, subject_type=str)
+    journal_on(journal, dag, clock)
+                                 a second NodeJournal on the SAME storage as
+                                 `journal`, for another graph (versions)
                                  a NodeJournal on EMPTY storage whose subjects
                                  are `str` or `int` (the storage's subject
                                  column typed accordingly)
@@ -59,6 +62,7 @@ from .dag import (
     omitted_by,
 )
 from .graph import Document, Graph
+from .journal import MigrationError
 from .timing import Retry, seconds, shift
 
 #: A fork, a join, an optional branch — the diamond.
@@ -559,6 +563,84 @@ class JournalContract:
         assert settled["survey"] == {NODE_SKIPPED: 1}
         assert "clicked" not in journal.progress("slow")
         assert "survey" not in journal.progress("slow")
+
+    # -- versions and migration --------------------------------------------------
+
+    V1 = Graph(Document("line", version="1"), (
+        Node("fetch"),
+        Node("crop", parents=("fetch",)),
+        Node("thumb", parents=("crop",)),
+        Node("publish", parents=("thumb",)),
+    ))
+    #: v2 inserts `watermark` between `thumb` and `publish`, renames `crop` to
+    #: `trim`, and drops nothing.
+    V2 = Graph(Document("line", version="2"), (
+        Node("fetch"),
+        Node("trim", parents=("fetch",)),
+        Node("thumb", parents=("trim",)),
+        Node("watermark", parents=("thumb",)),
+        Node("publish", parents=("watermark",)),
+    ))
+
+    def test_subjects_stay_on_the_version_they_started_on(self, harness, clock):
+        v1 = harness.journal(self.V1, clock)
+        v2 = harness.journal_on(v1, self.V2, clock)
+        self._run(harness, v1, "fetch", ["old"])
+        assert v1.pinned("old") == "1"
+        assert self._claim(harness, v2, "fetch", ["old", "new"]) == ["new"]
+        assert v2.pinned("new") == "2"
+        assert self._claim(harness, v1, "crop", ["old", "new"]) == ["old"], (
+            "v1 never touches a subject of v2")
+
+    def test_a_compliant_subject_migrates_renamed_and_repinned(self, harness, clock):
+        v1 = harness.journal(self.V1, clock)
+        v2 = harness.journal_on(v1, self.V2, clock)
+        self._run(harness, v1, "fetch", ["s1"])
+        self._run(harness, v1, "crop", ["s1"])
+        self._run(harness, v1, "thumb", ["s1"])
+        assert v2.migrate(["s1"], self.V1, {"crop": "trim"}) == 1
+        assert v2.pinned("s1") == "2"
+        assert v2.progress("s1") == {"fetch": NODE_DONE, "trim": NODE_DONE, "thumb": NODE_DONE}
+        assert self._claim(harness, v2, "watermark", ["s1"]) == ["s1"], (
+            "the new node is next, as if the subject had started on v2")
+
+    def test_migration_is_all_or_nothing(self, harness, clock):
+        v1 = harness.journal(self.V1, clock)
+        v2 = harness.journal_on(v1, self.V2, clock)
+        for subject in ("early", "late"):
+            for name in ("fetch", "crop", "thumb"):
+                self._run(harness, v1, name, [subject])
+        self._run(harness, v1, "publish", ["late"])
+        with pytest.raises(MigrationError) as caught:
+            v2.migrate(["early", "late"], self.V1, {"crop": "trim"})
+        assert set(caught.value.problems) == {"late"}
+        assert "publish" in caught.value.problems["late"]
+        assert v2.pinned("early") == "1", "the compliant one did not move either"
+        assert v1.progress("early")["crop"] == NODE_DONE
+
+    def test_a_dropped_node_is_archived_unless_someone_holds_it(self, harness, clock):
+        v1 = harness.journal(self.V1, clock)
+        v3 = harness.journal_on(v1, Graph(Document("line", version="3"), (
+            Node("fetch"), Node("thumb", parents=("fetch",)),
+            Node("publish", parents=("thumb",)))), clock)
+        self._run(harness, v1, "fetch", ["done", "held"])
+        self._run(harness, v1, "crop", ["done"])
+        self._claim(harness, v1, "crop", ["held"])
+        with pytest.raises(MigrationError, match="held"):
+            v3.migrate(["done", "held"], self.V1, {"crop": None})
+        assert v3.migrate(["done"], self.V1, {"crop": None}) == 1
+        assert v3.progress("done") == {"fetch": NODE_DONE}
+        assert [(e["node"], e["reason"]) for e in v3.history("done")] == [("crop", "migrate")]
+
+    def test_a_mapping_that_cannot_hold_is_refused(self, harness, clock):
+        v1 = harness.journal(self.V1, clock)
+        v2 = harness.journal_on(v1, self.V2, clock)
+        with pytest.raises(ValueError, match="nowhere to go"):
+            v2.migrate(["s1"], self.V1)
+        with pytest.raises(ValueError, match="same node"):
+            v2.migrate(["s1"], self.V1, {"crop": "trim", "fetch": "trim"})
+        with pytest.raises(ValueError, match="does not have"):
+            v2.migrate(["s1"], self.V1, {"ghost": "trim", "crop": "trim"})
 
     # -- skip ----------------------------------------------------------------
 

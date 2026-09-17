@@ -58,7 +58,8 @@ def revision_table(metadata, name, subject_type=str):
         name, metadata,
         sa.Column("subject", _type(subject_type), primary_key=True),
         sa.Column("revision", sa.Integer, nullable=False),
-        sa.Column("channel", sa.Text))
+        sa.Column("channel", sa.Text),
+        sa.Column("version", sa.Text))
 
 
 def ordered_subjects(subjects, subject_type=str):
@@ -87,6 +88,12 @@ class PostgresHarness:
         return NodeJournal(
             PostgresDriver(self.conn.execute, table, revisions, history, subject="subject"),
             dag, clock=clock)
+
+    def journal_on(self, journal, dag, clock):
+        d = journal.driver
+        return NodeJournal(PostgresDriver(self.conn.execute, d.table, d.revisions,
+                                          d.history_table, subject="subject"),
+                           dag, clock=clock)
 
     def candidates(self, subjects):
         return ordered_subjects(subjects, self.subject_type)

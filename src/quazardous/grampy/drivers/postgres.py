@@ -15,8 +15,8 @@ none. It needs two `sqlalchemy.Table`s sharing a subject column (named by
                 `finished_at` and `lease` nullable. Timestamps are ISO-8601
                 text, compared lexically.
     revisions   the subject registry, one row per subject: `revision`, an
-                integer, and `channel`, nullable text; the subject as
-                primary key. Rows are created on demand.
+                integer, `channel` and `version`, nullable text; the subject
+                as primary key. Rows are created on demand.
     history     the rows taken away: the node table's columns, plus
                 `archived_at` and `reason` (text); append-only, no key
                 required.
@@ -93,7 +93,7 @@ from ..journal import Entry
 #: THE COLUMNS THE NODE TABLE MUST CARRY, besides the subject.
 REQUIRED_COLUMNS = ("node", "status", "started_at", "finished_at", "lease")
 #: THE COLUMNS THE REVISIONS TABLE MUST CARRY, besides the subject.
-REVISION_COLUMNS = ("revision", "channel")
+REVISION_COLUMNS = ("revision", "channel", "version")
 #: THE COLUMNS THE HISTORY TABLE MUST CARRY, besides the subject.
 HISTORY_COLUMNS = (*REQUIRED_COLUMNS, "archived_at", "reason")
 
@@ -160,7 +160,7 @@ class PostgresDriver:
         held = t.alias("d")
         query = (
             sa.select(candidate, c.c.grampy_rank,
-                      sa.func.coalesce(r.c.revision, 0), r.c.channel)
+                      sa.func.coalesce(r.c.revision, 0), r.c.channel, r.c.version)
             .select_from(c.outerjoin(r, self._rev_subject == candidate))
             .where(~sa.exists().where(
                 held.c[self._subject.key] == candidate, held.c.node == name,
@@ -189,7 +189,7 @@ class PostgresDriver:
                     due[subject][n] = started
                 if ended is not None:
                     finished[subject][n] = ended
-            yield [Entry(f[0], int(f[2]), rows[f[0]], due[f[0]], finished[f[0]], f[3])
+            yield [Entry(f[0], int(f[2]), rows[f[0]], due[f[0]], finished[f[0]], f[3], f[4])
                    for f in found]
             if len(found) < page:
                 return
@@ -283,7 +283,8 @@ class PostgresDriver:
                                now=now, reason="forget")
 
     def release(self, name: str, *, older_than: str, now: str,
-                only: tuple[str, ...] | None = None, exclude: tuple[str, ...] = ()) -> int:
+                only: tuple[str, ...] | None = None, exclude: tuple[str, ...] = (),
+                version: str | None = None) -> int:
         t, r = self.table, self.revisions
         where = sa.and_(t.c.node == name, t.c.status == NODE_RUNNING,
                         t.c.started_at < older_than)
@@ -293,7 +294,49 @@ class PostgresDriver:
         if exclude:
             where = sa.and_(where, self._subject.not_in(
                 sa.select(self._rev_subject).where(r.c.channel.in_(list(exclude)))))
+        if version is not None:
+            where = sa.and_(where, self._subject.not_in(
+                sa.select(self._rev_subject).where(r.c.version.is_not(None),
+                                                   r.c.version != version)))
         return self._take_away(where, now=now, reason="release")
+
+    def pin(self, subjects: list[Any], version: str) -> int:
+        r = self.revisions
+        subjects = sorted(subjects)
+        self._execute(
+            postgresql.insert(r)
+            .values([{self._rev_subject.key: s, "revision": 0} for s in subjects])
+            .on_conflict_do_nothing())
+        return len(self._execute(
+            sa.update(r).where(self._rev_subject.in_(subjects), r.c.version.is_(None))
+            .values(version=version).returning(self._rev_subject)).fetchall())
+
+    def versions(self, subjects: list[Any]) -> dict[Any, str]:
+        r = self.revisions
+        return {row[0]: row[1] for row in self._execute(
+            sa.select(self._rev_subject, r.c.version)
+            .where(self._rev_subject.in_(list(subjects)), r.c.version.is_not(None))).fetchall()}
+
+    def rewrite(self, subject: Any, *, rename: dict[str, str], drop: tuple[str, ...],
+                version: str, now: str) -> None:
+        """Rows renamed by delete and re-insert: an in-place rename could
+        collide with the primary key halfway through a chain of renames."""
+        t, r = self.table, self.revisions
+        self._raise_revisions([subject])
+        self._execute(sa.update(r).where(self._rev_subject == subject).values(version=version))
+        if drop:
+            self._take_away(sa.and_(self._subject == subject, t.c.node.in_(list(drop))),
+                            now=now, reason="migrate")
+        if not rename:
+            return
+        columns = [self._subject.key, *REQUIRED_COLUMNS]
+        moved = [dict(zip(columns, row, strict=True)) for row in self._execute(
+            sa.delete(t).where(self._subject == subject, t.c.node.in_(list(rename)))
+            .returning(*[t.c[c] for c in columns])).fetchall()]
+        for row in moved:
+            row["node"] = rename[row["node"]]
+        if moved:
+            self._execute(sa.insert(t).values(moved))
 
     def enroll(self, subjects: list[Any], channel: str | None) -> int:
         r = self.revisions

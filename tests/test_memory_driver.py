@@ -12,6 +12,9 @@ class MemoryHarness:
     def journal(self, dag, clock, subject_type=str):
         return NodeJournal(MemoryDriver(), dag, clock=clock)
 
+    def journal_on(self, journal, dag, clock):
+        return NodeJournal(journal.driver, dag, clock=clock)
+
     def candidates(self, subjects):
         return list(subjects)
 

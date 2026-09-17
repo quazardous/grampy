@@ -53,6 +53,9 @@ First release, planned as 0.1.0. Installed as `grampy-q`, imported as
   after a timeout, so that a reminder or an escalation can follow.
 - Give optional steps a grace period, after which they are skipped instead
   of blocking the steps that follow them.
+- Change a workflow while subjects are in flight: each subject stays on the
+  graph version it started on, and a migration moves the subjects that fit
+  the new version — or refuses them all, saying which do not and why.
 - Run one workflow for several sources: give subjects a channel, and let a
   channel change retries, leases, timeouts and grace periods without
   changing the steps themselves.
