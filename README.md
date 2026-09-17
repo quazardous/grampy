@@ -8,6 +8,11 @@ pip install grampy-q              # from quazardous import grampy
 pip install "grampy-q[postgres]"  # + the PostgreSQL driver (SQLAlchemy)
 ```
 
+**[Try the brick sorter →](https://quazardous.github.io/grampy/)** — a sorting
+line where TNT bricks get quarantined, defused with retries or rejected, run by
+the real grampy in your browser. Locally: `python docs/demo/build.py && python -m
+http.server -d docs/demo`.
+
 The package lives in the `quazardous` namespace; the distribution is
 `grampy-q` (`grampy` was already taken on PyPI; the *q* is for queue).
 

@@ -28,6 +28,9 @@ First release, planned as 0.1.0. Installed as `grampy-q`, imported as
 - Declare a workflow as a graph of nodes, with forks that run in parallel,
   joins that wait for all their parents, and optional nodes that can be
   skipped without blocking their children.
+- An online demo: a brick sorting line animated in the browser, run by the
+  real library, where TNT bricks wait for the bomb squad, get retried at the
+  defuse station or end in the reject bin.
 - Draw a workflow as a Mermaid flowchart or a Graphviz graph, every
   mechanism with its own shape, optionally with the live count of subjects
   per step.

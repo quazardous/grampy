@@ -21,6 +21,7 @@ from .dag import (
     NODE_OMITTED,
     NODE_RUNNING,
     NODE_SATISFYING,
+    NODE_SCHEDULED,
     NODE_SKIPPED,
     DagError,
     Loop,
@@ -44,12 +45,14 @@ from .states import (
     source_state,
     to_undo,
 )
+from .timing import Retry
 
 __version__ = "0.1.0"
 
 __all__ = [
     "NODE_CONCLUDED", "NODE_DONE", "NODE_FAILED", "NODE_OMITTED", "NODE_RUNNING",
-    "NODE_SATISFYING", "NODE_SKIPPED", "DagError", "Document", "Graph", "GraphFormatError",
+    "NODE_SATISFYING", "NODE_SCHEDULED", "NODE_SKIPPED", "Retry", "DagError",
+    "Document", "Graph", "GraphFormatError",
     "JournalDriver", "Lease", "Loop", "Node", "accepts", "joined", "omitted_by",
     "NodeJournal", "allowed_transitions", "ancestors", "check_dag", "claimable",
     "claimable_nodes", "descendants", "node", "replay_targets", "replayed_after",

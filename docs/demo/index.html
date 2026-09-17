@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>grampy Brick Sorter</title>
+<meta name="description" content="A brick sorting line run by the real grampy workflow journal, in your browser.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bungee&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="demo.css">
+</head>
+<body>
+<header class="masthead">
+  <div class="brand">
+    <h1>Brick Sorter</h1>
+    <p>A sorting line run by <a href="https://github.com/quazardous/grampy">grampy</a> — the real library, executing in your browser. Every brick is a subject, every station a node; when a TNT brick shows up, the workflow has to decide what to do with it.</p>
+  </div>
+  <dl class="tally" aria-live="polite">
+    <div><dt>Clock</dt><dd id="clock">--:--:--</dd></div>
+    <div><dt>Shipped</dt><dd id="shipped">0</dd></div>
+    <div class="tally-boom"><dt>TNT rejected</dt><dd id="exploded">0</dd></div>
+  </dl>
+</header>
+
+<section class="controls" aria-label="Factory controls">
+  <div class="control-group">
+    <button id="play" type="button" class="primary" aria-pressed="true">Pause</button>
+    <label class="speed">Speed
+      <select id="speed">
+        <option value="1">1×</option>
+        <option value="3" selected>3×</option>
+        <option value="10">10×</option>
+      </select>
+    </label>
+  </div>
+  <div class="control-group">
+    <button id="add" type="button">Drop 10 bricks</button>
+    <button id="add-tnt" type="button" class="hazard">Drop a TNT brick</button>
+    <button id="squad" type="button">Call the bomb squad</button>
+  </div>
+  <div class="control-group sliders">
+    <label for="arrivals"><span>Arrivals <output id="arrivals-out">20</output>/min</span>
+      <input id="arrivals" type="range" min="0" max="60" step="1" value="20">
+    </label>
+    <label for="tnt"><span>TNT share <output id="tnt-out">20</output>%</span>
+      <input id="tnt" type="range" min="0" max="100" step="5" value="20">
+    </label>
+    <label for="failure"><span>Defuse fails <output id="failure-out">70</output>%</span>
+      <input id="failure" type="range" min="0" max="100" step="5" value="70">
+    </label>
+    <label class="check" for="auto-squad"><input id="auto-squad" type="checkbox" checked> Bomb squad answers on its own</label>
+  </div>
+</section>
+
+<main class="layout">
+  <figure class="floor-frame">
+    <div class="floor-scroll">
+      <svg id="floor" viewBox="0 0 1180 590" role="img" aria-label="The sorting line with its stations and bricks"></svg>
+    </div>
+    <figcaption id="status" class="status">Loading Python and grampy…</figcaption>
+  </figure>
+
+  <aside class="panel">
+    <section>
+      <h2>Stations</h2>
+      <table class="counts" id="counts">
+        <thead><tr><th scope="col">Node</th><th scope="col" title="running">▶</th><th scope="col" title="scheduled for a retry">⏳</th><th scope="col" title="done">✓</th><th scope="col" title="failed">✗</th><th scope="col" title="omitted by a choice">∅</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+    <section>
+      <h2>Selected brick</h2>
+      <div id="detail" class="detail"><p class="hint">Click a brick on the line to read its journal.</p></div>
+    </section>
+    <section>
+      <h2>Calls to the journal</h2>
+      <ol id="calls" class="calls"></ol>
+    </section>
+  </aside>
+</main>
+
+<section class="legend" aria-label="How the line maps to grampy">
+  <h2>What you are looking at</h2>
+  <ul>
+    <li><span class="glyph glyph-choice"></span><span><b>scan</b> is a <code>choice</code>: it names its branch, and the branch not taken is marked <code>omitted</code>.</span></li>
+    <li><span class="glyph glyph-wait"></span><span><b>quarantine</b> is a <code>wait</code>: the brick sits on the shelf until the bomb squad's signal arrives, or fails after its 90 s timeout.</span></li>
+    <li><span class="glyph glyph-retry"></span><span><b>defuse</b> has a <code>Retry(limit=3, exponential)</code>: a failure goes round the return belt and comes back later — 8 s, 16 s, 32 s.</span></li>
+    <li><span class="glyph glyph-fail"></span><span><b>reject</b> accepts only <em>failed</em> parents (<code>on=…</code>, <code>need=1</code>): past the last retry, or when the squad never came, the brick goes there.</span></li>
+    <li><span class="glyph glyph-join"></span><span><b>pack</b> joins both routes: <code>omitted</code> satisfies it, so a sorted brick and a defused one both get packed.</span></li>
+  </ul>
+</section>
+
+<script src="https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"></script>
+<script src="demo.js"></script>
+</body>
+</html>
