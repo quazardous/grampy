@@ -51,6 +51,12 @@ any iterable of them, list, tuple or generator — and their ids are read with
 `id_of`. They are reused as they are, so a batch you already loaded is never
 loaded twice.
 
+**Ids are not accepted here.** A list of them cannot be told apart from a
+list of items — an application whose subjects *are* strings would be
+ambiguous — so passing ids raises, naming the mistake rather than letting
+your adapter look broken. When you genuinely hold ids, claim on the journal
+underneath: `items.journal.claim("sort", 10, candidates=[…])`.
+
 A **driver's query** is handed to the journal untouched. That is the one
 place ids are unavoidable: the storage produces the candidate set, and it
 has no Python objects to give. The layer then loads the lease in **one**

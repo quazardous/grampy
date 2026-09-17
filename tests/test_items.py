@@ -247,3 +247,13 @@ def test_arrivals_of_different_versions_are_counted_together():
     counts = items.arrive("inbox", bricks)
     assert counts["queued"] == 3, "three refs, three groups, three arrivals"
     assert sum(counts.values()) == 3, "nothing lost between the groups"
+
+
+def test_passing_ids_where_items_go_says_so(world):
+    """The layer takes items; ids would fail inside the adapter, so the
+    mistake is named rather than surfacing as a broken adapter."""
+    bricks, adapter, items = world
+    with pytest.raises(TypeError, match="not their ids"):
+        items.claim("scan", 10, candidates=[1, 2, 3])
+    with pytest.raises(TypeError, match="items.journal.claim"):
+        items.settle([1, 2, 3])

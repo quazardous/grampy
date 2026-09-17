@@ -261,7 +261,18 @@ class Items:
         stay in hand; a driver's query travels on untouched."""
         if not _are_items(candidates):
             return {}, candidates
-        given = {self.adapter.id_of(i): i for i in candidates}
+        given = {}
+        for candidate in candidates:
+            try:
+                given[self.adapter.id_of(candidate)] = candidate
+            except (AttributeError, TypeError, KeyError, IndexError) as why:
+                # THE LIKELY MISTAKE IS PASSING IDS. Say so, rather than let
+                # the adapter's own line surface as if it were broken.
+                raise TypeError(
+                    f"{type(self.adapter).__name__}.id_of could not read "
+                    f"{candidate!r} ({why}) — candidates here are your ITEMS, "
+                    f"not their ids. Pass the objects, or claim ids on the "
+                    f"journal itself: items.journal.claim(...)") from why
         return given, list(given)
 
     def _loaded(self, lease: Lease) -> dict[Any, Any]:
