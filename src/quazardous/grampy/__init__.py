@@ -48,7 +48,7 @@ from .states import (
 )
 from .timing import Rate, Retry
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "NODE_CONCLUDED", "NODE_DONE", "NODE_FAILED", "NODE_OMITTED", "NODE_RUNNING",

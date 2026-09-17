@@ -20,8 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-The first release, once the API has settled. Installed as `grampy-q`,
-imported as `from quazardous import grampy`.
+## [0.2.0] - 2026-09-18
+
+The first release. Installed as `grampy-q`, imported as
+`from quazardous import grampy`.
+
+> It starts at 0.2.0 because 0.1.0 was built, rehearsed on TestPyPI and
+> never published: the API moved too much that evening to stand behind it,
+> and a version number on TestPyPI can never be reused.
 
 ### Added
 
@@ -136,4 +142,5 @@ imported as `from quazardous import grampy`.
   claimers, claims racing a requeue) and random sequences of operations on
   random graphs checked step by step against the rule.
 
-[Unreleased]: https://github.com/quazardous/grampy/commits/main
+[Unreleased]: https://github.com/quazardous/grampy/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/quazardous/grampy/releases/tag/v0.2.0

@@ -51,6 +51,9 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
+          # A rehearsal already on TestPyPI must not block the release:
+          # that index keeps versions forever, like PyPI.
+          skip-existing: true
 
   pypi:
     needs: testpypi
