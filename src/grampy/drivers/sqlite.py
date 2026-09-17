@@ -57,7 +57,7 @@ from collections.abc import Iterator
 from datetime import datetime
 from typing import Any, NamedTuple
 
-from ..dag import NODE_DONE, NODE_RUNNING, NODE_SATISFYING, NODE_SKIPPED
+from ..dag import NODE_DONE, NODE_OMITTED, NODE_RUNNING, NODE_SATISFYING, NODE_SKIPPED
 from ..journal import Entry
 
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -128,17 +128,24 @@ class SqliteDriver:
         return taken
 
     def conclude(self, name: str, subjects: list[Any], *, status: str,
-                 now: str, lease: str | None) -> int:
+                 now: str, lease: str | None, omit: tuple[str, ...]) -> int:
         count = 0
-        for chunk in _chunks(subjects):
-            marks = ", ".join("?" * len(chunk))
+        for subject in subjects:
             sql = (f"UPDATE {self.table} SET status = ?, finished_at = ? "
-                   f"WHERE node = ? AND status = ? AND {self.subject} IN ({marks})")
-            params: list[Any] = [status, now, name, NODE_RUNNING, *chunk]
+                   f"WHERE node = ? AND status = ? AND {self.subject} = ?")
+            params: list[Any] = [status, now, name, NODE_RUNNING, subject]
             if lease is not None:
                 sql += " AND lease = ?"
                 params.append(lease)
-            count += self.conn.execute(sql, params).rowcount
+            if self.conn.execute(sql, params).rowcount != 1:
+                continue
+            count += 1
+            for other in omit:
+                self.conn.execute(
+                    f"INSERT INTO {self.table} "
+                    f"({self.subject}, node, status, started_at, finished_at) "
+                    f"VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                    (subject, other, NODE_OMITTED, now, now))
         return count
 
     def adopt(self, name: str, subjects: list[Any], *, now: str) -> int:
@@ -188,8 +195,8 @@ class SqliteDriver:
             marks = ", ".join("?" * len(chunk))
             lines += self.conn.execute(
                 f"SELECT COALESCE(finished_at, ?), node, {self.subject}, started_at, status "
-                f"FROM {self.table} WHERE status != ? AND {self.subject} IN ({marks})",
-                (at, NODE_SKIPPED, *chunk)).fetchall()
+                f"FROM {self.table} WHERE status NOT IN (?, ?) AND {self.subject} IN ({marks})",
+                (at, NODE_SKIPPED, NODE_OMITTED, *chunk)).fetchall()
         out: dict[str, list[list[Any]]] = {}
         for ended, n, subject, started, status in sorted(lines, key=lambda x: (x[0], x[1])):
             seconds = round(_epoch(ended) - _epoch(started), 1)

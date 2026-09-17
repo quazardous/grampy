@@ -1,7 +1,10 @@
 """The graph: nodes, their parents, and the rule that says what can run.
 
-    Node             a node: who it descends from, what it projects
+    Node             a node: who it descends from, how it joins, what it projects
     node             the named node, in THIS graph
+    accepts          the statuses of a parent this node accepts
+    joined           are enough parents concluded the way this node accepts?
+    omitted_by       what a choice leaves dead when it takes one branch
     descendants      everything downstream of a node
     ancestors        everything upstream of a node
     claimable        can this node be taken, given what is recorded?
@@ -29,6 +32,7 @@ driver contract confronts the two (`grampy.testing`).
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 
@@ -41,23 +45,27 @@ class DagError(ValueError):
 #:     running   someone holds it — the lease, nothing more
 #:     done      finished, it produced what it had to
 #:     skipped   we stopped waiting for it (optional node, grace expired)
+#:     omitted   a choice took another branch: it will never run
 #:
-#: `done` AND `skipped` BOTH SATISFY A CHILD, on purpose: a child does not
-#: need to know WHY its parent is concluded, only that it will not be kept
-#: waiting. The distinction is for MEASURING, not for deciding.
+#: `done`, `skipped` AND `omitted` ALL SATISFY A CHILD BY DEFAULT, on
+#: purpose: a child does not need to know WHY its parent is concluded, only
+#: that it will not be kept waiting. The distinction is for MEASURING, not
+#: for deciding. (A child of an omitted node never gets there: it is omitted
+#: with it — see `omitted_by`.)
 NODE_RUNNING = "running"
 NODE_DONE = "done"
 NODE_SKIPPED = "skipped"
-#: THE THIRD END, AND IT SATISFIES NOBODY.
+NODE_OMITTED = "omitted"
+#: THE END THAT SATISFIES NOBODY — BY DEFAULT.
 #:
-#: `done` and `skipped` say "I will not keep you waiting"; `failed` says "I
-#: did not produce what you expected". A child can NOT start on it — it
-#: would work on an input that does not exist.
+#: `failed` says "I did not produce what you expected". A child can NOT
+#: start on it — it would work on an input that does not exist — unless it
+#: says so on that edge: a compensation, an alert (`Node.on`).
 NODE_FAILED = "failed"
-#: WHAT SATISFIES A CHILD. The only list a claim consults.
-NODE_SATISFYING = (NODE_DONE, NODE_SKIPPED)
+#: WHAT SATISFIES A CHILD, unless the child's edge says otherwise.
+NODE_SATISFYING = (NODE_DONE, NODE_SKIPPED, NODE_OMITTED)
 #: WHAT IS NEVER TAKEN AGAIN. Going back means FORGETTING the row.
-NODE_CONCLUDED = (NODE_DONE, NODE_SKIPPED, NODE_FAILED)
+NODE_CONCLUDED = (NODE_DONE, NODE_SKIPPED, NODE_FAILED, NODE_OMITTED)
 
 
 @dataclass(frozen=True)
@@ -83,6 +91,25 @@ class Node:
     `once` says a REPLAY DOES NOT REDO IT. Its row is forgotten with the
     rest of the downstream — otherwise its parent could not be claimed
     again — but its guard lives elsewhere, in the application.
+
+    ────────────────────────────────────────────────────────────────────
+    HOW A NODE JOINS ITS PARENTS — data, not code
+    ────────────────────────────────────────────────────────────────────
+
+    `on` says, per parent, which of its statuses this node accepts;
+    a parent not named accepts `NODE_SATISFYING`. A compensation that runs
+    when a reservation failed and the payment went through:
+
+        Node("refund", parents=("pay", "reserve"), on={"reserve": ("failed",)})
+
+    `need` is how many parents must be accepted — all of them when `None`.
+    `need=2` over three engines starts as soon as two agree; the third,
+    not started yet, is closed by it (a descendant has started).
+
+    `choice` marks a node that concludes by NAMING one of its children: the
+    others, and whatever only they lead to, are `omitted` in the same
+    write (exclusive choice). A join after the branches goes on, since
+    `omitted` satisfies it.
     """
 
     name: str
@@ -91,6 +118,31 @@ class Node:
     state: str | None = None
     optional: bool = False
     once: bool = False
+    on: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    need: int | None = None
+    choice: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "parents", tuple(self.parents))
+        object.__setattr__(self, "on", _Frozen(
+            (parent, tuple(statuses)) for parent, statuses in dict(self.on).items()))
+
+    @property
+    def custom_join(self) -> bool:
+        """True when the node joins otherwise than "every parent satisfying"."""
+        return bool(self.on) or self.need is not None
+
+
+class _Frozen(dict):
+    """A read-only, hashable mapping — a frozen dataclass field must hash."""
+
+    def __hash__(self) -> int:  # type: ignore[override]
+        return hash(tuple(sorted(self.items())))
+
+    def _refuse(self, *args: object, **kwargs: object) -> None:
+        raise TypeError("Node.on is read-only")
+
+    __setitem__ = __delitem__ = clear = pop = popitem = setdefault = update = _refuse  # type: ignore[assignment]
 
 
 def node(name: str, dag: tuple[Node, ...]) -> Node:
@@ -154,6 +206,19 @@ def ancestors(name: str, dag: tuple[Node, ...]) -> set[str]:
     return seen
 
 
+def accepts(child: Node, parent: str) -> tuple[str, ...]:
+    """The statuses of `parent` that `child` accepts."""
+    return tuple(child.on.get(parent, NODE_SATISFYING))
+
+
+def joined(name: str, dag: tuple[Node, ...], progress: dict[str, str]) -> bool:
+    """ENOUGH PARENTS CONCLUDED THE WAY THIS NODE ACCEPTS — `need` of them,
+    all when `need` is None. A root has nothing to wait for."""
+    n = node(name, dag)
+    accepted = sum(1 for p in n.parents if progress.get(p) in accepts(n, p))
+    return accepted >= (len(n.parents) if n.need is None else n.need)
+
+
 def claimable(name: str, dag: tuple[Node, ...],
               progress: dict[str, str]) -> bool:
     """Can this node be taken, given what is already recorded?
@@ -162,17 +227,45 @@ def claimable(name: str, dag: tuple[Node, ...],
 
         a row already exists      someone holds it, or it is concluded
         a descendant has started  the subject has moved PAST it
-        a parent is not concluded its input does not exist yet
+        not joined                its input does not exist yet (`joined`)
 
-    `done` AND `skipped` CONCLUDE; `failed` DOES NOT.
+    By default `done`, `skipped` and `omitted` satisfy; `failed` does not.
     """
     node(name, dag)                      # raises on an unknown node
     if name in progress:
         return False
     if any(d in progress for d in descendants(name, dag)):
         return False
-    return all(progress.get(p) in NODE_SATISFYING
-               for p in node(name, dag).parents)
+    return joined(name, dag, progress)
+
+
+def omitted_by(choice: str, branch: str, dag: tuple[Node, ...]) -> tuple[str, ...]:
+    """WHAT DIES WHEN `choice` TAKES `branch`: the other children of the
+    choice, and every node that can only be reached through them.
+
+    Reachability, not descendance: remove the branches not taken, and a
+    node that can no longer be reached from the root is dead. A join that
+    the taken branch also reaches stays alive — `omitted` satisfies it.
+    Returned in declaration order.
+    """
+    n = node(choice, dag)
+    if not n.choice:
+        raise DagError(f"node {choice!r} is not a choice")
+    children = [c.name for c in dag if choice in c.parents]
+    if branch not in children:
+        raise DagError(f"{branch!r} is not a branch of {choice!r} — expected one of {children}")
+    cut = {c for c in children if c != branch}
+    reachable: set[str] = set()
+    grew = True
+    while grew:                          # a fixpoint: no order assumed
+        grew = False
+        for c in dag:
+            if c.name in cut or c.name in reachable:
+                continue
+            if not c.parents or any(p in reachable for p in c.parents):
+                reachable.add(c.name)
+                grew = True
+    return tuple(c.name for c in dag if c.name not in reachable)
 
 
 def claimable_nodes(dag: tuple[Node, ...],
@@ -204,6 +297,35 @@ def check_dag(dag: tuple[Node, ...]) -> None:
                 raise DagError(
                     f"node {n.name!r} descends from {parent!r}, "
                     f"which does not exist")
+        if len(set(n.parents)) != len(n.parents):
+            raise DagError(f"node {n.name!r} names a parent twice")
+
+    # ── A JOIN SAYS WHAT IT CAN SAY ────────────────────────────────
+    #
+    # An edge setting that names no parent, a status that does not exist, a
+    # `need` no count of parents can reach: each would make a node wait
+    # forever, or start on nothing, without a word.
+    for n in dag:
+        for parent, statuses in n.on.items():
+            if parent not in n.parents:
+                raise DagError(f"node {n.name!r}: `on` names {parent!r}, not one of its parents")
+            if not statuses:
+                raise DagError(f"node {n.name!r}: `on` accepts nothing from {parent!r}")
+            unknown = [x for x in statuses if x not in NODE_CONCLUDED]
+            if unknown:
+                raise DagError(
+                    f"node {n.name!r}: `on` accepts unknown status(es) {unknown} from "
+                    f"{parent!r} — expected among {list(NODE_CONCLUDED)}")
+        if n.need is not None and not 1 <= n.need <= len(n.parents):
+            raise DagError(
+                f"node {n.name!r}: need={n.need} but it has {len(n.parents)} parent(s)")
+        if n.choice and not any(n.name in c.parents for c in dag):
+            raise DagError(f"node {n.name!r} is a choice without any branch")
+        if n.choice and n.optional:
+            raise DagError(
+                f"node {n.name!r} is an optional choice: skipped, it would name no "
+                f"branch and every branch would run")
+
 
     # ── NO CYCLE, PROVEN BY A WALK ─────────────────────────────────
     #

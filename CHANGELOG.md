@@ -30,9 +30,15 @@ First release, planned as 0.1.0.
 - Write a workflow as data: a versioned JSON document (name, namespace,
   version, nodes) that can be stored, compared between versions and read
   back; unknown keys and wrong types are refused with their path.
+- Say how a node joins its parents, as data: which statuses of each parent
+  it accepts (a compensation that runs when a step failed), and how many
+  parents are enough (two engines out of three).
+- Exclusive choices: a choice node concludes by naming its branch, and the
+  other branches — with whatever only they lead to — are marked omitted at
+  once, so the steps after the branches still proceed.
 - Validate a graph at startup: unknown parents, duplicate names, cycles,
-  several entry points and a state posted by two nodes are rejected before
-  any work is claimed.
+  several entry points, a state posted by two nodes and joins that could
+  never be met are rejected before any work is claimed.
 - Ask which nodes a subject can start next, as a pure function of its
   progress — no storage needed.
 - Claim a node for a batch of subjects on behalf of remote workers, then

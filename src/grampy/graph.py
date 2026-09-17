@@ -38,7 +38,7 @@ from .dag import Node, check_dag
 #: THE FORMAT THIS VERSION READS AND WRITES.
 DSL = "grampy/1"
 
-_NODE_FLAGS = ("optional", "once")
+_NODE_FLAGS = ("optional", "once", "choice")
 _NODE_LABELS = ("working", "state")
 
 
@@ -80,6 +80,10 @@ class Graph:
             for label in _NODE_LABELS:
                 if getattr(n, label) is not None:
                     spec[label] = getattr(n, label)
+            if n.on:
+                spec["on"] = {parent: list(statuses) for parent, statuses in n.on.items()}
+            if n.need is not None:
+                spec["need"] = n.need
             for flag in _NODE_FLAGS:
                 if getattr(n, flag):
                     spec[flag] = True
@@ -117,7 +121,7 @@ class Graph:
         for name, raw in specs.items():
             path = f"$.nodes.{name}"
             spec = _mapping(raw, path, required=(),
-                            allowed=("parents", *_NODE_LABELS, *_NODE_FLAGS))
+                            allowed=("parents", "on", "need", *_NODE_LABELS, *_NODE_FLAGS))
             parents = spec.get("parents", [])
             if not isinstance(parents, list):
                 raise GraphFormatError(f"{path}.parents: expected a list of node names")
@@ -129,10 +133,23 @@ class Graph:
             for flag in _NODE_FLAGS:
                 if flag in spec and not isinstance(spec[flag], bool):
                     raise GraphFormatError(f"{path}.{flag}: expected true or false")
+            on = spec.get("on", {})
+            if not isinstance(on, dict):
+                raise GraphFormatError(f"{path}.on: expected an object of statuses by parent")
+            for parent, statuses in on.items():
+                if not isinstance(statuses, list):
+                    raise GraphFormatError(f"{path}.on.{parent}: expected a list of statuses")
+                for i, status in enumerate(statuses):
+                    _string(status, f"{path}.on.{parent}[{i}]")
+            need = spec.get("need")
+            if need is not None and (isinstance(need, bool) or not isinstance(need, int)):
+                raise GraphFormatError(f"{path}.need: expected an integer")
             nodes.append(Node(name, parents=tuple(parents),
                               working=spec.get("working"), state=spec.get("state"),
                               optional=spec.get("optional", False),
-                              once=spec.get("once", False)))
+                              once=spec.get("once", False),
+                              on={p: tuple(v) for p, v in on.items()}, need=need,
+                              choice=spec.get("choice", False)))
         return cls(document, tuple(nodes))
 
     @classmethod

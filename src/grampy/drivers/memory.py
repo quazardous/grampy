@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from ..dag import NODE_DONE, NODE_RUNNING, NODE_SATISFYING, NODE_SKIPPED
+from ..dag import NODE_DONE, NODE_OMITTED, NODE_RUNNING, NODE_SATISFYING, NODE_SKIPPED
 from ..journal import Entry
 
 
@@ -71,7 +71,7 @@ class MemoryDriver:
         return taken
 
     def conclude(self, name: str, subjects: list[Any], *, status: str,
-                 now: str, lease: str | None) -> int:
+                 now: str, lease: str | None, omit: tuple[str, ...]) -> int:
         count = 0
         with self._lock:
             for subject in subjects:
@@ -81,6 +81,8 @@ class MemoryDriver:
                 if lease is not None and row.lease != lease:
                     continue
                 row.status, row.finished_at = status, now
+                for other in omit:
+                    self.rows.setdefault((subject, other), Row(NODE_OMITTED, now, now))
                 count += 1
         return count
 
@@ -130,7 +132,7 @@ class MemoryDriver:
         with self._lock:
             lines = [(row.finished_at or at, n, str(s), row)
                      for (s, n), row in self.rows.items()
-                     if str(s) in wanted and row.status != NODE_SKIPPED]
+                     if str(s) in wanted and row.status not in (NODE_SKIPPED, NODE_OMITTED)]
         out: dict[str, list[list[Any]]] = {}
         for ended, n, subject, row in sorted(lines, key=lambda x: (x[0], x[1])):
             seconds = round(_epoch(ended) - _epoch(row.started_at), 1)

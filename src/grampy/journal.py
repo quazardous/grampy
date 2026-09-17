@@ -88,13 +88,15 @@ from .dag import (
     NODE_CONCLUDED,
     NODE_DONE,
     NODE_FAILED,
+    NODE_OMITTED,
     NODE_RUNNING,
-    NODE_SATISFYING,
     NODE_SKIPPED,
     Node,
     claimable,
     descendants,
+    joined,
     node,
+    omitted_by,
 )
 
 #: HOW MANY CANDIDATES A CLAIM READS AT ONCE, at least — more when the
@@ -144,8 +146,9 @@ class JournalDriver(Protocol):
         revision and its rows on `nodes`.
 
         A PRE-FILTER, NEVER A DECISION: the driver MAY leave out a candidate
-        that holds a row for `name`, or one of whose `parents` is not
-        `done`/`skipped`. It must not leave out anything else."""
+        that holds a row for `name`, or one of whose `parents` has no
+        `NODE_SATISFYING` row (`parents` is empty when the node joins in a
+        way a pre-filter cannot know). It must not leave out anything else."""
 
     def insert_if_unchanged(self, name: str, entries: list[tuple[Any, int]], *,
                             status: str, now: str, lease: str | None) -> list[Any]:
@@ -155,9 +158,11 @@ class JournalDriver(Protocol):
         `now`. Return the subjects inserted."""
 
     def conclude(self, name: str, subjects: list[Any], *, status: str,
-                 now: str, lease: str | None) -> int:
+                 now: str, lease: str | None, omit: tuple[str, ...]) -> int:
         """Set `status` and `finished_at` on RUNNING rows only — and, unless
-        `lease` is None, only on rows holding that lease."""
+        `lease` is None, only on rows holding that lease. For every subject
+        concluded, ATOMICALLY with it, insert an `omitted` row finished at
+        `now` for each node of `omit` that has no row."""
 
     def adopt(self, name: str, subjects: list[Any], *, now: str) -> int:
         """Insert `done` rows, never overwriting an existing row."""
@@ -217,7 +222,7 @@ class NodeJournal:
         if limit <= 0:
             return Lease([], token)
         after = tuple(sorted(descendants(name, self.dag)))
-        parents = n.parents if require_parents else ()
+        parents = n.parents if require_parents and not n.custom_join else ()
         now = self._clock()
         chosen: list[tuple[Any, int]] = []
         seen: set[Any] = set()
@@ -264,27 +269,48 @@ class NodeJournal:
     # -- conclude ----------------------------------------------------------
 
     def conclude(self, name: str, subjects: list[Any], *, token: str | None,
-                 status: str = NODE_DONE) -> int:
+                 status: str = NODE_DONE, branch: str | None = None) -> int:
         """Finish this node on these subjects. Return the count touched.
 
         ONLY RUNNING ROWS HOLDING `token` ARE TOUCHED: a duplicate report — a
         worker retrying after a network timeout — recounts nothing, and a
         worker whose lease went to someone else rewrites nothing. `token` is
         required; `None` concludes whoever holds the rows (an operator's act).
+
+        A CHOICE CONCLUDES BY NAMING ITS BRANCH. `branch` is required to
+        conclude a choice `done` or `skipped`, refused anywhere else; the
+        other branches and what only they reach are `omitted` in the same
+        write (`dag.omitted_by`). A failed choice omits nothing: its branches
+        wait on it like any child on a failed parent.
         """
         if not subjects:
             return 0
-        if status not in NODE_CONCLUDED:
+        n = node(name, self.dag)
+        if status not in NODE_CONCLUDED or status == NODE_OMITTED:
             raise ValueError(
                 f"unknown conclusion status: {status!r} — expected "
                 f"{NODE_DONE}, {NODE_SKIPPED} or {NODE_FAILED}")
-        node(name, self.dag)
+        omit: tuple[str, ...] = ()
+        if n.choice and status != NODE_FAILED:
+            if branch is None:
+                raise ValueError(
+                    f"node {name!r} is a choice: concluding it needs `branch=`, "
+                    f"one of its children")
+            omit = omitted_by(name, branch, self.dag)
+        elif branch is not None:
+            raise ValueError(
+                f"`branch` given, but node {name!r} "
+                f"{'failed' if n.choice else 'is not a choice'}")
         return self.driver.conclude(name, _unique(subjects), status=status,
-                                    now=self._clock(), lease=token)
+                                    now=self._clock(), lease=token, omit=omit)
 
-    def fail(self, name: str, subjects: list[Any], *, token: str | None) -> int:
-        """This node did not produce. `failed` DOES NOT satisfy its children."""
-        return self.conclude(name, subjects, token=token, status=NODE_FAILED)
+    def fail(self, name: str, subjects: list[Any], *, token: str | None,
+             branch: str | None = None) -> int:
+        """This node did not produce. `failed` satisfies no child — unless a
+        child's edge accepts it (`Node.on`). `branch` is accepted only to be
+        refused: a failed choice names nothing."""
+        return self.conclude(name, subjects, token=token, status=NODE_FAILED,
+                             branch=branch)
 
     def skip(self, name: str, *, candidates: Any) -> int:
         """Mark this OPTIONAL node as given up, on the candidates.
@@ -302,11 +328,11 @@ class NodeJournal:
         chosen: dict[tuple[Any, int], None] = {}
         for page in self.driver.scan(candidates, name=name,
                                      nodes=(name, *n.parents),
-                                     parents=n.parents, page=PAGE):
+                                     parents=() if n.custom_join else n.parents,
+                                     page=PAGE):
             chosen.update(dict.fromkeys(
                 (e.subject, e.revision) for e in page
-                if name not in e.rows
-                and all(e.rows.get(p) in NODE_SATISFYING for p in n.parents)))
+                if name not in e.rows and joined(name, self.dag, e.rows)))
         # One write, as for a claim.
         return len(self.driver.insert_if_unchanged(
             name, list(chosen), status=NODE_SKIPPED, now=now, lease=None)) if chosen else 0
@@ -367,7 +393,7 @@ class NodeJournal:
         node(name, self.dag)
         by_status = self.driver.status_counts(name)
         return {status: int(by_status.get(status, 0))
-                for status in (NODE_RUNNING, NODE_DONE, NODE_SKIPPED, NODE_FAILED)}
+                for status in (NODE_RUNNING, *NODE_CONCLUDED)}
 
     def node_for_state(self, state: str) -> str | None:
         """The node whose WORKING state this is, if any.

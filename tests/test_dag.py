@@ -10,6 +10,7 @@ import pytest
 from grampy import (
     NODE_DONE,
     NODE_FAILED,
+    NODE_OMITTED,
     NODE_RUNNING,
     NODE_SKIPPED,
     DagError,
@@ -20,6 +21,7 @@ from grampy import (
     claimable_nodes,
     descendants,
     node,
+    omitted_by,
 )
 
 #: Three nodes in a row.
@@ -232,3 +234,101 @@ def test_ancestors_and_descendants_never_overlap():
             up, down = ancestors(n.name, graph), descendants(n.name, graph)
             assert not (up & down)
             assert n.name not in up and n.name not in down
+
+
+# ── joins as data ─────────────────────────────────────────────────────
+
+#: An order: pay and reserve in parallel, ship on both, refund when the
+#: payment went through but the reservation failed.
+SAGA = (
+    Node("order"),
+    Node("pay", parents=("order",)),
+    Node("reserve", parents=("order",)),
+    Node("ship", parents=("pay", "reserve")),
+    Node("refund", parents=("pay", "reserve"), on={"reserve": ("failed",)}),
+)
+
+
+def test_a_failure_edge_starts_on_the_failure_only():
+    base = {"order": NODE_DONE, "pay": NODE_DONE}
+    assert claimable_nodes(SAGA, {**base, "reserve": NODE_FAILED}) == {"refund"}
+    assert claimable_nodes(SAGA, {**base, "reserve": NODE_DONE}) == {"ship"}
+    assert not claimable("refund", SAGA, {"order": NODE_DONE, "pay": NODE_FAILED,
+                                          "reserve": NODE_FAILED})
+
+
+#: Three engines, two are enough.
+QUORUM = (
+    Node("scan"),
+    Node("e1", parents=("scan",)),
+    Node("e2", parents=("scan",)),
+    Node("e3", parents=("scan",)),
+    Node("merge", parents=("e1", "e2", "e3"), need=2),
+)
+
+
+def test_k_of_n_starts_at_k_and_closes_the_late_parent():
+    progress = {"scan": NODE_DONE, "e1": NODE_DONE, "e2": NODE_RUNNING}
+    assert not claimable("merge", QUORUM, progress)
+    progress["e2"] = NODE_DONE
+    assert claimable_nodes(QUORUM, progress) == {"e3", "merge"}
+    progress["merge"] = NODE_RUNNING
+    assert not claimable("e3", QUORUM, progress), "merge started: e3 is closed"
+
+
+def test_k_of_n_counts_only_accepted_statuses():
+    progress = {"scan": NODE_DONE, "e1": NODE_DONE, "e2": NODE_FAILED, "e3": NODE_RUNNING}
+    assert not claimable("merge", QUORUM, progress)
+
+
+#: A moderation: one of three routes, then a common end.
+ROUTE = (
+    Node("classify", choice=True),
+    Node("publish", parents=("classify",)),
+    Node("review", parents=("classify",)),
+    Node("reject", parents=("classify",)),
+    Node("notify", parents=("reject",)),
+    Node("audit", parents=("review", "notify")),
+    Node("end", parents=("publish", "review", "notify")),
+)
+
+
+def test_a_choice_omits_the_other_branches_and_what_only_they_reach():
+    assert omitted_by("classify", "publish", ROUTE) == ("review", "reject", "notify", "audit")
+    assert omitted_by("classify", "reject", ROUTE) == ("publish", "review")
+    assert omitted_by("classify", "review", ROUTE) == ("publish", "reject", "notify")
+
+
+def test_omitted_satisfies_the_join_after_the_branches():
+    progress = {"classify": NODE_DONE, "publish": NODE_DONE}
+    progress.update(dict.fromkeys(omitted_by("classify", "publish", ROUTE), NODE_OMITTED))
+    assert claimable_nodes(ROUTE, progress) == {"end"}
+
+
+def test_a_choice_is_named_and_its_branch_exists():
+    with pytest.raises(DagError, match="not a choice"):
+        omitted_by("publish", "review", ROUTE)
+    with pytest.raises(DagError, match="not a branch"):
+        omitted_by("classify", "audit", ROUTE)
+
+
+@pytest.mark.parametrize("nodes, message", [
+    ((Node("a"), Node("b", parents=("a",), on={"x": ("done",)})), "not one of its parents"),
+    ((Node("a"), Node("b", parents=("a",), on={"a": ()})), "accepts nothing"),
+    ((Node("a"), Node("b", parents=("a",), on={"a": ("gone",)})), "unknown status"),
+    ((Node("a"), Node("b", parents=("a",), need=2)), "need=2"),
+    ((Node("a"), Node("b", parents=("a",), need=0)), "need=0"),
+    ((Node("a", choice=True),), "choice without any branch"),
+    ((Node("a"), Node("b", parents=("a", "a"))), "names a parent twice"),
+])
+def test_check_dag_refuses_a_join_that_cannot_hold(nodes, message):
+    with pytest.raises(DagError, match=message):
+        check_dag(nodes)
+
+
+def test_on_is_read_only_and_nodes_stay_hashable():
+    n = Node("refund", parents=("pay",), on={"pay": ["failed"]})
+    assert n.on == {"pay": ("failed",)}
+    assert hash(n) == hash(Node("refund", parents=("pay",), on={"pay": ("failed",)}))
+    with pytest.raises(TypeError):
+        n.on["pay"] = ("done",)

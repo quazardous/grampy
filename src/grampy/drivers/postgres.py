@@ -76,7 +76,7 @@ from typing import Any
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
-from ..dag import NODE_DONE, NODE_RUNNING, NODE_SATISFYING, NODE_SKIPPED
+from ..dag import NODE_DONE, NODE_OMITTED, NODE_RUNNING, NODE_SATISFYING, NODE_SKIPPED
 from ..journal import Entry
 
 #: THE COLUMNS THE NODE TABLE MUST CARRY, besides the subject.
@@ -198,14 +198,26 @@ class PostgresDriver:
         return [row[0] for row in rows]
 
     def conclude(self, name: str, subjects: list[Any], *, status: str,
-                 now: str, lease: str | None) -> int:
+                 now: str, lease: str | None, omit: tuple[str, ...]) -> int:
+        """The omitted rows follow in a second statement of the same
+        transaction: the concluded rows stay locked until it ends, and no
+        other transaction sees the conclusion without its omissions."""
         t = self.table
         update = sa.update(t).where(t.c.node == name, t.c.status == NODE_RUNNING,
-                                    self._subject.in_(list(subjects)))
+                                    self._subject.in_(sorted(subjects)))
         if lease is not None:
             update = update.where(t.c.lease == lease)
-        cur = self._execute(update.values(status=status, finished_at=now))
-        return cur.rowcount
+        concluded = [row[0] for row in self._execute(
+            update.values(status=status, finished_at=now)
+            .returning(self._subject)).fetchall()]
+        if omit and concluded:
+            self._execute(
+                postgresql.insert(t)
+                .values([{self._subject.key: s, "node": other, "status": NODE_OMITTED,
+                          "started_at": now, "finished_at": now}
+                         for s in sorted(concluded) for other in omit])
+                .on_conflict_do_nothing())
+        return len(concluded)
 
     def adopt(self, name: str, subjects: list[Any], *, now: str) -> int:
         cur = self._execute(
@@ -263,7 +275,8 @@ class PostgresDriver:
                     self._subject, t.c.node, t.c.status, ended.label("ended"),
                     sa.func.round(_epoch(ended) - _epoch(t.c.started_at), 1)
                     .label("seconds"))
-                .where(self._subject.in_(chunk), t.c.status != NODE_SKIPPED)
+                .where(self._subject.in_(chunk),
+                       t.c.status.not_in((NODE_SKIPPED, NODE_OMITTED)))
                 .order_by(sa.literal_column("ended"), t.c.node)).fetchall()
             for r in rows:
                 out.setdefault(str(r[0]), []).append([r[1], r[3], r[4], r[2]])

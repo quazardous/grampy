@@ -3,9 +3,17 @@
 A small workflow graph for work queues that already live in a storage —
 a database, a key-value store, or plain memory: the storage is a driver.
 
+```bash
+pip install grampy-q              # imported as `grampy`
+pip install "grampy-q[postgres]"  # + the PostgreSQL driver (SQLAlchemy)
+```
+
+(`grampy` was already taken on PyPI; the *q* is for queue.)
+
 You declare a DAG of nodes. Each *subject* (a job, a request, a file…)
 goes through the nodes; a **node journal** records, per subject and per
-node, whether the node is `running`, `done`, `skipped` or `failed`.
+node, whether the node is `running`, `done`, `skipped`, `failed` or
+`omitted`.
 Workers **claim** a node for eligible subjects, **conclude** it, and the
 graph decides what becomes claimable next — forks run in parallel, joins
 wait for all their parents.
@@ -44,7 +52,15 @@ journal.claim("crop", 10, candidates=["s1", "s2"])            # ['s1'] — s2 st
 ## The rules
 
 - A node is **claimable** when it has no row, no descendant has started,
-  and every parent is `done` or `skipped`. `failed` satisfies nobody.
+  and it is **joined**: by default every parent is `done`, `skipped` or
+  `omitted`; `failed` satisfies nobody.
+- **Joins are data.** `on` says, per parent, which statuses a node accepts —
+  `Node("refund", parents=("pay", "reserve"), on={"reserve": ("failed",)})`
+  runs on a failure — and `need=k` starts a node once `k` parents are
+  accepted: the others, not started yet, are closed by it.
+- **An exclusive choice names its branch.** A `choice` node concludes with
+  `branch=`; the other branches, and every node only they lead to, are
+  written `omitted` in the same write. A join after the branches goes on.
 - **Never backwards**: once a descendant has started, the node is closed.
   Going back is `forget` — the absence of a row means "never started".
 - Only an **optional** node can be `skip`ped, and only when it is itself

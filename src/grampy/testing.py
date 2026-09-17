@@ -36,8 +36,10 @@ from typing import Any
 import pytest
 
 from .dag import (
+    NODE_CONCLUDED,
     NODE_DONE,
     NODE_FAILED,
+    NODE_OMITTED,
     NODE_RUNNING,
     NODE_SATISFYING,
     NODE_SKIPPED,
@@ -45,7 +47,9 @@ from .dag import (
     Node,
     claimable,
     claimable_nodes,
+    joined,
     node,
+    omitted_by,
 )
 
 #: A fork, a join, an optional branch — the diamond.
@@ -54,6 +58,35 @@ DIAMOND = (
     Node("left", parents=("start",), working="lefting", state="lefted"),
     Node("right", parents=("start",), optional=True),
     Node("end", parents=("left", "right")),
+)
+
+
+#: An order: pay and reserve in parallel, ship on both, refund when the
+#: payment went through and the reservation failed.
+SAGA = (
+    Node("order"),
+    Node("pay", parents=("order",)),
+    Node("reserve", parents=("order",)),
+    Node("ship", parents=("pay", "reserve")),
+    Node("refund", parents=("pay", "reserve"), on={"reserve": ("failed",)}),
+)
+
+#: Three engines, two are enough; the merge may be skipped.
+QUORUM = (
+    Node("scan"),
+    Node("e1", parents=("scan",)),
+    Node("e2", parents=("scan",)),
+    Node("e3", parents=("scan",)),
+    Node("merge", parents=("e1", "e2", "e3"), need=2, optional=True),
+)
+
+#: A choice between two routes, a step only one route has, a common end.
+ROUTE = (
+    Node("classify", choice=True),
+    Node("publish", parents=("classify",)),
+    Node("reject", parents=("classify",)),
+    Node("notify", parents=("reject",)),
+    Node("end", parents=("publish", "notify")),
 )
 
 
@@ -70,7 +103,7 @@ class Clock:
 def _progresses() -> list[dict[str, str]]:
     """Every progress of the diamond with at most two rows, plus a few
     deeper ones — many of them unreachable through the API."""
-    statuses = (NODE_RUNNING, NODE_DONE, NODE_SKIPPED, NODE_FAILED)
+    statuses = (NODE_RUNNING, NODE_DONE, NODE_SKIPPED, NODE_FAILED, NODE_OMITTED)
     names = [n.name for n in DIAMOND]
     out: list[dict[str, str]] = [{}]
     for size in (1, 2):
@@ -202,6 +235,71 @@ class JournalContract:
         self._claim(harness, journal, "start", ["s1"])
         assert journal.fail("start", ["s1"], token=None) == 1
 
+    # -- joins as data --------------------------------------------------------
+
+    def _run(self, harness, journal, name, subjects, **kw):
+        """Claim then conclude, the way a worker does."""
+        lease = self._claim(harness, journal, name, subjects)
+        journal.conclude(name, lease, token=lease.token, **kw)
+        return lease
+
+    def test_a_failure_edge_claims_on_the_failure(self, harness, clock):
+        journal = harness.journal(SAGA, clock)
+        self._run(harness, journal, "order", ["s1", "s2"])
+        self._run(harness, journal, "pay", ["s1", "s2"])
+        lease = self._claim(harness, journal, "reserve", ["s1", "s2"])
+        journal.fail("reserve", ["s1"], token=lease.token)
+        journal.conclude("reserve", ["s2"], token=lease.token)
+        assert self._claim(harness, journal, "refund", ["s1", "s2"]) == ["s1"]
+        assert self._claim(harness, journal, "ship", ["s1", "s2"]) == ["s2"]
+
+    def test_k_of_n_claims_and_skips_at_k(self, harness, clock):
+        journal = harness.journal(QUORUM, clock)
+        self._run(harness, journal, "scan", ["s1", "s2", "s3"])
+        for engine in ("e1", "e2"):
+            self._run(harness, journal, engine, ["s1", "s2"])
+        self._run(harness, journal, "e1", ["s3"])
+        assert sorted(self._claim(harness, journal, "merge", ["s1", "s3"])) == ["s1"]
+        assert journal.skip("merge", candidates=harness.candidates(["s2", "s3"])) == 1
+        assert journal.progress("s2")["merge"] == NODE_SKIPPED
+        assert self._claim(harness, journal, "e3", ["s1", "s2", "s3"]) == ["s3"], (
+            "s1 and s2 moved past e3; s3 has not")
+
+    def test_a_choice_omits_the_other_route_in_the_same_write(self, harness, clock):
+        journal = harness.journal(ROUTE, clock)
+        lease = self._claim(harness, journal, "classify", ["s1", "s2"])
+        assert journal.conclude("classify", ["s1"], token=lease.token, branch="publish") == 1
+        assert journal.conclude("classify", ["s2"], token=lease.token, branch="reject") == 1
+        assert journal.progress("s1") == {"classify": NODE_DONE, "reject": NODE_OMITTED,
+                                          "notify": NODE_OMITTED}
+        assert journal.progress("s2") == {"classify": NODE_DONE, "publish": NODE_OMITTED}
+        assert self._claim(harness, journal, "reject", ["s1", "s2"]) == ["s2"]
+        self._run(harness, journal, "publish", ["s1"])
+        assert self._claim(harness, journal, "end", ["s1", "s2"]) == ["s1"]
+        assert journal.stages(["s1"], at="2026-01-01T00:00:00+00:00")["s1"][0][0] == "classify"
+        assert all(line[3] != NODE_OMITTED
+                   for line in journal.stages(["s1"], at="2026-01-01T00:00:00+00:00")["s1"])
+
+    def test_a_choice_must_name_a_branch_and_only_a_choice_may(self, harness, clock):
+        journal = harness.journal(ROUTE, clock)
+        lease = self._claim(harness, journal, "classify", ["s1"])
+        with pytest.raises(ValueError, match="branch="):
+            journal.conclude("classify", ["s1"], token=lease.token)
+        with pytest.raises(DagError, match="not a branch"):
+            journal.conclude("classify", ["s1"], token=lease.token, branch="end")
+        with pytest.raises(ValueError, match="failed"):
+            journal.fail("classify", ["s1"], token=lease.token, branch="publish")
+        assert journal.fail("classify", ["s1"], token=lease.token) == 1
+        assert journal.progress("s1") == {"classify": NODE_FAILED}, "a failure omits nothing"
+        with pytest.raises(ValueError, match="not a choice"):
+            journal.conclude("publish", ["s1"], token=None, branch="end")
+
+    def test_a_choice_refused_by_its_token_omits_nothing(self, harness, clock):
+        journal = harness.journal(ROUTE, clock)
+        self._claim(harness, journal, "classify", ["s1"])
+        assert journal.conclude("classify", ["s1"], token="stale", branch="publish") == 0
+        assert journal.progress("s1") == {"classify": NODE_RUNNING}
+
     # -- skip ----------------------------------------------------------------
 
     def test_only_an_optional_node_is_skipped(self, harness, journal):
@@ -252,12 +350,13 @@ class JournalContract:
 
     # -- read ----------------------------------------------------------------
 
-    def test_counts_cover_the_four_statuses(self, harness, journal):
+    def test_counts_cover_every_status(self, harness, journal):
         harness.seed(journal, "a", {"start": NODE_DONE})
         harness.seed(journal, "b", {"start": NODE_DONE})
         harness.seed(journal, "c", {"start": NODE_FAILED})
-        assert journal.counts("start") == {NODE_RUNNING: 0, NODE_DONE: 2,
-                                           NODE_SKIPPED: 0, NODE_FAILED: 1}
+        harness.seed(journal, "d", {"start": NODE_OMITTED})
+        assert journal.counts("start") == {NODE_RUNNING: 0, NODE_DONE: 2, NODE_SKIPPED: 0,
+                                           NODE_FAILED: 1, NODE_OMITTED: 1}
 
     def test_stages_measure_what_worked_in_order(self, harness, journal, clock):
         clock.now = "2026-01-01T00:00:00+00:00"
@@ -410,13 +509,26 @@ def _model_machine(harness: Any) -> Any:
     @st.composite
     def graphs(draw: Any) -> tuple[Node, ...]:
         size = draw(st.integers(min_value=1, max_value=6))
-        nodes = [Node("n0", optional=draw(st.booleans()))]
+        specs: list[dict[str, Any]] = [{"name": "n0", "parents": ()}]
         for i in range(1, size):
-            earlier = [n.name for n in nodes]
-            parents = draw(st.lists(st.sampled_from(earlier), min_size=1,
-                                    max_size=min(3, len(earlier)), unique=True))
-            nodes.append(Node(f"n{i}", parents=tuple(sorted(parents)),
-                              optional=draw(st.booleans())))
+            earlier = [spec["name"] for spec in specs]
+            parents = tuple(sorted(draw(st.lists(
+                st.sampled_from(earlier), min_size=1,
+                max_size=min(3, len(earlier)), unique=True))))
+            on = {p: tuple(draw(st.lists(st.sampled_from(NODE_CONCLUDED), min_size=1,
+                                         max_size=2, unique=True)))
+                  for p in parents if draw(st.integers(0, 3)) == 0}
+            need = (draw(st.integers(1, len(parents)))
+                    if len(parents) > 1 and draw(st.booleans()) else None)
+            specs.append({"name": f"n{i}", "parents": parents, "on": on, "need": need})
+        with_children = {p for spec in specs for p in spec["parents"]}
+        nodes = []
+        for spec in specs:
+            choice = spec["name"] in with_children and draw(st.integers(0, 3)) == 0
+            nodes.append(Node(spec["name"], parents=spec["parents"],
+                              on=spec.get("on", {}), need=spec.get("need"),
+                              choice=choice,
+                              optional=not choice and draw(st.booleans())))
         return tuple(nodes)
 
     subjects = st.lists(st.sampled_from(_SUBJECTS), max_size=6)
@@ -462,14 +574,23 @@ def _model_machine(harness: Any) -> Any:
         def conclude(self, data: Any, candidates: list[str], status: str) -> None:
             n = self._node(data)
             token = data.draw(st.sampled_from([None, "forged", *self.tokens]))
+            branch = None
+            omit: tuple[str, ...] = ()
+            if n.choice and status != NODE_FAILED:
+                branch = data.draw(st.sampled_from(
+                    [c.name for c in self.dag if n.name in c.parents]))
+                omit = omitted_by(n.name, branch, self.dag)
             self._tick()
             expected = 0
             for s in dict.fromkeys(candidates):
                 row = self.model[s].get(n.name)
                 if row and row[0] == NODE_RUNNING and token in (None, row[2]):
                     self.model[s][n.name] = (status, row[1], row[2])
+                    for other in omit:
+                        self.model[s].setdefault(other, (NODE_OMITTED, self.clock.now, None))
                     expected += 1
-            got = self.journal.conclude(n.name, candidates, token=token, status=status)
+            got = self.journal.conclude(n.name, candidates, token=token, status=status,
+                                        branch=branch)
             assert got == expected, f"conclude {n.name} {candidates} token={token}"
 
         @rule(data=st.data(), candidates=subjects)
@@ -481,8 +602,7 @@ def _model_machine(harness: Any) -> Any:
             expected = 0
             for s in dict.fromkeys(candidates):
                 statuses = self._statuses(s)
-                if n.name not in statuses and all(
-                        statuses.get(p) in NODE_SATISFYING for p in n.parents):
+                if n.name not in statuses and joined(n.name, self.dag, statuses):
                     self.model[s][n.name] = (NODE_SKIPPED, self.clock.now, None)
                     expected += 1
             got = self.journal.skip(n.name, candidates=harness.candidates(candidates))

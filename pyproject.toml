@@ -1,5 +1,5 @@
 [project]
-name = "grampy"
+name = "grampy-q"
 dynamic = ["version"]
 description = "A small workflow graph (DAG) and node journal for work queues, with pluggable storage drivers"
 readme = "README.md"

@@ -7,7 +7,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from grampy import DagError, Document, Graph, GraphFormatError, Node
+from grampy import NODE_CONCLUDED, DagError, Document, Graph, GraphFormatError, Node
 
 DIAMOND = (
     Node("start", working="starting", state="started"),
@@ -29,6 +29,21 @@ def test_the_canonical_form_writes_only_what_differs_from_a_default():
             "end": {"parents": ["left", "right"]},
         },
     }
+
+
+def test_joins_and_choices_are_written_as_data():
+    graph = Graph(Document("saga"), (
+        Node("order", choice=True),
+        Node("pay", parents=("order",)),
+        Node("cancel", parents=("order",)),
+        Node("refund", parents=("pay",), on={"pay": ("failed",)}),
+        Node("end", parents=("pay", "cancel"), need=1),
+    ))
+    nodes = graph.to_dict()["nodes"]
+    assert nodes["order"] == {"choice": True}
+    assert nodes["refund"] == {"parents": ["pay"], "on": {"pay": ["failed"]}}
+    assert nodes["end"] == {"parents": ["pay", "cancel"], "need": 1}
+    assert Graph.from_json(graph.to_json()) == graph
 
 
 def test_json_round_trips():
@@ -56,6 +71,12 @@ def test_a_graph_that_does_not_hold_together_is_refused_on_construction():
     ({"document": {"name": "x"}, "nodes": {"a": {"parents": [1]}}}, "$.nodes.a.parents[0]"),
     ({"document": {"name": "x"}, "nodes": {"a": {"optional": "yes"}}}, "$.nodes.a.optional"),
     ({"document": {"name": "x"}, "nodes": {"a": {"state": ""}}}, "$.nodes.a.state"),
+    ({"document": {"name": "x"}, "nodes": {"a": {"on": []}}}, "$.nodes.a.on"),
+    ({"document": {"name": "x"}, "nodes": {"a": {"on": {"b": "failed"}}}}, "$.nodes.a.on.b"),
+    ({"document": {"name": "x"}, "nodes": {"a": {"on": {"b": [3]}}}}, "$.nodes.a.on.b[0]"),
+    ({"document": {"name": "x"}, "nodes": {"a": {"need": "2"}}}, "$.nodes.a.need"),
+    ({"document": {"name": "x"}, "nodes": {"a": {"need": True}}}, "$.nodes.a.need"),
+    ({"document": {"name": "x"}, "nodes": {"a": {"choice": 1}}}, "$.nodes.a.choice"),
 ])
 def test_a_document_that_lies_is_refused_with_its_path(data, path):
     with pytest.raises(GraphFormatError) as caught:
@@ -91,8 +112,20 @@ def graphs(draw):
         if working in used_labels or (state is not None and state in (used_labels | {working})):
             working = state = None
         used_labels |= {x for x in (working, state) if x}
+        on = {p: tuple(draw(st.lists(st.sampled_from(NODE_CONCLUDED), min_size=1,
+                                     max_size=3, unique=True)))
+              for p in parents if draw(st.booleans())}
+        need = draw(st.integers(1, len(parents))) if parents and draw(st.booleans()) else None
         nodes.append(Node(name, parents=parents, working=working, state=state,
-                          optional=draw(st.booleans()), once=draw(st.booleans())))
+                          optional=draw(st.booleans()), once=draw(st.booleans()),
+                          on=on, need=need))
+    # A choice needs a branch: only nodes with children may be one.
+    with_children = {p for n in nodes for p in n.parents}
+    nodes = [Node(n.name, parents=n.parents, working=n.working, state=n.state,
+                  optional=n.optional and n.name not in with_children, once=n.once,
+                  on=n.on, need=n.need,
+                  choice=n.name in with_children and draw(st.booleans()))
+             for n in nodes]
     document = Document(draw(names), version=draw(names), namespace=draw(names))
     return Graph(document, tuple(nodes))
 
