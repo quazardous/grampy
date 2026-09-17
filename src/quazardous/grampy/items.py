@@ -78,8 +78,19 @@ class Adapter:
 
     # -- required ----------------------------------------------------------
 
-    def id_of(self, item: Any) -> Any:
-        """The subject id of this item — unique, stable, int or str."""
+    def id_of(self, candidate: Any) -> Any:
+        """The subject id of a candidate — unique, stable, int or str.
+
+        IT MAY ALREADY BE ONE. `inflate` runs first and hands on whatever it
+        chose to let through, so an application that works in ids, or that
+        mixes them with objects, writes this and nothing else:
+
+            def id_of(self, candidate):
+                return getattr(candidate, "id", candidate)
+
+        The other handlers below are asked about the DATA, so they only ever
+        see what `inflate` turned into an item.
+        """
         raise NotImplementedError
 
     # -- required only when a driver's query names the candidates -----------

@@ -311,3 +311,22 @@ def test_inflate_is_only_needed_when_a_query_names_the_candidates():
     fresh = Items(NodeJournal(SqliteDriver(conn), (Node("b"),)), NoLoad())
     with pytest.raises(NotImplementedError, match=r"NoLoad needs `inflate`"):
         fresh.claim("b", 10, candidates=Query("SELECT id FROM docs ORDER BY id"))
+
+
+def test_an_adapter_may_be_one_tolerant_method():
+    """An application that works in ids — or mixes them with objects —
+    writes `id_of` and nothing else: `inflate` lets everything through."""
+
+    @dataclass
+    class Doc:
+        id: int
+
+    class DocsAdapter(Adapter):
+        def id_of(self, candidate):
+            return getattr(candidate, "id", candidate)
+
+    items = Items(NodeJournal(MemoryDriver(), (Node("a"), Node("b"))), DocsAdapter())
+    assert sorted(items.claim("a", 10, candidates=[1, 2])) == [1, 2]
+    assert [d.id for d in items.claim("b", 10, candidates=[Doc(1), Doc(2)])] == [1, 2]
+    mixed = items.claim("a", 10, candidates=[3, Doc(4)])
+    assert [getattr(x, "id", x) for x in mixed] == [3, 4]

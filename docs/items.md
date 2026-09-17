@@ -14,12 +14,23 @@ never imports it, and never calls a handler.
 
 ## The adapter
 
-One method is yours to write — `id_of`. `inflate` is handed the batch
-exactly as the caller passed it, and gives items back: the default lets
-everything through, so an application that only ever passes its own objects
-writes nothing. Override it and **you** decide what is an id and what is
-already an item — the layer never guesses. The rest have answers that suit
-an application with nothing special to say.
+One method is yours to write — `id_of` — and it takes a candidate, which
+may already be an id:
+
+```python
+def id_of(self, candidate):
+    return getattr(candidate, "id", candidate)
+```
+
+`inflate` is handed the batch exactly as the caller passed it and gives
+items back. The default lets everything through, so an application that
+passes its own objects — or that works in ids and writes only the `id_of`
+above — adds nothing. Override it and **you** decide what is an id and what
+is already an item; the layer never guesses.
+
+The handlers after that are asked about the **data**, so they only ever see
+what `inflate` turned into an item. The rest have answers that suit an
+application with nothing special to say.
 
 ```python
 from quazardous.grampy.items import Adapter, Items
