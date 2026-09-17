@@ -1,6 +1,7 @@
 """TIME, AS THE JOURNAL WRITES IT — durations, instants, and retry delays.
 
-    seconds      "90", "30s", "10m", "2h", "7d" or a number → seconds
+    seconds      "90", "30s", "10m", "2h", "7d", a number or a timedelta
+    canonical    a timedelta as the text a graph stores ("5m")
     shift        an ISO instant moved by a number of seconds, same format
     Retry        a declared retry policy: how many times, how long to wait
     Rate         a rate limit band: so many per period, with a burst
@@ -22,6 +23,7 @@ import random
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 _DURATION = re.compile(r"\s*(\d+(?:\.\d+)?)\s*([smhd]?)\s*")
 _UNIT = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
@@ -30,10 +32,31 @@ _UNIT = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
 BACKOFFS = ("constant", "linear", "exponential")
 
 
-def seconds(duration: float | int | str) -> float:
-    """A duration in seconds: a number, or text with a unit (s, m, h, d)."""
+def canonical(duration: Any) -> Any:
+    """A `timedelta` as the text form durations are STORED in; anything else
+    unchanged.
+
+    `timedelta` is how Python says a duration, and it is accepted wherever a
+    duration is. It is not how a duration is WRITTEN DOWN: a graph goes to
+    JSON, which has no timedelta, and `"30s"` reads better than `30.0` in a
+    stored document. So it is normalised at the door, once.
+    """
+    if not isinstance(duration, timedelta):
+        return duration
+    total = duration.total_seconds()
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if total and total % size == 0:
+            return f"{int(total // size)}{unit}"
+    return f"{int(total)}s" if total == int(total) else f"{total}s"
+
+
+def seconds(duration: float | int | str | timedelta) -> float:
+    """A duration in seconds: a number, a `timedelta`, or text with a unit
+    (s, m, h, d)."""
     if isinstance(duration, bool):
         raise ValueError(f"not a duration: {duration!r}")
+    if isinstance(duration, timedelta):
+        duration = duration.total_seconds()
     if isinstance(duration, (int, float)):
         value = float(duration)
     else:
@@ -74,6 +97,8 @@ class Retry:
     jitter: float = 0.0
 
     def __post_init__(self) -> None:
+        for name in ("delay", "max_delay"):
+            object.__setattr__(self, name, canonical(getattr(self, name)))
         if self.limit < 1:
             raise ValueError(f"a retry needs limit >= 1, got {self.limit}")
         if self.backoff not in BACKOFFS:
@@ -113,6 +138,7 @@ class Rate:
     burst: int | None = None
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "period", canonical(self.period))
         if self.limit < 1:
             raise ValueError(f"a rate needs limit >= 1, got {self.limit}")
         if seconds(self.period) <= 0:

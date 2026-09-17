@@ -56,6 +56,18 @@ from .dag import NODE_DONE, NODE_FAILED, NODE_SKIPPED, node
 from .journal import Lease, NodeJournal
 
 
+def _are_items(candidates: Any) -> bool:
+    """Your objects, rather than something a driver reads itself.
+
+    Anything iterable is yours — a list, a tuple, a generator. A driver's
+    query is not: a SQLAlchemy statement is not iterable, and grampy's
+    `Query` is a named tuple, so it is told apart by the `sql` it carries.
+    """
+    if isinstance(candidates, (str, bytes)) or hasattr(candidates, "sql"):
+        return False
+    return isinstance(candidates, Iterable)
+
+
 class Adapter:
     """HOW GRAMPY HOOKS ONTO ONE OF YOUR OBJECTS.
 
@@ -149,21 +161,24 @@ class Items:
     def claim(self, name: str, limit: int, *, candidates: Any) -> ItemLease:
         """Take up to `limit` candidates and HAND BACK THE OBJECTS.
 
-        `candidates` ARE ITEMS TOO — a list or a tuple of your own objects,
-        which is the point of this layer: nothing here asks you to hold ids.
-        Their ids are read with `id_of`, and the objects are reused, so a
-        batch you already loaded is not loaded twice.
+        `candidates` ARE ITEMS TOO — any iterable of your own objects, list,
+        tuple or generator: nothing here asks you to hold ids. Their ids are
+        read with `id_of`, and the objects are reused, so a batch you already
+        loaded is not loaded twice.
 
-        Anything else — a driver's own query, read inside the claim's
-        transaction, which is what keeps a hot path atomic — is handed to the
-        journal untouched, and the lease is loaded with `load`.
+        A DRIVER'S OWN QUERY is handed to the journal untouched, and the lease
+        is loaded with `load`. That is the one place ids are unavoidable —
+        the storage produces the candidates, and it has no Python objects to
+        give. It buys something a list cannot: the driver may filter and page
+        in the database, so a claim of ten out of a large backlog never ships
+        the backlog to Python.
 
         The items this node does not apply to are concluded `skipped` in the
         same call and left out of the lease, so what comes back is what there
         is work to do on.
         """
         given: dict[Any, Any] = {}
-        if isinstance(candidates, (list, tuple)):
+        if _are_items(candidates):
             given = {self.adapter.id_of(i): i for i in candidates}
             candidates = list(given)
         lease = self.journal.claim(name, limit, candidates=candidates)

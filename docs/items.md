@@ -46,16 +46,27 @@ for brick in lease:                                       # …and bricks out
 items.conclude("sort", lease)          # the token travels with the lease
 ```
 
-**Nothing here asks you to hold ids.** Candidates are your objects too: a
-list or tuple of them, whose ids are read with `id_of`. They are reused as
-they are, so a batch you already loaded is never loaded twice.
+**Nothing here asks you to hold ids.** Candidates are your objects too —
+any iterable of them, list, tuple or generator — and their ids are read with
+`id_of`. They are reused as they are, so a batch you already loaded is never
+loaded twice.
 
-Anything else is handed to the journal untouched — a driver's own query,
-read *inside* the claim's transaction, which is what keeps a hot path
-atomic. Then the layer loads the lease in **one** call to `load`, and ids
-nothing loaded for — a row deleted meanwhile — come back as
-`lease.missing` rather than disappearing quietly, the rest of the lease
-still concluding.
+A **driver's query** is handed to the journal untouched. That is the one
+place ids are unavoidable: the storage produces the candidate set, and it
+has no Python objects to give. The layer then loads the lease in **one**
+call to `load`, and ids nothing loaded for — a row deleted meanwhile — come
+back as `lease.missing` rather than disappearing quietly, the rest of the
+lease still concluding.
+
+What a query buys, and it is not small: the **PostgreSQL** driver filters
+and pages *in the database*, so it never ships candidates it will not use.
+Claiming 10 from a backlog of 100,000 rows, half of them already done,
+brings back **210 rows** — the rest is never sent. A list cannot do that:
+you have to build it first.
+
+The SQLite driver reads its candidate set at once, on purpose — its cursor
+cannot stay open while the same connection writes the claim — so there the
+query saves the loading, not the reading.
 
 `conclude` takes `token=` when the lease did not travel with the work: a
 worker that took its job off a queue and holds only the proof.

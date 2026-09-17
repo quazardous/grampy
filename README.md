@@ -33,13 +33,13 @@ DAG = (
 )
 check_dag(DAG)
 
-class Docs(Adapter):                       # how grampy reads YOUR object
+class DocsAdapter(Adapter):                       # how grampy reads YOUR object
     def id_of(self, doc):  return doc.id
     def load(self, ids):   return [LIBRARY[i] for i in ids]
     def applies(self, doc, node):          # one graph, subjects that differ
         return node != "crop" or doc.scanned
 
-items = Items(NodeJournal(MemoryDriver(), DAG), Docs())
+items = Items(NodeJournal(MemoryDriver(), DAG), DocsAdapter())
 lease = items.claim("fetch", 10, candidates=my_loader())    # objects in…
 for doc in lease:                                           # …and objects out
     ...

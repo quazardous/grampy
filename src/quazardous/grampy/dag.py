@@ -37,7 +37,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-from .timing import Rate, Retry, seconds
+from .timing import Rate, Retry, canonical, seconds
 
 
 class DagError(ValueError):
@@ -141,6 +141,10 @@ class Lane:
     delay: float | int | str | None = None
     max_wait: float | int | str | None = None
     while_running: str = "queue"
+
+    def __post_init__(self) -> None:
+        for name in ("cooldown", "delay", "max_wait"):
+            object.__setattr__(self, name, canonical(getattr(self, name)))
 
     @classmethod
     def throttle(cls, cooldown: float | int | str,
@@ -253,6 +257,8 @@ class Node:
     lane: Lane | None = None
 
     def __post_init__(self) -> None:
+        for name in ("lease", "timeout", "grace"):
+            object.__setattr__(self, name, canonical(getattr(self, name)))
         object.__setattr__(self, "parents", tuple(self.parents))
         object.__setattr__(self, "rate", tuple(self.rate))
         object.__setattr__(self, "on", _Frozen(

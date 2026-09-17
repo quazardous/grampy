@@ -25,6 +25,9 @@ imported as `from quazardous import grampy`.
 
 ### Added
 
+- Say a duration the way Python says one: `lease=timedelta(minutes=2)`
+  works wherever `"2m"` did, and is written down in the same short text
+  form, so a stored graph still reads well and still round-trips to JSON.
 - Hand grampy your own objects instead of ids: an adapter says how to read
   one, and handlers answer the questions that need the data — which branch a
   choice takes, whether an optional step is for this item at all. A claim

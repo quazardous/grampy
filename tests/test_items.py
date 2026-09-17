@@ -78,11 +78,31 @@ def test_candidates_are_items_too_and_are_not_loaded_twice(world):
     assert lease.token, "the lease still carries its proof"
 
 
-def test_an_opaque_query_is_handed_to_the_journal_and_the_lease_is_loaded(world):
-    """A hot path keeps its driver query, read inside the claim's
-    transaction; then the layer loads the batch, in one call."""
+def test_a_generator_of_items_works_like_a_list(world):
+    """Any iterable of YOUR objects is items — nothing forces a list."""
     bricks, adapter, items = world
-    lease = items.claim("scan", 10, candidates=(i for i in (1, 2, 3)))
+    lease = items.claim("scan", 10, candidates=(b for b in bricks))
+    assert [b.id for b in lease] == [1, 2, 3]
+    assert adapter.calls == [f"applies({i},scan)" for i in (1, 2, 3)], "no load"
+
+
+def test_a_driver_query_is_handed_over_untouched_and_the_lease_is_loaded():
+    """The one place ids are unavoidable: the storage itself produces the
+    candidates, so the layer loads the lease afterwards, in one call."""
+    import sqlite3
+
+    from quazardous.grampy.drivers.sqlite import Query, SqliteDriver, schema
+
+    conn = sqlite3.connect(":memory:")
+    for statement in schema():
+        conn.execute(statement)
+    conn.execute("CREATE TABLE docs (id INTEGER PRIMARY KEY)")
+    conn.executemany("INSERT INTO docs VALUES (?)", [(1,), (2,), (3,)])
+
+    bricks = [Brick(1), Brick(2), Brick(3)]
+    adapter = Bricks(bricks)
+    items = Items(NodeJournal(SqliteDriver(conn), GRAPH), adapter)
+    lease = items.claim("scan", 10, candidates=Query("SELECT id FROM docs ORDER BY id"))
     assert [b.id for b in lease] == [1, 2, 3]
     assert adapter.calls.count("load([1, 2, 3])") == 1, "one query for the batch"
 
@@ -129,9 +149,19 @@ def test_the_policy_and_the_ref_are_read_from_the_item(world):
 def test_an_item_that_no_longer_loads_does_not_lose_the_claim(world):
     """On the query path, a row deleted between the claim and the load is
     named rather than dropped, and the rest of the lease still concludes."""
-    bricks, adapter, items = world
+    import sqlite3
+
+    from quazardous.grampy.drivers.sqlite import Query, SqliteDriver, schema
+
+    conn = sqlite3.connect(":memory:")
+    for statement in schema():
+        conn.execute(statement)
+    conn.execute("CREATE TABLE docs (id INTEGER PRIMARY KEY)")
+    conn.executemany("INSERT INTO docs VALUES (?)", [(1,), (2,), (3,)])
+    bricks, adapter, _ = world
+    items = Items(NodeJournal(SqliteDriver(conn), GRAPH), adapter)
     del adapter.bricks[2]
-    lease = items.claim("scan", 10, candidates=(i for i in (1, 2, 3)))
+    lease = items.claim("scan", 10, candidates=Query("SELECT id FROM docs ORDER BY id"))
     assert [b.id for b in lease] == [1, 3]
     assert lease.missing == (2,), "named, not silently dropped"
     assert items.conclude("scan", lease) == 2, "the others still conclude"
@@ -160,3 +190,28 @@ def test_the_handlers_have_answers_for_an_application_with_nothing_to_say():
     assert sorted(lease) == ["x", "y"]
     assert items.conclude("a", lease) == 2
     assert items.progress("x") == {"a": NODE_DONE}
+
+
+def test_a_duration_may_be_a_timedelta():
+    """`timedelta` is how Python says a duration; it is stored as the short
+    text a graph round-trips to JSON."""
+    from datetime import timedelta
+
+    from quazardous.grampy import Graph
+    from quazardous.grampy.timing import Rate, Retry
+
+    graph = Graph(Document("t"), (
+        Node("a", lease=timedelta(minutes=2),
+             retry=Retry(3, timedelta(seconds=10), max_delay=timedelta(minutes=5)),
+             rate=(Rate(100, timedelta(minutes=1)),)),
+        Node("b", parents=("a",), wait="x", timeout=timedelta(days=7)),
+        Node("c", parents=("b",), optional=True, grace=timedelta(seconds=30)),
+    ))
+    assert graph.nodes[0].lease == "2m"
+    assert graph.nodes[0].retry.delay == "10s"
+    assert graph.nodes[0].retry.max_delay == "5m"
+    assert graph.nodes[0].rate[0].period == "1m"
+    assert graph.nodes[1].timeout == "7d"
+    assert graph.nodes[2].grace == "30s"
+    written = graph.to_json()
+    assert Graph.from_json(written).to_json() == written, "still round-trips"
