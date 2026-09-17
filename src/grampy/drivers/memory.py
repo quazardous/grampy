@@ -6,15 +6,22 @@ read like the rule, not to be fast.
 
 `candidates` is an ordered iterable of subjects: the order is the
 priority, the first ones are taken first.
+
+ONE LOCK, AND EVERY CALL HOLDS IT. That is what makes `forget` — delete
+and raise the revision — a single step for a claim running in another
+thread: the claim either read before, and its revision no longer matches,
+or after, and it saw no parent.
 """
 from __future__ import annotations
 
 import threading
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 from ..dag import NODE_DONE, NODE_RUNNING, NODE_SATISFYING, NODE_SKIPPED
+from ..journal import Entry
 
 
 @dataclass
@@ -27,44 +34,40 @@ class Row:
 
 
 class MemoryDriver:
-    """`(subject, node) → Row`. A lock makes each call atomic across threads."""
+    """`(subject, node) → Row`, `subject → revision`. A lock makes each call
+    atomic across threads."""
 
     def __init__(self) -> None:
         self.rows: dict[tuple[Any, str], Row] = {}
+        self.revisions: dict[Any, int] = {}
         self._lock = threading.RLock()
 
     # -- write -------------------------------------------------------------
 
-    def claim(self, name: str, *, parents: tuple[str, ...],
-              after: tuple[str, ...], candidates: Any, limit: int,
-              require_parents: bool, now: str) -> list[Any]:
+    def scan(self, candidates: Any, *, name: str, nodes: tuple[str, ...],
+             parents: tuple[str, ...], page: int) -> Iterator[list[Entry]]:
+        """No pre-filter: every candidate is read, the journal decides."""
+        subjects = list(candidates)
+        for start in range(0, len(subjects), page):
+            with self._lock:
+                yield [Entry(subject, self.revisions.get(subject, 0),
+                             {n: self.rows[(subject, n)].status for n in nodes
+                              if (subject, n) in self.rows})
+                       for subject in subjects[start:start + page]]
+
+    def insert_if_unchanged(self, name: str, entries: list[tuple[Any, int]], *,
+                            status: str, now: str) -> list[Any]:
         taken: list[Any] = []
         with self._lock:
-            for subject in candidates:
-                if len(taken) >= limit:
-                    break
+            for subject, revision in entries:
                 if (subject, name) in self.rows:
                     continue
-                if any((subject, later) in self.rows for later in after):
+                if self.revisions.get(subject, 0) != revision:
                     continue
-                if require_parents and not self.parents_concluded(parents, subject):
-                    continue
-                self.rows[(subject, name)] = Row(NODE_RUNNING, now)
+                self.rows[(subject, name)] = Row(
+                    status, now, now if status == NODE_SKIPPED else None)
                 taken.append(subject)
         return taken
-
-    def skip(self, name: str, *, parents: tuple[str, ...], candidates: Any,
-             now: str) -> int:
-        count = 0
-        with self._lock:
-            for subject in candidates:
-                if (subject, name) in self.rows:
-                    continue
-                if not self.parents_concluded(parents, subject):
-                    continue
-                self.rows[(subject, name)] = Row(NODE_SKIPPED, now, now)
-                count += 1
-        return count
 
     def conclude(self, name: str, subjects: list[Any], *, status: str,
                  now: str) -> int:
@@ -90,6 +93,8 @@ class MemoryDriver:
 
     def forget(self, name: str, subjects: list[Any]) -> int:
         with self._lock:
+            for subject in subjects:
+                self.revisions[subject] = self.revisions.get(subject, 0) + 1
             return sum(1 for subject in subjects
                        if self.rows.pop((subject, name), None) is not None)
 

@@ -1,16 +1,20 @@
-"""THE POSTGRESQL DRIVER — node rows in a table the application declares.
+"""THE POSTGRESQL DRIVER — node rows in tables the application declares.
 
-    PostgresDriver(execute, table, subject="request_id")
+    PostgresDriver(execute, table, revisions, subject="request_id")
 
 ────────────────────────────────────────────────────────────────────────
-THE TABLE IS INJECTED
+THE TABLES ARE INJECTED
 ────────────────────────────────────────────────────────────────────────
 
 The application owns its schema and its migrations; this driver owns
-none. It needs a `sqlalchemy.Table` with a subject column (named by
-`subject`) and four columns: `node`, `status`, `started_at`,
-`finished_at` — all text, `(subject, node)` as primary key. Timestamps
-are ISO-8601 text, compared lexically.
+none. It needs two `sqlalchemy.Table`s sharing a subject column (named by
+`subject`):
+
+    table       node rows: `node`, `status`, `started_at`, `finished_at` —
+                all text, `(subject, node)` as primary key. Timestamps are
+                ISO-8601 text, compared lexically.
+    revisions   one row per subject: `revision`, an integer, the subject as
+                primary key. Rows are created on demand.
 
 ────────────────────────────────────────────────────────────────────────
 THE CONNECTION IS INJECTED TOO, AS AN `execute`
@@ -23,27 +27,38 @@ executing through its own driver compiles first. The driver never
 commits.
 
 ────────────────────────────────────────────────────────────────────────
-THE INSERT IS THE LOCK
+HOW THIS DRIVER KEEPS `insert_if_unchanged` HONEST
 ────────────────────────────────────────────────────────────────────────
 
-A claim is ONE `INSERT … SELECT … ON CONFLICT DO NOTHING RETURNING`.
-Two workers aiming at the same subject: the second conflicts, `DO
-NOTHING` drops it, `RETURNING` gives it nothing. There is no read, so no
-window between reading and writing.
+What follows is PostgreSQL's business, not grampy's: the guarantee is the
+journal's, this is one way to hold it.
 
-`candidates` is an opaque `SELECT` whose FIRST column is the subject,
-its `ORDER BY` being the priority; it is nested as subquery `c`.
+Under READ COMMITTED an `INSERT … SELECT` reads a snapshot and never
+looks again: a parent deleted by a transaction committing meanwhile goes
+unnoticed. The shared concurrency test caught exactly that — a child
+running with its parent forgotten. Only a row the statement LOCKS is
+re-read at its latest version. So:
+
+    forget   raises the subject's revision FIRST — an `UPDATE`, whose row
+             lock is held until the transaction ends — then deletes, in a
+             second statement that sees everything committed before it.
+    insert   locks the revision rows `FOR SHARE`, in the statement that
+             inserts, and keeps only those whose revision is still the one
+             read. A claim meeting a forget in flight waits for it, then
+             finds the revision raised and inserts nothing.
+
+Subjects are written in sorted order, so that two transactions touching
+the same subjects take their locks in the same order.
 
 ────────────────────────────────────────────────────────────────────────
 THE PRIORITY SURVIVES THE NESTING, BECAUSE IT IS MADE A COLUMN
 ────────────────────────────────────────────────────────────────────────
 
-SQL does not promise that a subquery's `ORDER BY` still holds once the
-outer query filters and limits it: the planner is free to take any
-`limit` rows. The contract caught exactly that — `["b", "a", "c"]` with
-a limit of two returned `["a", "c"]`. The candidates' ordering is
-therefore turned into a `row_number()` column, and the OUTER query
-orders and limits by it.
+`candidates` is an opaque `SELECT` whose FIRST column is the subject, its
+`ORDER BY` being the priority. SQL does not promise that a subquery's
+`ORDER BY` still holds once the outer query filters and limits it, so the
+ordering is turned into a `row_number()` column: pages are read in that
+order, each one after the last rank seen.
 
 COUNTS COME FROM `RETURNING`, NOT `rowcount`: SQLAlchemy reports `-1`
 for a Core `INSERT` on some execution paths, and a count that silently
@@ -51,16 +66,19 @@ reads `-1` would pass for "nothing done".
 """
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from ..dag import NODE_DONE, NODE_RUNNING, NODE_SATISFYING, NODE_SKIPPED
+from ..journal import Entry
 
-#: THE COLUMNS THE TABLE MUST CARRY, besides the subject.
+#: THE COLUMNS THE NODE TABLE MUST CARRY, besides the subject.
 REQUIRED_COLUMNS = ("node", "status", "started_at", "finished_at")
+#: THE COLUMNS THE REVISIONS TABLE MUST CARRY, besides the subject.
+REVISION_COLUMNS = ("revision",)
 
 
 def _ranked(candidates: Any) -> Any:
@@ -76,7 +94,7 @@ def _ranked(candidates: Any) -> Any:
             "SQLAlchemy no longer exposes `Select._order_by_clauses`: the "
             "candidates' priority cannot be carried into the claim")
     rank = (sa.func.row_number().over(order_by=list(order)) if order
-            else sa.literal(0))
+            else sa.func.row_number().over())
     return candidates.order_by(None).add_columns(rank.label("grampy_rank")).subquery("c")
 
 
@@ -87,64 +105,92 @@ def _epoch(moment: Any) -> Any:
 
 
 class PostgresDriver:
-    """Node rows in `table`, written with SQLAlchemy Core."""
+    """Node rows in `table`, revisions in `revisions`, written with
+    SQLAlchemy Core."""
 
-    def __init__(self, execute: Callable[[Any], Any], table: sa.Table, *,
-                 subject: str = "request_id") -> None:
-        missing = [c for c in (subject, *REQUIRED_COLUMNS) if c not in table.c]
-        if missing:
-            raise ValueError(
-                f"table {table.name!r} lacks the column(s) {missing} — a node "
-                f"table needs {subject!r} and {', '.join(REQUIRED_COLUMNS)}")
+    def __init__(self, execute: Callable[[Any], Any], table: sa.Table,
+                 revisions: sa.Table, *, subject: str = "request_id") -> None:
+        for t, needed in ((table, REQUIRED_COLUMNS), (revisions, REVISION_COLUMNS)):
+            missing = [c for c in (subject, *needed) if c not in t.c]
+            if missing:
+                raise ValueError(
+                    f"table {t.name!r} lacks the column(s) {missing} — it needs "
+                    f"{subject!r} and {', '.join(needed)}")
         self._execute = execute
         self.table = table
+        self.revisions = revisions
         self._subject = table.c[subject]
+        self._rev_subject = revisions.c[subject]
 
     # -- write -------------------------------------------------------------
 
-    def claim(self, name: str, *, parents: tuple[str, ...],
-              after: tuple[str, ...], candidates: Any, limit: int,
-              require_parents: bool, now: str) -> list[Any]:
-        t = self.table
+    def scan(self, candidates: Any, *, name: str, nodes: tuple[str, ...],
+             parents: tuple[str, ...], page: int) -> Iterator[list[Entry]]:
+        """Pre-filters in SQL what cannot be taken — a row for `name`, a
+        parent not concluded — so that a page is mostly takable."""
+        t, r = self.table, self.revisions
         c = _ranked(candidates)
         candidate = list(c.c)[0]
         held = t.alias("d")
-        started = t.alias("a")
-        chosen = (
-            sa.select(candidate, sa.literal(name), sa.literal(NODE_RUNNING),
-                      sa.literal(now))
+        query = (
+            sa.select(candidate, c.c.grampy_rank,
+                      sa.func.coalesce(r.c.revision, 0))
+            .select_from(c.outerjoin(r, self._rev_subject == candidate))
             .where(~sa.exists().where(held.c[self._subject.key] == candidate,
-                                      held.c.node == name),
-                   ~sa.exists().where(started.c[self._subject.key] == candidate,
-                                      started.c.node.in_(list(after)))))
-        if require_parents:
-            chosen = chosen.where(self.parents_concluded(parents, candidate))
+                                      held.c.node == name))
+            .order_by(c.c.grampy_rank)
+            .limit(int(page)))
+        if parents:
+            query = query.where(self.parents_concluded(parents, candidate))
+        last = None
+        while True:
+            paged = query if last is None else query.where(c.c.grampy_rank > last)
+            found = self._execute(paged).fetchall()
+            if not found:
+                return
+            last = found[-1][1]
+            rows: dict[Any, dict[str, str]] = {f[0]: {} for f in found}
+            for subject, n, status in self._execute(
+                    sa.select(self._subject, t.c.node, t.c.status)
+                    .where(self._subject.in_(list(rows)),
+                           t.c.node.in_(list(nodes)))).fetchall():
+                rows[subject][n] = status
+            yield [Entry(f[0], int(f[2]), rows[f[0]]) for f in found]
+            if len(found) < page:
+                return
+
+    def insert_if_unchanged(self, name: str, entries: list[tuple[Any, int]], *,
+                            status: str, now: str) -> list[Any]:
+        if not entries:
+            return []
+        t, r = self.table, self.revisions
+        entries = sorted(entries, key=lambda e: e[0])
+        self._execute(
+            postgresql.insert(r)
+            .values([{self._rev_subject.key: s, "revision": 0} for s, _ in entries])
+            .on_conflict_do_nothing())
+        read = sa.values(sa.column("subject", self._subject.type),
+                         sa.column("revision", sa.Integer),
+                         name="read").data(entries)
+        unchanged = (
+            sa.select(self._rev_subject)
+            .join(read, sa.and_(self._rev_subject == read.c.subject,
+                                r.c.revision == read.c.revision))
+            .with_for_update(read=True, of=r)
+            .cte("unchanged"))
+        columns = [self._subject.key, "node", "status", "started_at"]
+        values = [unchanged.c[self._rev_subject.key], sa.literal(name),
+                  sa.literal(status), sa.literal(now)]
+        if status == NODE_SKIPPED:
+            columns.append("finished_at")
+            values.append(sa.literal(now))
         rows = self._execute(
             postgresql.insert(t)
-            .from_select([self._subject.key, "node", "status", "started_at"],
-                         chosen.order_by(c.c.grampy_rank).limit(int(limit)))
+            .from_select(columns, sa.select(*values)
+                         .order_by(unchanged.c[self._rev_subject.key]))
             .on_conflict_do_nothing()
             .returning(self._subject)).fetchall()
-        return [r[0] for r in rows]
-
-    def skip(self, name: str, *, parents: tuple[str, ...], candidates: Any,
-             now: str) -> int:
-        t = self.table
-        c = candidates.subquery("c")
-        candidate = list(c.c)[0]
-        held = t.alias("d")
-        cur = self._execute(
-            postgresql.insert(t)
-            .from_select(
-                [self._subject.key, "node", "status", "started_at", "finished_at"],
-                sa.select(candidate, sa.literal(name), sa.literal(NODE_SKIPPED),
-                          sa.literal(now), sa.literal(now))
-                .where(~sa.exists().where(held.c[self._subject.key] == candidate,
-                                          held.c.node == name),
-                       self.parents_concluded(parents, candidate)))
-            .on_conflict_do_nothing()
-            .returning(self._subject))
-        return len(cur.fetchall())
+        return [row[0] for row in rows]
 
     def conclude(self, name: str, subjects: list[Any], *, status: str,
                  now: str) -> int:
@@ -166,9 +212,16 @@ class PostgresDriver:
         return len(cur.fetchall())
 
     def forget(self, name: str, subjects: list[Any]) -> int:
-        t = self.table
+        """Revision first, deletion second — two statements, see the module."""
+        t, r = self.table, self.revisions
+        subjects = sorted(subjects)
+        raise_revision = postgresql.insert(r).values(
+            [{self._rev_subject.key: s, "revision": 1} for s in subjects])
+        self._execute(raise_revision.on_conflict_do_update(
+            index_elements=[self._rev_subject.key],
+            set_={"revision": r.c.revision + 1}))
         cur = self._execute(
-            sa.delete(t).where(t.c.node == name, self._subject.in_(list(subjects))))
+            sa.delete(t).where(t.c.node == name, self._subject.in_(subjects)))
         return cur.rowcount
 
     def release(self, name: str, *, older_than: str) -> int:

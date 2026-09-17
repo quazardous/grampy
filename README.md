@@ -1,6 +1,7 @@
 # grampy
 
-A small workflow graph for work queues that already live in a database.
+A small workflow graph for work queues that already live in a storage —
+a database, a key-value store, or plain memory: the storage is a driver.
 
 You declare a DAG of nodes. Each *subject* (a job, a request, a file…)
 goes through the nodes; a **node journal** records, per subject and per
@@ -35,8 +36,8 @@ journal.claim("crop", 10, candidates=["s1", "s2"])    # ['s1'] — s2 still fetc
 | `grampy.states` | derived from the graph: `replay_targets`, `replayed_after`, `to_undo`, `source_state`, `allowed_transitions` |
 | `grampy.journal` | `NodeJournal` — the logic (validation, rule inputs, clock) over a `JournalDriver` protocol |
 | `grampy.drivers.memory` | dict-based, deterministic, no dependency — the reference driver |
-| `grampy.drivers.postgres` | SQLAlchemy Core on a table **you** declare; a claim is one `INSERT … SELECT … ON CONFLICT DO NOTHING RETURNING` |
-| `grampy.testing` | `JournalContract`, the test suite every driver must pass |
+| `grampy.drivers.postgres` | SQLAlchemy Core on tables **you** declare; candidates read page by page, rows inserted only if the subject's revision is unchanged |
+| `grampy.testing` | `JournalContract`, the test suite every driver must pass — concurrency included |
 
 ## The rules
 
@@ -47,6 +48,11 @@ journal.claim("crop", 10, candidates=["s1", "s2"])    # ['s1'] — s2 still fetc
 - Only an **optional** node can be `skip`ped, and only when it is itself
   claimable (its parents concluded).
 - `adopt` records work done outside the journal and never overwrites.
+- **The journal decides, the driver stores.** A claim reads the candidates'
+  rows, applies the rule in Python, and writes only if nothing was
+  forgotten in between: every subject carries a revision that `forget`
+  raises. Two workers never hold the same node, and a node is never taken
+  on the strength of a parent forgotten meanwhile.
 - `Node.working` / `Node.state` are **projections** an application may
   mirror on its subjects; nothing in grampy reads them to decide. They
   are what `allowed_transitions` and the replay helpers are derived from.
@@ -57,8 +63,7 @@ The journal never commits and never reads the application's tables.
 Eligibility ("not finished, by priority") is passed to `claim` as opaque
 **candidates** in the driver's own terms: an ordered iterable for the
 memory driver, a `SELECT` whose first column is the subject for postgres.
-That keeps the claim atomic across the node rows and the application's
-own filter.
+Its order is the priority.
 
 ```python
 import sqlalchemy as sa
@@ -70,15 +75,20 @@ nodes = sa.Table("job_nodes", metadata,
     sa.Column("status", sa.Text, nullable=False),
     sa.Column("started_at", sa.Text, nullable=False),
     sa.Column("finished_at", sa.Text))
+revisions = sa.Table("job_revisions", metadata,
+    sa.Column("job_id", sa.Text, primary_key=True),
+    sa.Column("revision", sa.Integer, nullable=False))
 
-journal = NodeJournal(PostgresDriver(conn.execute, nodes, subject="job_id"), DAG)
+journal = NodeJournal(PostgresDriver(conn.execute, nodes, revisions, subject="job_id"), DAG)
 eligible = sa.select(jobs.c.job_id).where(jobs.c.state != "done").order_by(jobs.c.priority)
 journal.claim("fetch", 50, candidates=eligible)
 ```
 
-Writing a driver: implement `grampy.journal.JournalDriver` and subclass
-`grampy.testing.JournalContract` with a harness fixture — see
-`tests/test_memory_driver.py`.
+Writing a driver: implement `grampy.journal.JournalDriver` — a few storage
+operations, no rule — and subclass `grampy.testing.JournalContract` with a
+harness fixture, see `tests/test_memory_driver.py`. The contract includes
+concurrency tests written in sessions (open, act, commit): how your storage
+stays correct under them is up to it, the outcome is not.
 
 ## Tests
 

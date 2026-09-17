@@ -21,10 +21,16 @@ A harness provides:
     seed(journal, subject, progress)
                                  write rows directly, bypassing the API
     parents_concluded(journal, name, subject) -> bool
+    store(dag, clock)            SHARED storage for the concurrency tests:
+        .session()               opens a unit of work — `.journal`,
+                                 `.candidates(subjects)`, `.commit()`,
+                                 `.rollback()`; sessions may live in threads
+        .close()                 drops what the store created
 """
 from __future__ import annotations
 
 import itertools
+import threading
 from typing import Any
 
 import pytest
@@ -33,10 +39,12 @@ from .dag import (
     NODE_DONE,
     NODE_FAILED,
     NODE_RUNNING,
+    NODE_SATISFYING,
     NODE_SKIPPED,
     DagError,
     Node,
     claimable_nodes,
+    node,
 )
 
 #: A fork, a join, an optional branch — the diamond.
@@ -243,3 +251,152 @@ class JournalContract:
     def test_node_for_state_names_the_working_node(self, harness, journal):
         assert journal.node_for_state("lefting") == "left"
         assert journal.node_for_state("lefted") is None
+
+    # -- concurrency -----------------------------------------------------------
+    #
+    # SAID IN SESSIONS, NOT IN LOCKS. A session is one unit of work on shared
+    # storage: a transaction for a database, nothing at all for memory. The
+    # tests below only open, act, commit — whatever a driver uses to stay
+    # correct is its own business, and a driver that blocks where another
+    # does not passes the same test.
+
+    def test_a_claim_racing_a_forget_never_orphans_a_node(self, harness, clock):
+        """A requeue forgets `start` and everything after it, in one session;
+        a worker claims `left` meanwhile, from what it saw BEFORE the forget
+        committed. Whatever the order, `left` must not end up held while
+        `start`, its parent, is gone."""
+        store = harness.store(DIAMOND, clock)
+        try:
+            setup = store.session()
+            setup.journal.claim("start", 1, candidates=setup.candidates(["s1"]))
+            setup.journal.conclude("start", ["s1"])
+            setup.commit()
+
+            requeue = store.session()
+            worker = store.session()
+            for name in ("start", "left", "right", "end"):
+                requeue.journal.forget(name, ["s1"])
+
+            _race(lambda: worker.journal.claim(
+                      "left", 1, candidates=worker.candidates(["s1"])),
+                  worker.commit, requeue.commit)
+
+            _assert_no_orphan(store, ["s1"])
+        finally:
+            store.close()
+
+    def test_concurrent_claimers_never_take_a_subject_twice(self, harness, clock):
+        subjects = [f"s{i:02d}" for i in range(40)]
+        store = harness.store(DIAMOND, clock)
+        try:
+            taken: list[list[Any]] = [[] for _ in range(4)]
+
+            def work(i: int) -> None:
+                # Each worker walks the candidates in its own order, so that
+                # claimers collide on different subjects at different times.
+                order = subjects[i:] + subjects[:i] if i % 2 else subjects[::-1]
+                while True:
+                    session = store.session()
+                    got = session.journal.claim(
+                        "start", 7, candidates=session.candidates(order))
+                    session.commit()
+                    if not got:
+                        return
+                    taken[i].extend(got)
+
+            _run_threads([lambda i=i: work(i) for i in range(4)])
+
+            everyone = [s for batch in taken for s in batch]
+            assert sorted(everyone) == subjects, "each subject taken exactly once"
+        finally:
+            store.close()
+
+    def test_claims_and_requeues_interleaved_keep_every_parent(self, harness, clock):
+        """A small storm: workers claim and conclude along the diamond while
+        a janitor requeues subjects. At every commit, and at the end, no node
+        is held without its parents."""
+        subjects = [f"s{i}" for i in range(6)]
+        store = harness.store(DIAMOND, clock)
+        try:
+            def worker(names: tuple[str, ...]) -> None:
+                for _ in range(15):
+                    for name in names:
+                        session = store.session()
+                        got = session.journal.claim(
+                            name, 3, candidates=session.candidates(subjects))
+                        session.journal.conclude(name, got)
+                        session.commit()
+
+            def janitor() -> None:
+                for round_ in range(15):
+                    session = store.session()
+                    for name in ("start", "left", "right", "end"):
+                        session.journal.forget(name, subjects[round_ % 3::3])
+                    session.commit()
+
+            _run_threads([lambda: worker(("start", "left")),
+                          lambda: worker(("right", "end")),
+                          lambda: worker(("left", "end", "start")),
+                          janitor])
+
+            _assert_no_orphan(store, subjects)
+        finally:
+            store.close()
+
+
+def _race(claim: Any, commit_claim: Any, commit_other: Any) -> None:
+    """Run `claim` then `commit_claim` in a thread while the other session is
+    still open. If the thread is still busy after a moment — the driver made
+    it wait — commit the other session to let it through."""
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            claim()
+            commit_claim()
+        except BaseException as exc:  # pragma: no cover - reported below
+            errors.append(exc)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    thread.join(timeout=0.5)
+    commit_other()
+    thread.join(timeout=30)
+    assert not thread.is_alive(), "the claim never returned"
+    if errors:
+        raise errors[0]
+
+
+def _run_threads(targets: list[Any]) -> None:
+    errors: list[BaseException] = []
+
+    def guard(target: Any) -> None:
+        try:
+            target()
+        except BaseException as exc:  # pragma: no cover - reported below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=guard, args=(t,)) for t in targets]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=120)
+    assert not any(t.is_alive() for t in threads), "a thread never returned"
+    if errors:
+        raise errors[0]
+
+
+def _assert_no_orphan(store: Any, subjects: list[Any]) -> None:
+    """No row of a node while one of its parents is not `done` or `skipped`."""
+    session = store.session()
+    try:
+        for subject in subjects:
+            progress = session.journal.progress(subject)
+            for name in progress:
+                missing = [p for p in node(name, DIAMOND).parents
+                           if progress.get(p) not in NODE_SATISFYING]
+                assert not missing, (
+                    f"{subject}: {name} is {progress[name]} but its parent(s) "
+                    f"{missing} are {[progress.get(p) for p in missing]}")
+    finally:
+        session.rollback()

@@ -35,6 +35,13 @@ def node_table(metadata, name):
         sa.Column("finished_at", sa.Text))
 
 
+def revision_table(metadata, name):
+    return sa.Table(
+        name, metadata,
+        sa.Column("subject", sa.Text, primary_key=True),
+        sa.Column("revision", sa.Integer, nullable=False))
+
+
 def ordered_subjects(subjects):
     """An ordered `SELECT subject` over literal values."""
     if not subjects:
@@ -49,10 +56,13 @@ class PostgresHarness:
         self.conn = conn
 
     def journal(self, dag, clock):
-        table = node_table(sa.MetaData(), f"grampy_nodes_{next(_TABLES)}")
-        table.create(self.conn)
-        return NodeJournal(PostgresDriver(self.conn.execute, table, subject="subject"),
-                           dag, clock=clock)
+        metadata, n = sa.MetaData(), next(_TABLES)
+        table = node_table(metadata, f"grampy_nodes_{n}")
+        revisions = revision_table(metadata, f"grampy_revisions_{n}")
+        metadata.create_all(self.conn)
+        return NodeJournal(
+            PostgresDriver(self.conn.execute, table, revisions, subject="subject"),
+            dag, clock=clock)
 
     def candidates(self, subjects):
         return ordered_subjects(subjects)
@@ -68,10 +78,52 @@ class PostgresHarness:
         return bool(self.conn.execute(
             sa.select(journal.parents_concluded(name, subject))).scalar())
 
+    def store(self, dag, clock):
+        return PostgresStore(self.conn.engine, dag, clock)
+
+
+class PostgresStore:
+    """Tables COMMITTED on their own connection, so that sessions on other
+    connections see them; dropped at `close`."""
+
+    def __init__(self, engine, dag, clock):
+        self.engine, self.dag, self.clock = engine, dag, clock
+        self.metadata, n = sa.MetaData(), next(_TABLES)
+        self.table = node_table(self.metadata, f"grampy_shared_{n}")
+        self.revisions = revision_table(self.metadata, f"grampy_shared_revisions_{n}")
+        self.metadata.create_all(engine)
+
+    def session(self):
+        return PostgresSession(self)
+
+    def close(self):
+        self.metadata.drop_all(self.engine)
+
+
+class PostgresSession:
+    def __init__(self, store):
+        self.conn = store.engine.connect()
+        self.transaction = self.conn.begin()
+        self.journal = NodeJournal(
+            PostgresDriver(self.conn.execute, store.table, store.revisions,
+                           subject="subject"),
+            store.dag, clock=store.clock)
+
+    def candidates(self, subjects):
+        return ordered_subjects(subjects)
+
+    def commit(self):
+        self.transaction.commit()
+        self.conn.close()
+
+    def rollback(self):
+        self.transaction.rollback()
+        self.conn.close()
+
 
 @pytest.fixture(scope="module")
 def engine():
-    engine = sa.create_engine(DSN)
+    engine = sa.create_engine(DSN, pool_size=10, max_overflow=20)
     yield engine
     engine.dispose()
 
@@ -88,6 +140,16 @@ class TestPostgresDriver(JournalContract):
 
 
 def test_a_table_without_the_node_columns_is_refused():
-    table = sa.Table("bad", sa.MetaData(), sa.Column("subject", sa.Text))
+    metadata = sa.MetaData()
+    table = sa.Table("bad", metadata, sa.Column("subject", sa.Text))
+    revisions = revision_table(metadata, "revisions")
     with pytest.raises(ValueError, match="lacks the column"):
-        PostgresDriver(lambda statement: None, table, subject="subject")
+        PostgresDriver(lambda statement: None, table, revisions, subject="subject")
+
+
+def test_a_revisions_table_without_its_column_is_refused():
+    metadata = sa.MetaData()
+    table = node_table(metadata, "nodes")
+    revisions = sa.Table("bad", metadata, sa.Column("subject", sa.Text))
+    with pytest.raises(ValueError, match="lacks the column"):
+        PostgresDriver(lambda statement: None, table, revisions, subject="subject")

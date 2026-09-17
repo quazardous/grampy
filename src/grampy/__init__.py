@@ -1,4 +1,4 @@
-"""grampy — a small workflow graph for queues that already have a database.
+"""grampy — a small workflow graph for queues that already live in a storage.
 
     grampy.dag        the graph and the pure claim rule
     grampy.states     replays and allowed transitions, derived from the graph

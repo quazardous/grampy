@@ -24,11 +24,13 @@ checks it). The main consumer runs Python 3.10: no `match`/`case`, no
 
 ## Drivers follow the contract
 
-The claim rule lives in `grampy.dag`; drivers only store and claim
-atomically. A change to the journal or a driver must pass
-`grampy.testing.JournalContract` on the memory driver, and on PostgreSQL
-when `GRAMPY_TEST_PG_DSN` is set. Say explicitly when PostgreSQL was not
-run.
+The claim rule lives in the core (`grampy.dag`, applied by
+`grampy.journal`); drivers store rows and offer atomic operations, they
+never decide. No guarantee may depend on a storage-specific mechanism: it
+is defined in the driver protocol and proven by the shared contract,
+concurrency tests included. A change to the journal or a driver must pass
+`grampy.testing.JournalContract` on every driver — PostgreSQL when
+`GRAMPY_TEST_PG_DSN` is set. Say explicitly when PostgreSQL was not run.
 
 ## Changelog
 

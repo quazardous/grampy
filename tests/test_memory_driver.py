@@ -24,6 +24,37 @@ class MemoryHarness:
     def parents_concluded(self, journal, name, subject):
         return journal.parents_concluded(name, subject)
 
+    def store(self, dag, clock):
+        return MemoryStore(dag, clock)
+
+
+class MemoryStore:
+    """One driver shared by every session: memory has no transaction, each
+    call is atomic on its own and visible at once."""
+
+    def __init__(self, dag, clock):
+        self.driver, self.dag, self.clock = MemoryDriver(), dag, clock
+
+    def session(self):
+        return MemorySession(NodeJournal(self.driver, self.dag, clock=self.clock))
+
+    def close(self):
+        pass
+
+
+class MemorySession:
+    def __init__(self, journal):
+        self.journal = journal
+
+    def candidates(self, subjects):
+        return list(subjects)
+
+    def commit(self):
+        pass
+
+    def rollback(self):
+        pass
+
 
 class TestMemoryDriver(JournalContract):
     @pytest.fixture

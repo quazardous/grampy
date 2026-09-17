@@ -34,7 +34,8 @@ First release, planned as 0.1.0.
   progress — no storage needed.
 - Claim a node for a batch of subjects on behalf of remote workers, then
   conclude, fail or skip it; a subject is never handed out twice for the
-  same node.
+  same node, nor started on a parent another worker is forgetting at the
+  same moment.
 - Go back in a workflow: forget a node to run it again, list what must be
   undone when a subject returns to an earlier state, and find where a
   replay can start.
@@ -45,7 +46,9 @@ First release, planned as 0.1.0.
   declare.
 - In-memory driver with no dependency, deterministic and thread-safe, for
   tests and prototypes.
-- PostgreSQL driver (SQLAlchemy Core) working on a node table you declare,
-  with eligibility expressed as your own `SELECT`.
+- PostgreSQL driver (SQLAlchemy Core) working on two tables you declare —
+  node rows and one revision per subject — with eligibility expressed as
+  your own `SELECT`.
 - A shared contract test suite any new driver can subclass to prove it
-  behaves like the reference.
+  behaves like the reference, including concurrency tests: competing
+  claimers, and claims racing a requeue.

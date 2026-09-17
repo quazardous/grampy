@@ -53,9 +53,15 @@ to say why.
   it.
 - **Python 3.10 compatible.** No `match`/`case`, no 3.11+ syntax or
   standard-library additions.
-- **The rule lives in the graph, not in the drivers.** A driver stores
-  and atomically claims; what is claimable is decided by `grampy.dag`.
-  Every driver passes `grampy.testing.JournalContract` unchanged.
+- **The rule lives in the core, not in the drivers.** What is claimable is
+  decided by the journal with `grampy.dag`, in Python. A driver stores rows
+  and offers a few atomic operations; it may pre-filter what it reads,
+  never decide. Every driver passes `grampy.testing.JournalContract`
+  unchanged.
+- **No guarantee rests on one storage's mechanism.** A guarantee is written
+  in the driver protocol and proven by the shared contract, concurrency
+  tests included. Locks, isolation levels and SQL tricks are how a driver
+  keeps it, documented inside that driver.
 - **The journal never commits and never reads the application's tables.**
   Eligibility comes in as opaque candidates.
 - **Generic vocabulary.** Subject, node, run — nothing tied to one
