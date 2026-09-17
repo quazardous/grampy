@@ -444,6 +444,19 @@ class SqliteDriver:
         for chunk in _chunks(list(rows)):
             marks = ", ".join("?" * len(chunk))
             node_marks = ", ".join("?" * len(nodes))
+            # THE REVISION BEFORE THE ROWS. Two statements, two moments: a
+            # forget committing between them must leave rows the claim would
+            # refuse, or a revision its write will. Rows first, then the
+            # revision, would pair a parent since forgotten with the revision
+            # raised by forgetting it — and the write would go through.
+            for subject, revision, channel, version in self.conn.execute(
+                    f"SELECT {self.subject}, revision, channel, version FROM {self.revisions} "
+                    f"WHERE {self.subject} IN ({marks})", chunk).fetchall():
+                revisions[subject] = revision
+                if channel is not None:
+                    channel_of[subject] = channel
+                if version is not None:
+                    version_of[subject] = version
             for subject, n, status, started, ended in self.conn.execute(
                     f"SELECT {self.subject}, node, status, started_at, finished_at "
                     f"FROM {self.table} "
@@ -454,14 +467,6 @@ class SqliteDriver:
                     due[subject][n] = started
                 if ended is not None:
                     finished[subject][n] = ended
-            for subject, revision, channel, version in self.conn.execute(
-                    f"SELECT {self.subject}, revision, channel, version FROM {self.revisions} "
-                    f"WHERE {self.subject} IN ({marks})", chunk).fetchall():
-                revisions[subject] = revision
-                if channel is not None:
-                    channel_of[subject] = channel
-                if version is not None:
-                    version_of[subject] = version
         return [Entry(s, int(revisions.get(s, 0)), rows[s], due[s], finished[s],
                       channel_of.get(s), version_of.get(s)) for s in batch]
 
