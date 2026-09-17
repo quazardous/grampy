@@ -1,6 +1,8 @@
 """THE GRAPH, DRAWN — Mermaid and Graphviz, with live counts if given.
 
     to_mermaid   a Mermaid `flowchart` (GitHub, GitLab and most docs render it)
+    to_state_diagram
+                 a Mermaid `stateDiagram-v2`, the way a statechart reads
     to_dot       a Graphviz `digraph`
     overlay      the journal's counts per node, ready to be drawn
 
@@ -82,6 +84,119 @@ def to_mermaid(graph: Any, counts: Mapping[str, Mapping[str, int]] | None = None
     for index in red:
         lines.append(f"    linkStyle {index} stroke:#d33,color:#d33")
     return "\n".join(lines) + "\n"
+
+
+def to_state_diagram(graph: Any, *, direction: str = "LR") -> str:
+    """A Mermaid `stateDiagram-v2` of the graph (`Graph` or tuple of nodes).
+
+    THE SAME GRAPH, AS A STATECHART READER EXPECTS IT: `[*]` enters the root
+    and leaves from the nodes nobody follows; a choice is a `<<choice>>`
+    pseudo-state, a fork and a join are `<<fork>>` and `<<join>>`; a join
+    that needs only some parents says `need k/n` on its way out; an edge that
+    accepts other statuses says which; a loop and a retry go back, labelled.
+    What a node waits for, its lane, its lease and limits are notes.
+
+    No counts: Mermaid cannot style the states of this diagram as it styles a
+    flowchart's nodes — `to_mermaid(graph, counts)` draws them."""
+    nodes, varying = _nodes(graph)
+    ids = _ids(nodes)
+    children: dict[str, list[Node]] = {}
+    for n in nodes:
+        for parent in n.parents:
+            children.setdefault(parent, []).append(n)
+    lines = ["stateDiagram-v2", f"    direction {direction}"]
+    for n in nodes:
+        lines.append(f'    state "{_escape_state(n.name)}" as {ids[n.name]}')
+    # A pseudo-state must be declared before a transition names it, or
+    # Mermaid draws an ordinary state of that name.
+    for n in nodes:
+        if len(n.parents) > 1:
+            lines.append(f"    state {ids[n.name]}_join <<join>>")
+    for n in nodes:
+        if not n.parents:
+            lines.append(f"    [*] --> {ids[n.name]}")
+    for n in nodes:
+        after = children.get(n.name, [])
+        if not after:
+            lines.append(f"    {ids[n.name]} --> [*]")
+            continue
+        target = {c.name: f"{ids[c.name]}_join" if len(c.parents) > 1 else ids[c.name]
+                  for c in after}
+        # Children taken on different outcomes are alternatives, not branches
+        # running together: an outcome choice first, a fork only among the
+        # children of one outcome.
+        outcomes: dict[str, list[Node]] = {}
+        for child in after:
+            outcomes.setdefault(_edge_label(child, n.name), []).append(child)
+        if n.choice or len(outcomes) > 1:
+            split = f"{ids[n.name]}_choice"
+            lines += [f"    state {split} <<choice>>", f"    {ids[n.name]} --> {split}"]
+            for i, (label, group) in enumerate(outcomes.items()):
+                shown = label or ("" if n.choice else "done")
+                arrow = f" : {shown}" if shown else ""
+                if len(group) == 1 or n.choice:
+                    lines += [f"    {split} --> {target[c.name]}{arrow}" for c in group]
+                else:
+                    fork = f"{ids[n.name]}_fork{i}"
+                    lines += [f"    state {fork} <<fork>>", f"    {split} --> {fork}{arrow}"]
+                    lines += [f"    {fork} --> {target[c.name]}" for c in group]
+        elif len(after) > 1:
+            fork = f"{ids[n.name]}_fork"
+            lines += [f"    state {fork} <<fork>>", f"    {ids[n.name]} --> {fork}"]
+            lines += [f"    {fork} --> {target[c.name]}" for c in after]
+        else:
+            label = _edge_label(after[0], n.name)
+            lines.append(f"    {ids[n.name]} --> {target[after[0].name]}"
+                         + (f" : {label}" if label else ""))
+    for n in nodes:
+        if len(n.parents) > 1:
+            join = f"{ids[n.name]}_join"
+            need = f" : need {n.need}/{len(n.parents)}" if n.need is not None else ""
+            lines.append(f"    {join} --> {ids[n.name]}{need}")
+        if n.loop is not None:
+            on = " / ".join(n.loop.on)
+            lines.append(f"    {ids[n.name]} --> {ids[n.loop.to]} : loop ≤{n.loop.max} on {on}")
+        if n.retry is not None:
+            lines.append(f"    {ids[n.name]} --> {ids[n.name]} : failed, retry ×{n.retry.limit}")
+    for n in nodes:
+        notes = _state_notes(n, varying)
+        if notes:
+            lines.append(f"    note right of {ids[n.name]} : {_escape_state(' · '.join(notes))}")
+    return "\n".join(lines) + "\n"
+
+
+def _edge_label(child: Node, parent: str) -> str:
+    if parent not in child.on:
+        return ""
+    return " / ".join(child.on[parent])
+
+
+def _state_notes(n: Node, varying: set[str]) -> list[str]:
+    notes = []
+    if n.wait is not None:
+        notes.append(f"waits {n.wait}" + (f", timeout {n.timeout}" if n.timeout else ""))
+    if n.lane is not None:
+        notes.append(_describe_lane(n))
+    if n.optional:
+        notes.append("optional" + (f", grace {n.grace}" if n.grace is not None else ""))
+    if n.lease is not None:
+        notes.append(f"lease {n.lease}")
+    if n.rate:
+        notes.append("rate " + " + ".join(f"{b.limit}/{b.period}" for b in n.rate))
+    if n.concurrency is not None:
+        notes.append(f"≤{n.concurrency} at once")
+    if (n.rate or n.concurrency is not None) and n.per == "channel":
+        notes.append("per channel")
+    if n.once:
+        notes.append("once")
+    if n.name in varying:
+        notes.append("varies by channel")
+    return notes
+
+
+def _escape_state(text: str) -> str:
+    # A state label cannot hold a double quote, and a colon starts a label.
+    return text.replace('"', "'").replace(":", "∶")
 
 
 def to_dot(graph: Any, counts: Mapping[str, Mapping[str, int]] | None = None,

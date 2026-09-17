@@ -33,8 +33,9 @@ First release, planned as 0.1.0. Installed as `grampy-q`, imported as
   waits for the bomb squad, gets retried at the defuse station, and either
   shows its colour or ends in the waste bin.
 - Draw a workflow as a Mermaid flowchart or a Graphviz graph, every
-  mechanism with its own shape — lanes, rate limits and concurrency included — optionally with the live count of subjects
-  per step.
+  mechanism with its own shape — lanes, rate limits and concurrency
+  included — optionally with the live count of subjects per step; or as a
+  Mermaid state diagram, read the way a statechart is.
 - Write a workflow as data: a versioned JSON document (name, namespace,
   version, nodes) that can be stored, compared between versions and read
   back; unknown keys and wrong types are refused with their path.

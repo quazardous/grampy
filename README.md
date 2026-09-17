@@ -150,11 +150,15 @@ journal.claim("crop", 10, candidates=["s1", "s2"])            # ['s1'] — s2 st
 ## Drawing a graph
 
 ```python
-from quazardous.grampy.diagram import overlay, to_mermaid, to_dot
+from quazardous.grampy.diagram import overlay, to_dot, to_mermaid, to_state_diagram
 
 print(to_mermaid(graph))                    # paste into any Markdown that renders Mermaid
 print(to_mermaid(graph, overlay(journal)))  # with ▶ running ✓ done ✗ failed … per node
+print(to_state_diagram(graph))              # the same graph as a statechart: choices,
+                                            # forks, joins, loops and retries
 ```
+
+`quazardous.grampy.diagram` is optional: `import quazardous.grampy` never loads it.
 
 ![A brick sorter: a choice, a wait with a timeout, retries, a failure edge, a loop and a 2-of-3 join](docs/brick-sorter.png)
 

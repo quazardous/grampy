@@ -8,7 +8,7 @@ import subprocess
 import pytest
 
 from quazardous.grampy import Document, Graph, Lane, Loop, Node, NodeJournal, Rate
-from quazardous.grampy.diagram import overlay, to_dot, to_mermaid
+from quazardous.grampy.diagram import overlay, to_dot, to_mermaid, to_state_diagram
 from quazardous.grampy.drivers.memory import MemoryDriver
 from quazardous.grampy.timing import Retry
 
@@ -98,3 +98,45 @@ def test_lanes_and_limits_are_drawn():
     journal = NodeJournal(MemoryDriver(), graph, clock=lambda: "2026-01-01T00:00:00+00:00")
     journal.arrive("in", ["a", "b"])
     assert "⧖2" in to_mermaid(graph, overlay(journal))
+
+
+def test_the_state_diagram_reads_like_a_statechart():
+    text = to_state_diagram(SORTER)
+    assert text.startswith("stateDiagram-v2\n    direction LR\n")
+    assert "    [*] --> n_scan" in text
+    assert "    state n_scan_choice <<choice>>" in text
+    assert "    n_scan --> n_scan_choice" in text
+    assert "    n_scan_choice --> n_colour" in text and "n_scan_choice --> n_quarantine" in text
+    assert "    state n_pack_join <<join>>" in text
+    assert text.index("state n_pack_join <<join>>") < text.index("--> n_pack_join"), (
+        "declared before use, or Mermaid draws a plain state")
+    assert "    n_pack_join --> n_pack : need 2/3" in text
+    assert "    state n_defuse_choice <<choice>>" in text, "done or failed: alternatives"
+    assert "    n_defuse_choice --> n_reject : failed" in text
+    assert "    n_defuse_choice --> n_pack_join : done" in text
+    assert "    state n_colour_fork <<fork>>" in text, "check and pack run together"
+    assert "    n_check --> n_colour : loop ≤2 on failed" in text
+    assert "    n_defuse --> n_defuse : failed, retry ×3" in text
+    assert "    n_pack --> [*]" in text and "    n_reject --> [*]" in text
+    assert "note right of n_quarantine : waits deminer.called, timeout 1h" in text
+    assert "note right of n_check : optional, grace 5m" in text
+    assert "varies by channel" in text
+
+
+def test_the_state_diagram_forks_where_a_node_has_several_children():
+    text = to_state_diagram((Node("a"), Node("b", parents=("a",)), Node("c", parents=("a",)),
+                             Node("d", parents=("b", "c"))))
+    assert "    state n_a_fork <<fork>>" in text
+    assert "    n_a_fork --> n_b" in text and "    n_b --> n_d_join" in text
+    assert "    n_d_join --> n_d\n" in text, "a join of every parent says nothing more"
+
+
+def test_the_state_diagram_notes_lanes_and_limits():
+    graph = Graph(Document("offers"), (
+        Node("in", lane=Lane.throttle("1d"), rate=(Rate(10, "1m"),)),
+        Node("ai", parents=("in",), concurrency=4, per="channel"),
+    ))
+    text = to_state_diagram(graph)
+    assert "note right of n_in : lane∶ last version, place of the first · cooldown 1d" in text
+    assert "rate 10/1m" in text
+    assert "note right of n_ai : ≤4 at once · per channel" in text
