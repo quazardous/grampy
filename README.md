@@ -36,6 +36,7 @@ journal.claim("crop", 10, candidates=["s1", "s2"])            # ['s1'] — s2 st
 | `grampy.states` | derived from the graph: `replay_targets`, `replayed_after`, `to_undo`, `source_state`, `allowed_transitions` |
 | `grampy.journal` | `NodeJournal` — the logic (validation, rule inputs, clock) over a `JournalDriver` protocol |
 | `grampy.drivers.memory` | dict-based, deterministic, no dependency — the reference driver |
+| `grampy.drivers.sqlite` | standard-library `sqlite3` on tables you declare (`schema()` gives the DDL); one writer at a time, and the same contract |
 | `grampy.drivers.postgres` | SQLAlchemy Core on tables **you** declare; candidates read page by page, rows inserted only if the subject's revision is unchanged |
 | `grampy.testing` | `JournalContract`, the test suite every driver must pass — concurrency included |
 
@@ -67,8 +68,8 @@ journal.claim("crop", 10, candidates=["s1", "s2"])            # ['s1'] — s2 st
 The journal never commits and never reads the application's tables.
 Eligibility ("not finished, by priority") is passed to `claim` as opaque
 **candidates** in the driver's own terms: an ordered iterable for the
-memory driver, a `SELECT` whose first column is the subject for postgres.
-Its order is the priority.
+memory driver, a `Query(sql, params)` for SQLite, a SQLAlchemy `SELECT` for
+postgres — the first column is the subject, the order is the priority.
 
 ```python
 import sqlalchemy as sa
@@ -100,7 +101,7 @@ stays correct under them is up to it, the outcome is not.
 
 ```bash
 pip install -e ".[test]"        # or: uvx --with pytest pytest
-pytest                          # memory driver, graph, states
+pytest                          # graph, states, memory and SQLite drivers
 GRAMPY_TEST_PG_DSN=postgresql+psycopg://user:pass@localhost/test \
     pytest                      # + the postgres driver (needs sqlalchemy and a driver)
 ```

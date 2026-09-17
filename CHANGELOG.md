@@ -48,6 +48,8 @@ First release, planned as 0.1.0.
   declare.
 - In-memory driver with no dependency, deterministic and thread-safe, for
   tests and prototypes.
+- SQLite driver on the standard library alone, for small deployments and
+  tests against a real file shared by several processes.
 - PostgreSQL driver (SQLAlchemy Core) working on two tables you declare —
   node rows and one revision per subject — with eligibility expressed as
   your own `SELECT`.
