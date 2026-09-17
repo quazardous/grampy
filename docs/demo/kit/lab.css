@@ -240,6 +240,24 @@ select { padding: 7px 10px; }
 
 .code-lead, .code-links { margin: 0 0 12px; max-width: 75ch; }
 .code-links { margin: 12px 0 0; font-size: 14px; color: var(--muted); }
+/* A BAG: five bricks that met, wrapped and tallied. */
+.packet.red { --c: var(--brick-red); }
+.packet.orange { --c: var(--brick-orange); }
+.packet.yellow { --c: var(--brick-yellow); }
+.packet.green { --c: var(--brick-green); }
+.packet.blue { --c: var(--brick-blue); }
+.packet.pink { --c: var(--brick-pink); }
+.packet .wrap { fill: var(--c, var(--brick-unknown)); stroke: var(--brick-edge); stroke-width: .8; }
+.packet .stud { fill: rgba(255, 255, 255, .5); }
+.packet .tally { font: 700 6px/1 "IBM Plex Mono", monospace; fill: rgba(15, 23, 42, .75); }
+.packet { transition: transform .35s ease; }
+.packet.sealing { animation: seal .7s ease; }
+@keyframes seal {
+  0% { transform-box: fill-box; transform-origin: center; scale: .4; opacity: 0; }
+  55% { scale: 1.18; opacity: 1; }
+  100% { scale: 1; opacity: 1; }
+}
+
 .code-panels { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 440px), 1fr)); }
 .code-panel { margin: 0; min-width: 0; display: grid; gap: 6px; align-content: start; }
 .code-panel figcaption { font-size: 13px; font-weight: 600; }

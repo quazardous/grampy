@@ -19,6 +19,8 @@ const WASTE = { x: 1224, y: 424, w: 172, h: 124 };
 const QUEUE = { columns: 2, rows: 5 };
 const INBOX = { columns: 4, rows: 2 };
 const KEPT_PER_BIN = 16;
+//: A BAG IS FILED, NOT DROPPED IN: a shelf of rows, oldest first.
+const BAG = { w: 22, h: 13, columns: 3, rows: 4, x: 9, y: 10, gapX: 24, gapY: 16 };
 const KEPT_IN_WASTE = 24;
 const TICK_MS = 500;
 
@@ -129,7 +131,8 @@ function drawBins(parent, palette) {
     const g = Lab.tray(parent, x, y, BIN.w, BIN.h, "bin");
     el("rect", { class: `tab ${colour}`, x: 11, y: BIN.h - 19, width: 16, height: 8, rx: 2 }, g);
     const count = text(g, { x: BIN.w - 12, y: BIN.h - 11, "text-anchor": "end", class: "count" }, "0");
-    bins[colour] = { x, y, count, kept: [] };
+    bins[colour] = { x, y, count, kept: [], packets: new Map(),
+                     layer: el("g", { class: "packets" }, g) };
   });
   text(parent, { x: BIN.x + BIN.w + BIN.gap / 2, y: BIN.y + 3 * (BIN.h + BIN.gap) + 14,
                  "text-anchor": "middle", class: "bench-label" }, "sorted · click one to send it back");
@@ -162,13 +165,56 @@ function describe(spec) {
 
 // -- where a brick goes --------------------------------------------------------
 
+function bagSlot(bin, index) {
+  const i = index % (BAG.columns * BAG.rows);
+  return { x: bin.x + BAG.x + (i % BAG.columns) * BAG.gapX,
+           y: bin.y + BAG.y + Math.floor(i / BAG.columns) * BAG.gapY };
+}
+
 function inBin(brick) {
   const bin = bins[brick.colour];
+  // THE BRICKS OF ONE BAG COME TOGETHER. They all aim at the bag's shelf
+  // slot, so they converge instead of scattering, and the packet takes their
+  // place once they have met.
+  if (brick.bag && bin.packets.has(brick.bag)) {
+    const at = bagSlot(bin, bin.packets.get(brick.bag).index);
+    return { x: at.x, y: at.y };
+  }
   return {
     x: bin.x + 10 + scatter(brick.id, 1) * (BIN.w - 20 - BRICK.w),
     y: bin.y + 12 + scatter(brick.id, 2) * (BIN.h - 44 - BRICK.h),
     turn: scatter(brick.id, 3) < 0.4,
   };
+}
+
+function drawBags(bags, effects) {
+  const live = new Set();
+  for (const bag of bags) {
+    const bin = bins[bag.colour];
+    if (!bin) continue;
+    live.add(bag.id);
+    if (bin.packets.has(bag.id)) continue;
+    const index = bin.packets.size;
+    const at = bagSlot(bin, index);
+    const g = el("g", { class: `packet ${bag.colour}`, "data-bag": bag.id,
+                        transform: `translate(${at.x},${at.y})` }, bin.layer);
+    el("rect", { class: "wrap", width: BAG.w, height: BAG.h, rx: 3 }, g);
+    for (const cx of [5, 11, 17]) el("circle", { class: "stud", cx, cy: 4, r: 1.6 }, g);
+    text(g, { x: BAG.w / 2, y: BAG.h - 2.5, "text-anchor": "middle", class: "tally" },
+         String(bag.size));
+    bin.packets.set(bag.id, { index, g });
+    // THE MOMENT THEY MERGE: a puff where the bricks met.
+    Lab.puff(effects, at.x, at.y);
+    g.classList.add("sealing");
+    setTimeout(() => g.classList.remove("sealing"), 700);
+  }
+  for (const bin of Object.values(bins)) {
+    for (const [id, packet] of bin.packets) {
+      if (live.has(id)) continue;
+      packet.g.remove();
+      bin.packets.delete(id);
+    }
+  }
 }
 
 function inWaste(id) {
@@ -244,6 +290,7 @@ function render(state) {
 
   const layer = $("bricks");
   const effects = $("effects");
+  drawBags(state.bags || [], effects);
   const alive = new Set();
   const slots = new Map();
   const overflow = {};
@@ -298,7 +345,7 @@ function render(state) {
       Lab.puff(effects, at.x, at.y);
     }
     if (brick.place !== "boom") g.classList.remove("wasted");
-    seen.set(brick.id, { place: brick.place, revealed: brick.revealed, at });
+    seen.set(brick.id, { place: brick.place, revealed: brick.revealed, at, bag: brick.bag });
   }
 
   for (const g of [...layer.children]) {
@@ -312,7 +359,8 @@ function render(state) {
     seen.delete(id);
     g.classList.remove("working", "selected");
     const colour = colours.find((c) => g.classList.contains(c));
-    if (last && last.place === "shipped" && colour) keep(bins[colour].kept, g, KEPT_PER_BIN);
+    if (last && last.bag) g.remove();       // its packet is on the shelf
+    else if (last && last.place === "shipped" && colour) keep(bins[colour].kept, g, KEPT_PER_BIN);
     else if (last && last.place === "boom") keep(waste.kept, g, KEPT_IN_WASTE);
     else g.remove();
   }

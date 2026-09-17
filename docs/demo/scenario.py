@@ -180,6 +180,11 @@ class World:
         self._called: dict[int, float] = {}
         #: Sorted bricks off the line, kept so that they can be sent back.
         self.gone: dict[int, Brick] = {}
+        #: THE BAGS, BY THE TOKEN OF THE CLAIM THAT MADE THEM. Every brick of
+        #: one group shares that token — grampy writes it on their rows and
+        #: keeps it after they conclude — so it is the bag's own name.
+        self.bags: dict[str, dict[str, Any]] = {}
+        self.bag_of: dict[int, str] = {}
         self.shipped_at: dict[int, float] = {}
         self._returns: dict[int, float] = {}
 
@@ -322,6 +327,11 @@ class World:
                 continue
             self._log(f'items.claim("{node}", {free}, candidates=…)'
                       f'  # {[b.id for b in lease]}')
+            if node == "pack":
+                self.bags[lease.token] = {"colour": lease[0].colour,
+                                          "size": len(lease), "born": self.elapsed}
+                for brick in lease:
+                    self.bag_of[brick.id] = lease.token
             for brick in lease:
                 jitter = self.rng.uniform(0.7, 1.4)
                 self.jobs.append(Job(node, brick.id, lease.token,
@@ -342,6 +352,14 @@ class World:
             elif progress.get("reject") == NODE_DONE:
                 self.finished[brick_id] = ("boom", self.elapsed)
                 self.exploded += 1
+        # A BAG OUTLIVES ITS BRICKS: they leave the floor, it stays in the bin.
+        # Keep the last few, as a bin holds only so many.
+        if len(self.bags) > 18:
+            for token in sorted(self.bags, key=lambda t: self.bags[t]["born"])[:-18]:
+                self.bags.pop(token, None)
+                for bid, tok in list(self.bag_of.items()):
+                    if tok == token:
+                        self.bag_of.pop(bid, None)
         for brick_id, (kind, when) in list(self.finished.items()):
             if self.elapsed - when > 6:
                 brick = self.bricks.pop(brick_id, None)
@@ -394,6 +412,7 @@ class World:
                 "revealed": revealed, "place": place, "node": node, "version": brick.version,
                 "crate": brick.crate,
                 "retries": self.journal.retries(brick.id, "defuse") if brick.tnt else 0,
+                "bag": self.bag_of.get(brick.id),
             }
             if place == "inbox":
                 arrival = self.journal.arrival(brick.id, "inbox")
@@ -411,6 +430,7 @@ class World:
             "calls": self.calls[-25:],
             "shipped": self.shipped,
             "sorted": self.sorted,
+            "bags": [{"id": token, **bag} for token, bag in self.bags.items()],
             "exploded": self.exploded,
             "settings": {
                 "arrivals_per_minute": self.settings.arrivals_per_minute,
