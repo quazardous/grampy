@@ -7,7 +7,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from grampy import NODE_CONCLUDED, DagError, Document, Graph, GraphFormatError, Node
+from grampy import NODE_CONCLUDED, DagError, Document, Graph, GraphFormatError, Loop, Node
 
 DIAMOND = (
     Node("start", working="starting", state="started"),
@@ -38,11 +38,14 @@ def test_joins_and_choices_are_written_as_data():
         Node("cancel", parents=("order",)),
         Node("refund", parents=("pay",), on={"pay": ("failed",)}),
         Node("end", parents=("pay", "cancel"), need=1),
+        Node("check", parents=("end",), loop=Loop(to="pay", max=3)),
     ))
     nodes = graph.to_dict()["nodes"]
     assert nodes["order"] == {"choice": True}
     assert nodes["refund"] == {"parents": ["pay"], "on": {"pay": ["failed"]}}
     assert nodes["end"] == {"parents": ["pay", "cancel"], "need": 1}
+    assert nodes["check"] == {"parents": ["end"],
+                              "loop": {"to": "pay", "max": 3, "on": ["failed"]}}
     assert Graph.from_json(graph.to_json()) == graph
 
 
@@ -77,6 +80,12 @@ def test_a_graph_that_does_not_hold_together_is_refused_on_construction():
     ({"document": {"name": "x"}, "nodes": {"a": {"need": "2"}}}, "$.nodes.a.need"),
     ({"document": {"name": "x"}, "nodes": {"a": {"need": True}}}, "$.nodes.a.need"),
     ({"document": {"name": "x"}, "nodes": {"a": {"choice": 1}}}, "$.nodes.a.choice"),
+    ({"document": {"name": "x"}, "nodes": {"a": {"loop": {"to": "a"}}}},
+     "$.nodes.a.loop: missing key(s) ['max']"),
+    ({"document": {"name": "x"}, "nodes": {"a": {"loop": {"to": "a", "max": "2"}}}},
+     "$.nodes.a.loop.max"),
+    ({"document": {"name": "x"}, "nodes": {"a": {"loop": {"to": "a", "max": 2, "on": "x"}}}},
+     "$.nodes.a.loop.on"),
 ])
 def test_a_document_that_lies_is_refused_with_its_path(data, path):
     with pytest.raises(GraphFormatError) as caught:
@@ -125,6 +134,14 @@ def graphs(draw):
                   optional=n.optional and n.name not in with_children, once=n.once,
                   on=n.on, need=n.need,
                   choice=n.name in with_children and draw(st.booleans()))
+             for n in nodes]
+    # A loop goes back to the node itself or to its first parent, never on a choice.
+    nodes = [n if n.choice or not draw(st.booleans()) else
+             Node(n.name, parents=n.parents, working=n.working, state=n.state,
+                  optional=n.optional, once=n.once, on=n.on, need=n.need,
+                  loop=Loop(to=(n.parents or (n.name,))[0], max=draw(st.integers(1, 5)),
+                            on=tuple(draw(st.lists(st.sampled_from(("done", "skipped", "failed")),
+                                                   min_size=1, max_size=3, unique=True)))))
              for n in nodes]
     document = Document(draw(names), version=draw(names), namespace=draw(names))
     return Graph(document, tuple(nodes))

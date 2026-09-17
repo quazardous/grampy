@@ -36,6 +36,19 @@ def node_table(metadata, name):
         sa.Column("lease", sa.Text))
 
 
+def history_table(metadata, name):
+    return sa.Table(
+        name, metadata,
+        sa.Column("subject", sa.Text, nullable=False),
+        sa.Column("node", sa.Text, nullable=False),
+        sa.Column("status", sa.Text, nullable=False),
+        sa.Column("started_at", sa.Text, nullable=False),
+        sa.Column("finished_at", sa.Text),
+        sa.Column("lease", sa.Text),
+        sa.Column("archived_at", sa.Text, nullable=False),
+        sa.Column("reason", sa.Text, nullable=False))
+
+
 def revision_table(metadata, name):
     return sa.Table(
         name, metadata,
@@ -60,9 +73,10 @@ class PostgresHarness:
         metadata, n = sa.MetaData(), next(_TABLES)
         table = node_table(metadata, f"grampy_nodes_{n}")
         revisions = revision_table(metadata, f"grampy_revisions_{n}")
+        history = history_table(metadata, f"grampy_history_{n}")
         metadata.create_all(self.conn)
         return NodeJournal(
-            PostgresDriver(self.conn.execute, table, revisions, subject="subject"),
+            PostgresDriver(self.conn.execute, table, revisions, history, subject="subject"),
             dag, clock=clock)
 
     def candidates(self, subjects):
@@ -92,6 +106,7 @@ class PostgresStore:
         self.metadata, n = sa.MetaData(), next(_TABLES)
         self.table = node_table(self.metadata, f"grampy_shared_{n}")
         self.revisions = revision_table(self.metadata, f"grampy_shared_revisions_{n}")
+        self.history = history_table(self.metadata, f"grampy_shared_history_{n}")
         self.metadata.create_all(engine)
 
     def session(self):
@@ -107,7 +122,7 @@ class PostgresSession:
         self.transaction = self.conn.begin()
         self.journal = NodeJournal(
             PostgresDriver(self.conn.execute, store.table, store.revisions,
-                           subject="subject"),
+                           store.history, subject="subject"),
             store.dag, clock=store.clock)
 
     def candidates(self, subjects):
@@ -144,13 +159,15 @@ def test_a_table_without_the_node_columns_is_refused():
     metadata = sa.MetaData()
     table = sa.Table("bad", metadata, sa.Column("subject", sa.Text))
     revisions = revision_table(metadata, "revisions")
+    history = history_table(metadata, "history")
     with pytest.raises(ValueError, match="lacks the column"):
-        PostgresDriver(lambda statement: None, table, revisions, subject="subject")
+        PostgresDriver(lambda statement: None, table, revisions, history, subject="subject")
 
 
 def test_a_revisions_table_without_its_column_is_refused():
     metadata = sa.MetaData()
     table = node_table(metadata, "nodes")
     revisions = sa.Table("bad", metadata, sa.Column("subject", sa.Text))
+    history = history_table(metadata, "history")
     with pytest.raises(ValueError, match="lacks the column"):
-        PostgresDriver(lambda statement: None, table, revisions, subject="subject")
+        PostgresDriver(lambda statement: None, table, revisions, history, subject="subject")

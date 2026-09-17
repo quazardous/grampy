@@ -41,7 +41,19 @@ class MemoryDriver:
     def __init__(self) -> None:
         self.rows: dict[tuple[Any, str], Row] = {}
         self.revisions: dict[Any, int] = {}
+        self.archive: list[tuple[Any, dict[str, Any]]] = []
         self._lock = threading.RLock()
+
+    def _take_away(self, subject: Any, name: str, *, now: str, reason: str) -> bool:
+        """Move a row to the archive. Call with the lock held."""
+        row = self.rows.pop((subject, name), None)
+        if row is None:
+            return False
+        self.archive.append((subject, {
+            "node": name, "status": row.status, "started_at": row.started_at,
+            "finished_at": row.finished_at, "lease": row.lease,
+            "archived_at": now, "reason": reason}))
+        return True
 
     # -- write -------------------------------------------------------------
 
@@ -71,7 +83,8 @@ class MemoryDriver:
         return taken
 
     def conclude(self, name: str, subjects: list[Any], *, status: str,
-                 now: str, lease: str | None, omit: tuple[str, ...]) -> int:
+                 now: str, lease: str | None, omit: tuple[str, ...],
+                 reset: tuple[str, ...]) -> int:
         count = 0
         with self._lock:
             for subject in subjects:
@@ -83,6 +96,10 @@ class MemoryDriver:
                 row.status, row.finished_at = status, now
                 for other in omit:
                     self.rows.setdefault((subject, other), Row(NODE_OMITTED, now, now))
+                if reset:
+                    self.revisions[subject] = self.revisions.get(subject, 0) + 1
+                    for other in reset:
+                        self._take_away(subject, other, now=now, reason="loop")
                 count += 1
         return count
 
@@ -96,20 +113,20 @@ class MemoryDriver:
                 count += 1
         return count
 
-    def forget(self, name: str, subjects: list[Any]) -> int:
+    def forget(self, name: str, subjects: list[Any], *, now: str) -> int:
         with self._lock:
             for subject in subjects:
                 self.revisions[subject] = self.revisions.get(subject, 0) + 1
             return sum(1 for subject in subjects
-                       if self.rows.pop((subject, name), None) is not None)
+                       if self._take_away(subject, name, now=now, reason="forget"))
 
-    def release(self, name: str, *, older_than: str) -> int:
+    def release(self, name: str, *, older_than: str, now: str) -> int:
         with self._lock:
             stale = [key for key, row in self.rows.items()
                      if key[1] == name and row.status == NODE_RUNNING
                      and row.started_at < older_than]
-            for key in stale:
-                del self.rows[key]
+            for subject, n in stale:
+                self._take_away(subject, n, now=now, reason="release")
             return len(stale)
 
     # -- read --------------------------------------------------------------
@@ -117,6 +134,20 @@ class MemoryDriver:
     def progress(self, subject: Any) -> dict[str, str]:
         with self._lock:
             return {n: row.status for (s, n), row in self.rows.items() if s == subject}
+
+    def history(self, subject: Any) -> list[dict[str, Any]]:
+        with self._lock:
+            entries = [dict(e) for s, e in self.archive if s == subject]
+        return sorted(entries, key=lambda e: (e["archived_at"], e["node"]))
+
+    def loops(self, subjects: list[Any], name: str) -> dict[Any, int]:
+        wanted = set(subjects)
+        counts: dict[Any, int] = {}
+        with self._lock:
+            for s, e in self.archive:
+                if s in wanted and e["node"] == name and e["reason"] == "loop":
+                    counts[s] = counts.get(s, 0) + 1
+        return counts
 
     def status_counts(self, name: str) -> dict[str, int]:
         counts: dict[str, int] = {}

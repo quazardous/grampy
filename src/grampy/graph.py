@@ -33,7 +33,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from .dag import Node, check_dag
+from .dag import Loop, Node, check_dag
 
 #: THE FORMAT THIS VERSION READS AND WRITES.
 DSL = "grampy/1"
@@ -84,6 +84,8 @@ class Graph:
                 spec["on"] = {parent: list(statuses) for parent, statuses in n.on.items()}
             if n.need is not None:
                 spec["need"] = n.need
+            if n.loop is not None:
+                spec["loop"] = {"to": n.loop.to, "max": n.loop.max, "on": list(n.loop.on)}
             for flag in _NODE_FLAGS:
                 if getattr(n, flag):
                     spec[flag] = True
@@ -121,7 +123,8 @@ class Graph:
         for name, raw in specs.items():
             path = f"$.nodes.{name}"
             spec = _mapping(raw, path, required=(),
-                            allowed=("parents", "on", "need", *_NODE_LABELS, *_NODE_FLAGS))
+                            allowed=("parents", "on", "need", "loop",
+                                     *_NODE_LABELS, *_NODE_FLAGS))
             parents = spec.get("parents", [])
             if not isinstance(parents, list):
                 raise GraphFormatError(f"{path}.parents: expected a list of node names")
@@ -144,7 +147,20 @@ class Graph:
             need = spec.get("need")
             if need is not None and (isinstance(need, bool) or not isinstance(need, int)):
                 raise GraphFormatError(f"{path}.need: expected an integer")
-            nodes.append(Node(name, parents=tuple(parents),
+            loop = None
+            if "loop" in spec:
+                raw_loop = _mapping(spec["loop"], f"{path}.loop", required=("to", "max"),
+                                    allowed=("to", "max", "on"))
+                _string(raw_loop["to"], f"{path}.loop.to")
+                if isinstance(raw_loop["max"], bool) or not isinstance(raw_loop["max"], int):
+                    raise GraphFormatError(f"{path}.loop.max: expected an integer")
+                loop_on = raw_loop.get("on", ["failed"])
+                if not isinstance(loop_on, list):
+                    raise GraphFormatError(f"{path}.loop.on: expected a list of statuses")
+                for i, status in enumerate(loop_on):
+                    _string(status, f"{path}.loop.on[{i}]")
+                loop = Loop(to=raw_loop["to"], max=raw_loop["max"], on=tuple(loop_on))
+            nodes.append(Node(name, parents=tuple(parents), loop=loop,
                               working=spec.get("working"), state=spec.get("state"),
                               optional=spec.get("optional", False),
                               once=spec.get("once", False),

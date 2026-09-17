@@ -5,6 +5,7 @@
     accepts          the statuses of a parent this node accepts
     joined           are enough parents concluded the way this node accepts?
     omitted_by       what a choice leaves dead when it takes one branch
+    Loop             a declared way back: which statuses send the subject where
     descendants      everything downstream of a node
     ancestors        everything upstream of a node
     claimable        can this node be taken, given what is recorded?
@@ -69,6 +70,26 @@ NODE_CONCLUDED = (NODE_DONE, NODE_SKIPPED, NODE_FAILED, NODE_OMITTED)
 
 
 @dataclass(frozen=True)
+class Loop:
+    """A DECLARED WAY BACK. When the node carrying it concludes with a status
+    of `on`, the subject returns to `to` — an ancestor, or the node itself:
+    `to` and everything after it are archived and become claimable again,
+    in the same write as the conclusion. At most `max` times per subject;
+    after that the conclusion stands, and a failure edge can take over
+    (escalate, give up).
+
+        Node("review", parents=("draft",), loop=Loop(to="draft", max=3))
+    """
+
+    to: str
+    max: int
+    on: tuple[str, ...] = ("failed",)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "on", tuple(self.on))
+
+
+@dataclass(frozen=True)
 class Node:
     """A node of the graph: who it descends from, and what it projects.
 
@@ -110,6 +131,10 @@ class Node:
     others, and whatever only they lead to, are `omitted` in the same
     write (exclusive choice). A join after the branches goes on, since
     `omitted` satisfies it.
+
+    `loop` declares a way back (`Loop`): the graph stays acyclic, the cycle
+    is an edge the journal takes, bounded, and every pass is kept in the
+    history.
     """
 
     name: str
@@ -121,6 +146,7 @@ class Node:
     on: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     need: int | None = None
     choice: bool = False
+    loop: Loop | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "parents", tuple(self.parents))
@@ -325,6 +351,20 @@ def check_dag(dag: tuple[Node, ...]) -> None:
             raise DagError(
                 f"node {n.name!r} is an optional choice: skipped, it would name no "
                 f"branch and every branch would run")
+        if n.loop is not None:
+            if n.loop.to != n.name and n.loop.to not in _ancestors(n.name, by_name):
+                raise DagError(
+                    f"node {n.name!r} loops to {n.loop.to!r}, which is neither itself "
+                    f"nor one of its ancestors")
+            if n.loop.max < 1:
+                raise DagError(f"node {n.name!r}: a loop needs max >= 1, got {n.loop.max}")
+            if not n.loop.on or any(x not in (NODE_DONE, NODE_SKIPPED, NODE_FAILED)
+                                    for x in n.loop.on):
+                raise DagError(
+                    f"node {n.name!r}: a loop fires on done, skipped or failed, "
+                    f"got {list(n.loop.on)}")
+            if n.choice:
+                raise DagError(f"node {n.name!r} is a choice and a loop: pick one")
 
 
     # ── NO CYCLE, PROVEN BY A WALK ─────────────────────────────────
@@ -374,3 +414,17 @@ def check_dag(dag: tuple[Node, ...]) -> None:
                     f"state {state!r} is posted by {posted_by[state]!r} AND by "
                     f"{n.name!r} — the label becomes ambiguous")
             posted_by[state] = n.name
+
+
+def _ancestors(name: str, by_name: dict[str, Node]) -> set[str]:
+    """Ancestors from a name index — check_dag's own walk, before `node()`
+    can be trusted on a graph not yet checked. Assumes the parents exist."""
+    seen: set[str] = set()
+    to_visit = list(by_name[name].parents)
+    while to_visit:
+        current = to_visit.pop()
+        if current in seen or current not in by_name:
+            continue
+        seen.add(current)
+        to_visit.extend(by_name[current].parents)
+    return seen

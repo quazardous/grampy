@@ -14,6 +14,7 @@ from grampy import (
     NODE_RUNNING,
     NODE_SKIPPED,
     DagError,
+    Loop,
     Node,
     ancestors,
     check_dag,
@@ -332,3 +333,24 @@ def test_on_is_read_only_and_nodes_stay_hashable():
     assert hash(n) == hash(Node("refund", parents=("pay",), on={"pay": ("failed",)}))
     with pytest.raises(TypeError):
         n.on["pay"] = ("done",)
+
+
+# ── declared loops ────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("nodes, message", [
+    ((Node("a"), Node("b", parents=("a",), loop=Loop(to="c", max=1)), Node("c", parents=("a",))),
+     "neither itself nor one of its ancestors"),
+    ((Node("a"), Node("b", parents=("a",), loop=Loop(to="a", max=0))), "max >= 1"),
+    ((Node("a"), Node("b", parents=("a",), loop=Loop(to="a", max=1, on=("omitted",)))),
+     "fires on done, skipped or failed"),
+    ((Node("a", choice=True, loop=Loop(to="a", max=1)), Node("b", parents=("a",))),
+     "a choice and a loop"),
+])
+def test_check_dag_refuses_a_loop_that_cannot_hold(nodes, message):
+    with pytest.raises(DagError, match=message):
+        check_dag(nodes)
+
+
+def test_a_loop_may_go_back_to_the_node_itself():
+    check_dag((Node("a"), Node("b", parents=("a",), loop=Loop(to="b", max=2))))

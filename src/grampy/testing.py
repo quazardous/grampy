@@ -44,9 +44,11 @@ from .dag import (
     NODE_SATISFYING,
     NODE_SKIPPED,
     DagError,
+    Loop,
     Node,
     claimable,
     claimable_nodes,
+    descendants,
     joined,
     node,
     omitted_by,
@@ -87,6 +89,15 @@ ROUTE = (
     Node("reject", parents=("classify",)),
     Node("notify", parents=("reject",)),
     Node("end", parents=("publish", "notify")),
+)
+
+
+#: A draft reviewed up to three times; past that, an escalation.
+REVIEW = (
+    Node("draft"),
+    Node("review", parents=("draft",), loop=Loop(to="draft", max=2)),
+    Node("publish", parents=("review",)),
+    Node("escalate", parents=("review",), on={"review": ("failed",)}),
 )
 
 
@@ -299,6 +310,54 @@ class JournalContract:
         self._claim(harness, journal, "classify", ["s1"])
         assert journal.conclude("classify", ["s1"], token="stale", branch="publish") == 0
         assert journal.progress("s1") == {"classify": NODE_RUNNING}
+
+    # -- history and loops ----------------------------------------------------
+
+    def test_forget_and_release_archive_what_they_take_away(self, harness, clock):
+        journal = harness.journal(DIAMOND, clock)
+        clock.now = "2026-01-01T00:00:00+00:00"
+        lease = self._claim(harness, journal, "start", ["s1", "s2"])
+        journal.conclude("start", ["s1"], token=lease.token)
+        clock.now = "2026-01-01T01:00:00+00:00"
+        assert journal.release("start", "2026-01-01T00:30:00+00:00") == 1
+        assert journal.forget("start", ["s1"]) == 1
+        assert journal.history("s1") == [{
+            "node": "start", "status": NODE_DONE, "started_at": "2026-01-01T00:00:00+00:00",
+            "finished_at": "2026-01-01T00:00:00+00:00", "lease": lease.token,
+            "archived_at": "2026-01-01T01:00:00+00:00", "reason": "forget"}]
+        [released] = journal.history("s2")
+        assert (released["status"], released["reason"]) == (NODE_RUNNING, "release")
+        assert journal.history("ghost") == []
+
+    def test_a_loop_goes_back_until_its_bound_then_the_failure_stands(self, harness, clock):
+        journal = harness.journal(REVIEW, clock)
+        for round_ in range(3):
+            clock.now = f"2026-01-01T00:0{round_}:00+00:00"
+            self._run(harness, journal, "draft", ["s1"])
+            lease = self._claim(harness, journal, "review", ["s1"])
+            assert journal.fail("review", ["s1"], token=lease.token) == 1
+            if round_ < 2:
+                assert journal.progress("s1") == {}, "sent back to draft"
+                assert journal.passes("s1", "draft") == round_ + 1
+        assert journal.progress("s1") == {"draft": NODE_DONE, "review": NODE_FAILED}
+        assert self._claim(harness, journal, "escalate", ["s1"]) == ["s1"]
+        reasons = [(e["node"], e["status"], e["reason"]) for e in journal.history("s1")]
+        assert reasons == [("draft", NODE_DONE, "loop"), ("review", NODE_FAILED, "loop")] * 2
+
+    def test_a_loop_does_not_fire_on_other_statuses(self, harness, clock):
+        journal = harness.journal(REVIEW, clock)
+        self._run(harness, journal, "draft", ["s1"])
+        self._run(harness, journal, "review", ["s1"])
+        assert journal.progress("s1") == {"draft": NODE_DONE, "review": NODE_DONE}
+        assert journal.history("s1") == []
+
+    def test_a_loop_refused_by_its_token_sends_nobody_back(self, harness, clock):
+        journal = harness.journal(REVIEW, clock)
+        self._run(harness, journal, "draft", ["s1"])
+        self._claim(harness, journal, "review", ["s1"])
+        assert journal.fail("review", ["s1"], token="stale") == 0
+        assert journal.progress("s1") == {"draft": NODE_DONE, "review": NODE_RUNNING}
+        assert journal.history("s1") == []
 
     # -- skip ----------------------------------------------------------------
 
@@ -522,12 +581,31 @@ def _model_machine(harness: Any) -> Any:
                     if len(parents) > 1 and draw(st.booleans()) else None)
             specs.append({"name": f"n{i}", "parents": parents, "on": on, "need": need})
         with_children = {p for spec in specs for p in spec["parents"]}
+        by_name = {spec["name"]: spec for spec in specs}
+
+        def upstream(name: str) -> list[str]:
+            seen: list[str] = []
+            todo = list(by_name[name]["parents"])
+            while todo:
+                current = todo.pop()
+                if current not in seen:
+                    seen.append(current)
+                    todo.extend(by_name[current]["parents"])
+            return sorted(seen)
+
         nodes = []
         for spec in specs:
             choice = spec["name"] in with_children and draw(st.integers(0, 3)) == 0
+            loop = None
+            if not choice and draw(st.integers(0, 3)) == 0:
+                loop = Loop(to=draw(st.sampled_from([spec["name"], *upstream(spec["name"])])),
+                            max=draw(st.integers(1, 2)),
+                            on=tuple(draw(st.lists(st.sampled_from(
+                                (NODE_DONE, NODE_SKIPPED, NODE_FAILED)),
+                                min_size=1, max_size=2, unique=True))))
             nodes.append(Node(spec["name"], parents=spec["parents"],
                               on=spec.get("on", {}), need=spec.get("need"),
-                              choice=choice,
+                              choice=choice, loop=loop,
                               optional=not choice and draw(st.booleans())))
         return tuple(nodes)
 
@@ -543,6 +621,16 @@ def _model_machine(harness: Any) -> Any:
             self.model: dict[str, dict[str, tuple[str, str, Any]]] = {
                 s: {} for s in _SUBJECTS}
             self.tokens: list[str] = []
+            self.archived: dict[str, list[tuple[str, str, str, str]]] = {
+                s: [] for s in _SUBJECTS}
+            self.passes: dict[tuple[str, str], int] = {}
+
+        def _archive(self, s: str, name: str, reason: str) -> bool:
+            row = self.model[s].pop(name, None)
+            if row is None:
+                return False
+            self.archived[s].append((self.clock.now, name, row[0], reason))
+            return True
 
         def _tick(self) -> None:
             self.ticks += 1
@@ -588,6 +676,13 @@ def _model_machine(harness: Any) -> Any:
                     self.model[s][n.name] = (status, row[1], row[2])
                     for other in omit:
                         self.model[s].setdefault(other, (NODE_OMITTED, self.clock.now, None))
+                    loop = n.loop
+                    if (loop is not None and status in loop.on
+                            and self.passes.get((s, loop.to), 0) < loop.max):
+                        for other in (loop.to, *sorted(descendants(loop.to, self.dag))):
+                            if other == loop.to and other in self.model[s]:
+                                self.passes[(s, loop.to)] = self.passes.get((s, loop.to), 0) + 1
+                            self._archive(s, other, "loop")
                     expected += 1
             got = self.journal.conclude(n.name, candidates, token=token, status=status,
                                         branch=branch)
@@ -622,8 +717,9 @@ def _model_machine(harness: Any) -> Any:
         @rule(data=st.data(), candidates=subjects)
         def forget(self, data: Any, candidates: list[str]) -> None:
             n = self._node(data)
+            self._tick()
             expected = sum(1 for s in dict.fromkeys(candidates)
-                           if self.model[s].pop(n.name, None) is not None)
+                           if self._archive(s, n.name, "forget"))
             assert self.journal.forget(n.name, candidates) == expected
 
         @rule(data=st.data(), back=st.integers(min_value=0, max_value=5))
@@ -631,11 +727,12 @@ def _model_machine(harness: Any) -> Any:
             n = self._node(data)
             older = max(self.ticks - back, 0)
             older_than = f"2026-01-01T00:{older // 60:02d}:{older % 60:02d}+00:00"
+            self._tick()
             expected = 0
             for s in _SUBJECTS:
                 row = self.model[s].get(n.name)
                 if row and row[0] == NODE_RUNNING and row[1] < older_than:
-                    del self.model[s][n.name]
+                    self._archive(s, n.name, "release")
                     expected += 1
             assert self.journal.release(n.name, older_than) == expected
 
@@ -645,6 +742,10 @@ def _model_machine(harness: Any) -> Any:
                 return
             for s in _SUBJECTS:
                 assert self.journal.progress(s) == self._statuses(s), s
+                expected = [(name, status, reason) for _, name, status, reason
+                            in sorted(self.archived[s], key=lambda a: (a[0], a[1]))]
+                got = [(e["node"], e["status"], e["reason"]) for e in self.journal.history(s)]
+                assert got == expected, f"history of {s}"
 
     return Machine
 

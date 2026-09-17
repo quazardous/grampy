@@ -33,6 +33,11 @@ First release, planned as 0.1.0.
 - Say how a node joins its parents, as data: which statuses of each parent
   it accepts (a compensation that runs when a step failed), and how many
   parents are enough (two engines out of three).
+- Keep the history: forgetting a node, releasing a lease or looping back
+  archives the rows taken away, with when and why, readable per subject.
+- Declare bounded loops: a node that fails (or ends another chosen way)
+  sends the subject back to an earlier node, at most a given number of
+  times, after which the failure stands and can be escalated.
 - Exclusive choices: a choice node concludes by naming its branch, and the
   other branches — with whatever only they lead to — are marked omitted at
   once, so the steps after the branches still proceed.
@@ -59,9 +64,9 @@ First release, planned as 0.1.0.
   tests and prototypes.
 - SQLite driver on the standard library alone, for small deployments and
   tests against a real file shared by several processes.
-- PostgreSQL driver (SQLAlchemy Core) working on two tables you declare —
-  node rows and one revision per subject — with eligibility expressed as
-  your own `SELECT`.
+- PostgreSQL driver (SQLAlchemy Core) working on three tables you declare —
+  node rows, one revision per subject, and the history — with eligibility
+  expressed as your own `SELECT`.
 - A shared contract test suite any new driver can subclass to prove it
   behaves like the reference, including concurrency tests (competing
   claimers, claims racing a requeue) and random sequences of operations on

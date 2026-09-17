@@ -2,7 +2,7 @@
 the standard library's `sqlite3` only.
 
     SqliteDriver(conn, table="grampy_nodes", revisions="grampy_revisions",
-                 subject="subject")
+                 history="grampy_history", subject="subject")
 
 ────────────────────────────────────────────────────────────────────────
 WHY A SECOND SQL DRIVER
@@ -22,6 +22,7 @@ two tables it expects, for an application that wants them as they are:
     table       subject, node, status, started_at, finished_at, lease —
                 `(subject, node)` as primary key; timestamps ISO-8601 text
     revisions   subject (primary key), revision (integer)
+    history     the node table's columns, plus archived_at and reason
 
 Names are identifiers checked against `[A-Za-z_][A-Za-z0-9_]*`: they are
 written into SQL, never taken from users.
@@ -72,9 +73,9 @@ class Query(NamedTuple):
 
 
 def schema(table: str = "grampy_nodes", revisions: str = "grampy_revisions",
-           subject: str = "subject") -> list[str]:
+           history: str = "grampy_history", subject: str = "subject") -> list[str]:
     """The `CREATE TABLE` statements the driver expects."""
-    for name in (table, revisions, subject):
+    for name in (table, revisions, history, subject):
         _check(name)
     return [
         f"CREATE TABLE IF NOT EXISTS {table} ("
@@ -83,6 +84,10 @@ def schema(table: str = "grampy_nodes", revisions: str = "grampy_revisions",
         f"PRIMARY KEY ({subject}, node))",
         f"CREATE TABLE IF NOT EXISTS {revisions} ("
         f"{subject} NOT NULL PRIMARY KEY, revision INTEGER NOT NULL)",
+        f"CREATE TABLE IF NOT EXISTS {history} ("
+        f"{subject} NOT NULL, node TEXT NOT NULL, status TEXT NOT NULL, "
+        f"started_at TEXT NOT NULL, finished_at TEXT, lease TEXT, "
+        f"archived_at TEXT NOT NULL, reason TEXT NOT NULL)",
     ]
 
 
@@ -90,11 +95,13 @@ class SqliteDriver:
     """Node rows in `table`, revisions in `revisions`, on one connection."""
 
     def __init__(self, conn: sqlite3.Connection, *, table: str = "grampy_nodes",
-                 revisions: str = "grampy_revisions", subject: str = "subject") -> None:
-        for name in (table, revisions, subject):
+                 revisions: str = "grampy_revisions", history: str = "grampy_history",
+                 subject: str = "subject") -> None:
+        for name in (table, revisions, history, subject):
             _check(name)
         self.conn = conn
         self.table, self.revisions, self.subject = table, revisions, subject
+        self.history_table = history
 
     # -- write -------------------------------------------------------------
 
@@ -128,7 +135,8 @@ class SqliteDriver:
         return taken
 
     def conclude(self, name: str, subjects: list[Any], *, status: str,
-                 now: str, lease: str | None, omit: tuple[str, ...]) -> int:
+                 now: str, lease: str | None, omit: tuple[str, ...],
+                 reset: tuple[str, ...]) -> int:
         count = 0
         for subject in subjects:
             sql = (f"UPDATE {self.table} SET status = ?, finished_at = ? "
@@ -146,6 +154,11 @@ class SqliteDriver:
                     f"({self.subject}, node, status, started_at, finished_at) "
                     f"VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
                     (subject, other, NODE_OMITTED, now, now))
+            if reset:
+                self._raise_revision(subject)
+                for other in reset:
+                    self._take_away("node = ? AND {s} = ?", (other, subject),
+                                    now=now, reason="loop")
         return count
 
     def adopt(self, name: str, subjects: list[Any], *, now: str) -> int:
@@ -158,23 +171,37 @@ class SqliteDriver:
                 (subject, name, NODE_DONE, now, now)).rowcount
         return count
 
-    def forget(self, name: str, subjects: list[Any]) -> int:
+    def forget(self, name: str, subjects: list[Any], *, now: str) -> int:
         """Revision first, deletion second, in the caller's transaction."""
         count = 0
         for subject in subjects:
-            self.conn.execute(
-                f"INSERT INTO {self.revisions} ({self.subject}, revision) VALUES (?, 1) "
-                f"ON CONFLICT ({self.subject}) DO UPDATE SET revision = revision + 1",
-                (subject,))
-            count += self.conn.execute(
-                f"DELETE FROM {self.table} WHERE node = ? AND {self.subject} = ?",
-                (name, subject)).rowcount
+            self._raise_revision(subject)
+            count += self._take_away("node = ? AND {s} = ?", (name, subject),
+                                     now=now, reason="forget")
         return count
 
-    def release(self, name: str, *, older_than: str) -> int:
+    def release(self, name: str, *, older_than: str, now: str) -> int:
+        return self._take_away("node = ? AND status = ? AND started_at < ?",
+                               (name, NODE_RUNNING, older_than), now=now, reason="release")
+
+    def _raise_revision(self, subject: Any) -> None:
+        self.conn.execute(
+            f"INSERT INTO {self.revisions} ({self.subject}, revision) VALUES (?, 1) "
+            f"ON CONFLICT ({self.subject}) DO UPDATE SET revision = revision + 1",
+            (subject,))
+
+    def _take_away(self, where: str, params: tuple[Any, ...], *, now: str,
+                   reason: str) -> int:
+        """Archive, then delete, under the same write lock: SQLite lets no
+        other writer in between."""
+        where = where.format(s=self.subject)
+        columns = f"{self.subject}, node, status, started_at, finished_at, lease"
+        self.conn.execute(
+            f"INSERT INTO {self.history_table} ({columns}, archived_at, reason) "
+            f"SELECT {columns}, ?, ? FROM {self.table} WHERE {where}",
+            (now, reason, *params))
         return self.conn.execute(
-            f"DELETE FROM {self.table} WHERE node = ? AND status = ? AND started_at < ?",
-            (name, NODE_RUNNING, older_than)).rowcount
+            f"DELETE FROM {self.table} WHERE {where}", params).rowcount
 
     # -- read --------------------------------------------------------------
 
@@ -182,6 +209,23 @@ class SqliteDriver:
         return dict(self.conn.execute(
             f"SELECT node, status FROM {self.table} WHERE {self.subject} = ?",
             (subject,)).fetchall())
+
+    def history(self, subject: Any) -> list[dict[str, Any]]:
+        keys = ["node", "status", "started_at", "finished_at", "lease", "archived_at", "reason"]
+        return [dict(zip(keys, row, strict=True)) for row in self.conn.execute(
+            f"SELECT {', '.join(keys)} FROM {self.history_table} "
+            f"WHERE {self.subject} = ? ORDER BY archived_at, node, rowid",
+            (subject,)).fetchall()]
+
+    def loops(self, subjects: list[Any], name: str) -> dict[Any, int]:
+        counts: dict[Any, int] = {}
+        for chunk in _chunks(subjects):
+            marks = ", ".join("?" * len(chunk))
+            counts.update(self.conn.execute(
+                f"SELECT {self.subject}, COUNT(*) FROM {self.history_table} "
+                f"WHERE node = ? AND reason = 'loop' AND {self.subject} IN ({marks}) "
+                f"GROUP BY {self.subject}", (name, *chunk)).fetchall())
+        return counts
 
     def status_counts(self, name: str) -> dict[str, int]:
         return dict(self.conn.execute(

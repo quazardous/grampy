@@ -5,6 +5,7 @@
     adopt     record work already done that the journal does not know
     forget    erase it — "never started", the initial state
     release   give back the leases of a dead worker
+    history   every row forget, release or a loop took away, kept
     progress  what is recorded for ONE subject
     stages    what a BATCH went through, with durations
 
@@ -56,7 +57,18 @@ took; `conclude` and `fail` touch only the rows holding the token they
 bring (a fencing token). `token=None` is the operator's override, written
 on purpose, never a default.
 
-, AND THE JOURNAL DOES NOT READ IT
+────────────────────────────────────────────────────────────────────────
+NOTHING IS LOST: A ROW TAKEN AWAY IS ARCHIVED
+────────────────────────────────────────────────────────────────────────
+
+The absence of a row still means "never started", and the claim still
+reads only current rows. But a row does not vanish: `forget`, `release`
+and a declared loop MOVE it to the history, with when and why. That is
+where "how many times did this subject go through review", "who held it
+before the lease was released" and the loop's bound are read.
+
+────────────────────────────────────────────────────────────────────────
+ELIGIBILITY COMES FROM OUTSIDE, AND THE JOURNAL DOES NOT READ IT
 ────────────────────────────────────────────────────────────────────────
 
 A claim must stay ATOMIC across two things: the node rows and the
@@ -158,22 +170,36 @@ class JournalDriver(Protocol):
         `now`. Return the subjects inserted."""
 
     def conclude(self, name: str, subjects: list[Any], *, status: str,
-                 now: str, lease: str | None, omit: tuple[str, ...]) -> int:
+                 now: str, lease: str | None, omit: tuple[str, ...],
+                 reset: tuple[str, ...]) -> int:
         """Set `status` and `finished_at` on RUNNING rows only — and, unless
         `lease` is None, only on rows holding that lease. For every subject
-        concluded, ATOMICALLY with it, insert an `omitted` row finished at
-        `now` for each node of `omit` that has no row."""
+        concluded, ATOMICALLY with it: insert an `omitted` row finished at
+        `now` for each node of `omit` that has no row; then ARCHIVE with
+        reason `loop` and delete the rows of every node of `reset` — the
+        concluded row included when it is among them — raising the
+        subject's revision as `forget` does."""
 
     def adopt(self, name: str, subjects: list[Any], *, now: str) -> int:
         """Insert `done` rows, never overwriting an existing row."""
 
-    def forget(self, name: str, subjects: list[Any]) -> int:
-        """Delete the rows AND raise each subject's revision, atomically:
-        no `insert_if_unchanged` that read the old revision may succeed
-        afterwards. Return the count of rows deleted."""
+    def forget(self, name: str, subjects: list[Any], *, now: str) -> int:
+        """ARCHIVE with reason `forget` and delete the rows, AND raise each
+        subject's revision, atomically: no `insert_if_unchanged` that read
+        the old revision may succeed afterwards. Return the count deleted."""
 
-    def release(self, name: str, *, older_than: str) -> int:
-        """Delete RUNNING rows started before `older_than`."""
+    def release(self, name: str, *, older_than: str, now: str) -> int:
+        """ARCHIVE with reason `release` and delete the RUNNING rows started
+        before `older_than`."""
+
+    def history(self, subject: Any) -> list[dict[str, Any]]:
+        """The archived rows of one subject, oldest archive first (ties by
+        node): `node, status, started_at, finished_at, lease, archived_at,
+        reason`."""
+
+    def loops(self, subjects: list[Any], name: str) -> dict[Any, int]:
+        """`{subject: rows of `name` archived with reason `loop`}`, subjects
+        without any left out."""
 
     def progress(self, subject: Any) -> dict[str, str]:
         """`{node: status}` for one subject."""
@@ -291,6 +317,23 @@ class NodeJournal:
                 f"unknown conclusion status: {status!r} — expected "
                 f"{NODE_DONE}, {NODE_SKIPPED} or {NODE_FAILED}")
         omit: tuple[str, ...] = ()
+        subjects = _unique(subjects)
+        now = self._clock()
+        if n.loop is not None and status in n.loop.on:
+            # THE WAY BACK, per subject: under the bound, the conclusion sends
+            # it to `loop.to` in the same write; at the bound, it stands.
+            reset = (n.loop.to, *sorted(descendants(n.loop.to, self.dag)))
+            passes = self.driver.loops(subjects, n.loop.to)
+            back = [s for s in subjects if passes.get(s, 0) < n.loop.max]
+            stay = [s for s in subjects if passes.get(s, 0) >= n.loop.max]
+            touched = 0
+            if back:
+                touched += self.driver.conclude(name, back, status=status, now=now,
+                                                lease=token, omit=(), reset=reset)
+            if stay:
+                touched += self.driver.conclude(name, stay, status=status, now=now,
+                                                lease=token, omit=(), reset=())
+            return touched
         if n.choice and status != NODE_FAILED:
             if branch is None:
                 raise ValueError(
@@ -301,8 +344,8 @@ class NodeJournal:
             raise ValueError(
                 f"`branch` given, but node {name!r} "
                 f"{'failed' if n.choice else 'is not a choice'}")
-        return self.driver.conclude(name, _unique(subjects), status=status,
-                                    now=self._clock(), lease=token, omit=omit)
+        return self.driver.conclude(name, subjects, status=status, now=now,
+                                    lease=token, omit=omit, reset=())
 
     def fail(self, name: str, subjects: list[Any], *, token: str | None,
              branch: str | None = None) -> int:
@@ -366,18 +409,29 @@ class NodeJournal:
         if not subjects:
             return 0
         node(name, self.dag)
-        return self.driver.forget(name, _unique(subjects))
+        return self.driver.forget(name, _unique(subjects), now=self._clock())
 
     def release(self, name: str, older_than: str) -> int:
         """Give back the leases a dead worker has held for too long."""
         node(name, self.dag)
-        return self.driver.release(name, older_than=older_than)
+        return self.driver.release(name, older_than=older_than, now=self._clock())
 
     # -- read --------------------------------------------------------------
 
     def progress(self, subject: Any) -> dict[str, str]:
         """What is recorded for ONE subject — exactly what `dag.claimable` reads."""
         return self.driver.progress(subject)
+
+    def history(self, subject: Any) -> list[dict[str, Any]]:
+        """Every row taken away from ONE subject — by `forget`, `release` or
+        a loop — oldest first, each with `archived_at` and `reason`."""
+        return self.driver.history(subject)
+
+    def passes(self, subject: Any, name: str) -> int:
+        """How many times a declared loop sent this subject back through
+        `name` — what `Loop.max` bounds."""
+        node(name, self.dag)
+        return self.driver.loops([subject], name).get(subject, 0)
 
     def stages(self, subjects: list[Any], *,
                at: str) -> dict[str, list[list[Any]]]:

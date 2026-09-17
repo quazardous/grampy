@@ -58,6 +58,12 @@ journal.claim("crop", 10, candidates=["s1", "s2"])            # ['s1'] — s2 st
   `Node("refund", parents=("pay", "reserve"), on={"reserve": ("failed",)})`
   runs on a failure — and `need=k` starts a node once `k` parents are
   accepted: the others, not started yet, are closed by it.
+- **Nothing is lost.** `forget`, `release` and loops move rows to a
+  history (`journal.history(subject)`), with when and why.
+- **Loops are declared and bounded.** `Node("review", parents=("draft",),
+  loop=Loop(to="draft", max=3))`: a failed review sends the subject back to
+  `draft`, in the same write, at most three times; after that the failure
+  stands and a failure edge can escalate.
 - **An exclusive choice names its branch.** A `choice` node concludes with
   `branch=`; the other branches, and every node only they lead to, are
   written `omitted` in the same write. A join after the branches goes on.
@@ -102,8 +108,13 @@ nodes = sa.Table("job_nodes", metadata,
 revisions = sa.Table("job_revisions", metadata,
     sa.Column("job_id", sa.Text, primary_key=True),
     sa.Column("revision", sa.Integer, nullable=False))
+history = sa.Table("job_node_history", metadata,
+    *[sa.Column(c.name, c.type) for c in nodes.columns],
+    sa.Column("archived_at", sa.Text, nullable=False),
+    sa.Column("reason", sa.Text, nullable=False))
 
-journal = NodeJournal(PostgresDriver(conn.execute, nodes, revisions, subject="job_id"), DAG)
+journal = NodeJournal(
+    PostgresDriver(conn.execute, nodes, revisions, history, subject="job_id"), DAG)
 eligible = sa.select(jobs.c.job_id).where(jobs.c.state != "done").order_by(jobs.c.priority)
 journal.claim("fetch", 50, candidates=eligible)
 ```

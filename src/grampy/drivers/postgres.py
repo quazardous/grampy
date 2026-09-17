@@ -1,6 +1,6 @@
 """THE POSTGRESQL DRIVER — node rows in tables the application declares.
 
-    PostgresDriver(execute, table, revisions, subject="request_id")
+    PostgresDriver(execute, table, revisions, history, subject="request_id")
 
 ────────────────────────────────────────────────────────────────────────
 THE TABLES ARE INJECTED
@@ -16,6 +16,9 @@ none. It needs two `sqlalchemy.Table`s sharing a subject column (named by
                 text, compared lexically.
     revisions   one row per subject: `revision`, an integer, the subject as
                 primary key. Rows are created on demand.
+    history     the rows taken away: the node table's columns, plus
+                `archived_at` and `reason` (text); append-only, no key
+                required.
 
 ────────────────────────────────────────────────────────────────────────
 THE CONNECTION IS INJECTED TOO, AS AN `execute`
@@ -83,6 +86,8 @@ from ..journal import Entry
 REQUIRED_COLUMNS = ("node", "status", "started_at", "finished_at", "lease")
 #: THE COLUMNS THE REVISIONS TABLE MUST CARRY, besides the subject.
 REVISION_COLUMNS = ("revision",)
+#: THE COLUMNS THE HISTORY TABLE MUST CARRY, besides the subject.
+HISTORY_COLUMNS = (*REQUIRED_COLUMNS, "archived_at", "reason")
 
 
 def _ranked(candidates: Any) -> Any:
@@ -113,8 +118,10 @@ class PostgresDriver:
     SQLAlchemy Core."""
 
     def __init__(self, execute: Callable[[Any], Any], table: sa.Table,
-                 revisions: sa.Table, *, subject: str = "request_id") -> None:
-        for t, needed in ((table, REQUIRED_COLUMNS), (revisions, REVISION_COLUMNS)):
+                 revisions: sa.Table, history: sa.Table, *,
+                 subject: str = "request_id") -> None:
+        for t, needed in ((table, REQUIRED_COLUMNS), (revisions, REVISION_COLUMNS),
+                          (history, HISTORY_COLUMNS)):
             missing = [c for c in (subject, *needed) if c not in t.c]
             if missing:
                 raise ValueError(
@@ -123,6 +130,7 @@ class PostgresDriver:
         self._execute = execute
         self.table = table
         self.revisions = revisions
+        self.history_table = history
         self._subject = table.c[subject]
         self._rev_subject = revisions.c[subject]
 
@@ -198,7 +206,8 @@ class PostgresDriver:
         return [row[0] for row in rows]
 
     def conclude(self, name: str, subjects: list[Any], *, status: str,
-                 now: str, lease: str | None, omit: tuple[str, ...]) -> int:
+                 now: str, lease: str | None, omit: tuple[str, ...],
+                 reset: tuple[str, ...]) -> int:
         """The omitted rows follow in a second statement of the same
         transaction: the concluded rows stay locked until it ends, and no
         other transaction sees the conclusion without its omissions."""
@@ -217,6 +226,10 @@ class PostgresDriver:
                           "started_at": now, "finished_at": now}
                          for s in sorted(concluded) for other in omit])
                 .on_conflict_do_nothing())
+        if reset and concluded:
+            self._raise_revisions(concluded)
+            self._take_away(sa.and_(self._subject.in_(sorted(concluded)),
+                                    t.c.node.in_(list(reset))), now=now, reason="loop")
         return len(concluded)
 
     def adopt(self, name: str, subjects: list[Any], *, now: str) -> int:
@@ -228,25 +241,40 @@ class PostgresDriver:
             .returning(self._subject))
         return len(cur.fetchall())
 
-    def forget(self, name: str, subjects: list[Any]) -> int:
+    def forget(self, name: str, subjects: list[Any], *, now: str) -> int:
         """Revision first, deletion second — two statements, see the module."""
-        t, r = self.table, self.revisions
-        subjects = sorted(subjects)
-        raise_revision = postgresql.insert(r).values(
-            [{self._rev_subject.key: s, "revision": 1} for s in subjects])
-        self._execute(raise_revision.on_conflict_do_update(
-            index_elements=[self._rev_subject.key],
-            set_={"revision": r.c.revision + 1}))
-        cur = self._execute(
-            sa.delete(t).where(t.c.node == name, self._subject.in_(subjects)))
-        return cur.rowcount
-
-    def release(self, name: str, *, older_than: str) -> int:
         t = self.table
-        cur = self._execute(
-            sa.delete(t).where(t.c.node == name, t.c.status == NODE_RUNNING,
-                               t.c.started_at < older_than))
-        return cur.rowcount
+        subjects = sorted(subjects)
+        self._raise_revisions(subjects)
+        return self._take_away(sa.and_(t.c.node == name, self._subject.in_(subjects)),
+                               now=now, reason="forget")
+
+    def release(self, name: str, *, older_than: str, now: str) -> int:
+        t = self.table
+        return self._take_away(
+            sa.and_(t.c.node == name, t.c.status == NODE_RUNNING,
+                    t.c.started_at < older_than), now=now, reason="release")
+
+    def _raise_revisions(self, subjects: list[Any]) -> None:
+        r = self.revisions
+        self._execute(
+            postgresql.insert(r)
+            .values([{self._rev_subject.key: s, "revision": 1} for s in sorted(subjects)])
+            .on_conflict_do_update(index_elements=[self._rev_subject.key],
+                                   set_={"revision": r.c.revision + 1}))
+
+    def _take_away(self, where: Any, *, now: str, reason: str) -> int:
+        """Delete the rows and archive them, in ONE statement: the rows the
+        DELETE removed are the rows the INSERT archives."""
+        t, h = self.table, self.history_table
+        columns = [self._subject.key, *REQUIRED_COLUMNS]
+        gone = sa.delete(t).where(where).returning(*[t.c[c] for c in columns]).cte("gone")
+        rows = self._execute(
+            sa.insert(h).from_select(
+                [*columns, "archived_at", "reason"],
+                sa.select(*[gone.c[c] for c in columns], sa.literal(now), sa.literal(reason)))
+            .returning(h.c[self._subject.key])).fetchall()
+        return len(rows)
 
     # -- read --------------------------------------------------------------
 
@@ -255,6 +283,22 @@ class PostgresDriver:
         return {r[0]: r[1] for r in self._execute(
             sa.select(t.c.node, t.c.status).where(self._subject == subject)
         ).fetchall()}
+
+    def history(self, subject: Any) -> list[dict[str, Any]]:
+        h = self.history_table
+        keys = [*REQUIRED_COLUMNS, "archived_at", "reason"]
+        return [dict(zip(keys, row, strict=True)) for row in self._execute(
+            sa.select(*[h.c[k] for k in keys])
+            .where(h.c[self._subject.key] == subject)
+            .order_by(h.c.archived_at, h.c.node)).fetchall()]
+
+    def loops(self, subjects: list[Any], name: str) -> dict[Any, int]:
+        h = self.history_table
+        subject = h.c[self._subject.key]
+        return {row[0]: int(row[1]) for row in self._execute(
+            sa.select(subject, sa.func.count())
+            .where(subject.in_(list(subjects)), h.c.node == name, h.c.reason == "loop")
+            .group_by(subject)).fetchall()}
 
     def status_counts(self, name: str) -> dict[str, int]:
         t = self.table
