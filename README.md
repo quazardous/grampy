@@ -33,6 +33,7 @@ journal.claim("crop", 10, candidates=["s1", "s2"])            # ['s1'] — s2 st
 | module | what it does |
 |---|---|
 | `grampy.dag` | `Node`, the statuses, `check_dag`, and the **pure** claim rule: `claimable`, `claimable_nodes`, `descendants`, `ancestors` |
+| `grampy.graph` | the graph **as data**: `Graph(Document(name, version), nodes)`, a canonical dict / JSON form, strict reading with the path of every error |
 | `grampy.states` | derived from the graph: `replay_targets`, `replayed_after`, `to_undo`, `source_state`, `allowed_transitions` |
 | `grampy.journal` | `NodeJournal` — the logic (validation, rule inputs, clock) over a `JournalDriver` protocol |
 | `grampy.drivers.memory` | dict-based, deterministic, no dependency — the reference driver |

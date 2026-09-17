@@ -27,6 +27,9 @@ First release, planned as 0.1.0.
 - Declare a workflow as a graph of nodes, with forks that run in parallel,
   joins that wait for all their parents, and optional nodes that can be
   skipped without blocking their children.
+- Write a workflow as data: a versioned JSON document (name, namespace,
+  version, nodes) that can be stored, compared between versions and read
+  back; unknown keys and wrong types are refused with their path.
 - Validate a graph at startup: unknown parents, duplicate names, cycles,
   several entry points and a state posted by two nodes are rejected before
   any work is claimed.

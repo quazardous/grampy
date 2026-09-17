@@ -1,6 +1,7 @@
 """grampy — a small workflow graph for queues that already live in a storage.
 
     grampy.dag        the graph and the pure claim rule
+    grampy.graph      the graph as data: a versioned document, JSON in and out
     grampy.states     replays and allowed transitions, derived from the graph
     grampy.journal    the node journal: the logic, over a storage driver
     grampy.drivers    `memory` (reference, tests) and `postgres` (SQLAlchemy Core)
@@ -27,6 +28,7 @@ from .dag import (
     descendants,
     node,
 )
+from .graph import Document, Graph, GraphFormatError
 from .journal import JournalDriver, Lease, NodeJournal, utc_now
 from .states import (
     allowed_transitions,
@@ -40,7 +42,8 @@ __version__ = "0.1.0"
 
 __all__ = [
     "NODE_CONCLUDED", "NODE_DONE", "NODE_FAILED", "NODE_RUNNING",
-    "NODE_SATISFYING", "NODE_SKIPPED", "DagError", "JournalDriver", "Lease", "Node",
+    "NODE_SATISFYING", "NODE_SKIPPED", "DagError", "Document", "Graph", "GraphFormatError",
+    "JournalDriver", "Lease", "Node",
     "NodeJournal", "allowed_transitions", "ancestors", "check_dag", "claimable",
     "claimable_nodes", "descendants", "node", "replay_targets", "replayed_after",
     "source_state", "to_undo", "utc_now",
