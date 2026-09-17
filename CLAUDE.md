@@ -27,6 +27,14 @@ The core imports only the standard library (`tests/test_isolation.py`
 checks it). The main consumer runs Python 3.10: no `match`/`case`, no
 3.11+ features. `requires-python` stays `>=3.10`.
 
+## One package, nothing forced
+
+Rendering, interop, drivers and the test contract live in the same package
+but are never imported by `quazardous.grampy` itself: an application loads
+them — and their dependencies — only by importing them
+(`tests/test_isolation.py` checks it). A module needing a third-party
+library declares it as an extra in `pyproject.toml`.
+
 ## Drivers follow the contract
 
 The claim rule lives in the core (`quazardous.grampy.dag`, applied

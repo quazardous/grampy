@@ -48,3 +48,21 @@ def test_quazardous_stays_a_namespace():
     """No `__init__.py` in `quazardous/`: other distributions install their
     own package beside grampy under the same prefix (PEP 420)."""
     assert not (PACKAGE.parent / "__init__.py").exists()
+
+
+def test_importing_the_core_loads_no_optional_module():
+    """ONE PACKAGE, NOTHING FORCED: `import quazardous.grampy` brings the
+    engine only. Drawings, drivers and the test contract load when asked
+    for — and with them, their dependencies."""
+    import subprocess
+
+    probe = (
+        "import sys, quazardous.grampy\n"
+        "optional = ('quazardous.grampy.diagram', 'quazardous.grampy.drivers',\n"
+        "            'quazardous.grampy.testing', 'sqlite3', 'sqlalchemy', 'pytest',\n"
+        "            'hypothesis')\n"
+        "print(sorted(m for m in sys.modules if m.startswith(optional)))\n"
+    )
+    out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True,
+                         check=True).stdout.strip()
+    assert out == "[]", f"importing the core loaded {out}"
