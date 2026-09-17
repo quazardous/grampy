@@ -108,6 +108,13 @@ Not to be confused with `document.version`, which names the **graph** a
 subject is pinned to. A subject has one graph version and as many refs as
 it has comebacks.
 
+**What a version IS, grampy does not hold.** Keeping the old content,
+diffing two of them, deciding that one supersedes another: that is the
+application's business and stays there. grampy holds a label, compares it
+to another label, and hands it back — which is the whole reason a lane
+cannot decide on its own that a newer version replaces an older one, and
+why `merge` is yours to choose.
+
 | `merge` | |
 |---|---|
 | `"last"` | the latest ref wins (`Lane.throttle`, `Lane.debounce`) |
