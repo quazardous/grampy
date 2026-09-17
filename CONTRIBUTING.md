@@ -49,7 +49,7 @@ to say why.
 
 - **The core imports only the standard library.** Only
   `grampy.drivers.postgres` may import SQLAlchemy, and only
-  `grampy.testing` may import pytest. `tests/test_isolation.py` enforces
+  `grampy.testing` may import pytest and Hypothesis. `tests/test_isolation.py` enforces
   it.
 - **Python 3.10 compatible.** No `match`/`case`, no 3.11+ syntax or
   standard-library additions.

@@ -2,7 +2,7 @@
 
     the core                   the standard library and itself
     grampy.drivers.postgres    + sqlalchemy
-    grampy.testing             + pytest
+    grampy.testing             + pytest, hypothesis
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ PACKAGE = Path(__file__).resolve().parents[1] / "src" / "grampy"
 
 EXTRA = {
     "drivers/postgres.py": {"sqlalchemy"},
-    "testing.py": {"pytest"},
+    "testing.py": {"pytest", "hypothesis"},
 }
 
 

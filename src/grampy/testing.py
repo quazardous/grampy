@@ -43,6 +43,7 @@ from .dag import (
     NODE_SKIPPED,
     DagError,
     Node,
+    claimable,
     claimable_nodes,
     node,
 )
@@ -252,6 +253,25 @@ class JournalContract:
         assert journal.node_for_state("lefting") == "left"
         assert journal.node_for_state("lefted") is None
 
+    # -- the model, confronted at random ----------------------------------------
+
+    def test_the_driver_follows_the_model_on_random_graphs(self, harness):
+        """Random graphs, random sequences of claim, conclude, skip, adopt,
+        forget and release; after every step the driver must hold exactly
+        what a few lines of Python over `dag.claimable` say it should.
+
+        The sweep above covers the claim rule on one graph; this covers the
+        OPERATIONS, in orders nobody would think of writing."""
+        pytest.importorskip("hypothesis")
+        from hypothesis import HealthCheck, settings
+        from hypothesis.stateful import run_state_machine_as_test
+
+        run_state_machine_as_test(
+            _model_machine(harness),
+            settings=settings(max_examples=40, stateful_step_count=25,
+                              deadline=None, derandomize=True,
+                              suppress_health_check=list(HealthCheck)))
+
     # -- concurrency -----------------------------------------------------------
     #
     # SAID IN SESSIONS, NOT IN LOCKS. A session is one unit of work on shared
@@ -342,6 +362,133 @@ class JournalContract:
             _assert_no_orphan(store, subjects)
         finally:
             store.close()
+
+
+#: The subjects every random sequence plays with — few, so that they collide.
+_SUBJECTS = ("s0", "s1", "s2", "s3")
+
+
+def _model_machine(harness: Any) -> Any:
+    """A Hypothesis state machine: one random graph per run, one journal on
+    it, and the MODEL — `{subject: {node: (status, started_at)}}` — moved by
+    the rule written as plainly as possible."""
+    from hypothesis import strategies as st
+    from hypothesis.stateful import RuleBasedStateMachine, initialize, invariant, rule
+
+    @st.composite
+    def graphs(draw: Any) -> tuple[Node, ...]:
+        size = draw(st.integers(min_value=1, max_value=6))
+        nodes = [Node("n0", optional=draw(st.booleans()))]
+        for i in range(1, size):
+            earlier = [n.name for n in nodes]
+            parents = draw(st.lists(st.sampled_from(earlier), min_size=1,
+                                    max_size=min(3, len(earlier)), unique=True))
+            nodes.append(Node(f"n{i}", parents=tuple(sorted(parents)),
+                              optional=draw(st.booleans())))
+        return tuple(nodes)
+
+    subjects = st.lists(st.sampled_from(_SUBJECTS), max_size=6)
+
+    class Machine(RuleBasedStateMachine):
+        @initialize(dag=graphs())
+        def start(self, dag: tuple[Node, ...]) -> None:
+            self.dag = dag
+            self.clock = Clock("2026-01-01T00:00:00+00:00")
+            self.ticks = 0
+            self.journal = harness.journal(dag, self.clock)
+            self.model: dict[str, dict[str, tuple[str, str]]] = {s: {} for s in _SUBJECTS}
+
+        def _tick(self) -> None:
+            self.ticks += 1
+            self.clock.now = f"2026-01-01T00:{self.ticks // 60:02d}:{self.ticks % 60:02d}+00:00"
+
+        def _node(self, data: Any) -> Node:
+            return data.draw(st.sampled_from(self.dag))
+
+        def _statuses(self, subject: str) -> dict[str, str]:
+            return {n: row[0] for n, row in self.model[subject].items()}
+
+        @rule(data=st.data(), candidates=subjects,
+              limit=st.integers(min_value=0, max_value=4))
+        def claim(self, data: Any, candidates: list[str], limit: int) -> None:
+            n = self._node(data)
+            self._tick()
+            expected: list[str] = []
+            for s in candidates:
+                if len(expected) < limit and claimable(n.name, self.dag, self._statuses(s)):
+                    self.model[s][n.name] = (NODE_RUNNING, self.clock.now)
+                    expected.append(s)
+            got = self.journal.claim(n.name, limit, candidates=harness.candidates(candidates))
+            assert sorted(got) == sorted(expected), f"claim {n.name} {candidates}"
+
+        @rule(data=st.data(), candidates=subjects,
+              status=st.sampled_from((NODE_DONE, NODE_SKIPPED, NODE_FAILED)))
+        def conclude(self, data: Any, candidates: list[str], status: str) -> None:
+            n = self._node(data)
+            self._tick()
+            expected = 0
+            for s in dict.fromkeys(candidates):
+                row = self.model[s].get(n.name)
+                if row and row[0] == NODE_RUNNING:
+                    self.model[s][n.name] = (status, row[1])
+                    expected += 1
+            assert self.journal.conclude(n.name, candidates, status=status) == expected
+
+        @rule(data=st.data(), candidates=subjects)
+        def skip(self, data: Any, candidates: list[str]) -> None:
+            n = self._node(data)
+            if not n.optional:
+                return
+            self._tick()
+            expected = 0
+            for s in dict.fromkeys(candidates):
+                statuses = self._statuses(s)
+                if n.name not in statuses and all(
+                        statuses.get(p) in NODE_SATISFYING for p in n.parents):
+                    self.model[s][n.name] = (NODE_SKIPPED, self.clock.now)
+                    expected += 1
+            got = self.journal.skip(n.name, candidates=harness.candidates(candidates))
+            assert got == expected, f"skip {n.name} {candidates}"
+
+        @rule(data=st.data(), candidates=subjects)
+        def adopt(self, data: Any, candidates: list[str]) -> None:
+            n = self._node(data)
+            self._tick()
+            expected = 0
+            for s in dict.fromkeys(candidates):
+                if n.name not in self.model[s]:
+                    self.model[s][n.name] = (NODE_DONE, self.clock.now)
+                    expected += 1
+            assert self.journal.adopt(n.name, candidates) == expected
+
+        @rule(data=st.data(), candidates=subjects)
+        def forget(self, data: Any, candidates: list[str]) -> None:
+            n = self._node(data)
+            expected = sum(1 for s in dict.fromkeys(candidates)
+                           if self.model[s].pop(n.name, None) is not None)
+            assert self.journal.forget(n.name, candidates) == expected
+
+        @rule(data=st.data(), back=st.integers(min_value=0, max_value=5))
+        def release(self, data: Any, back: int) -> None:
+            n = self._node(data)
+            older = max(self.ticks - back, 0)
+            older_than = f"2026-01-01T00:{older // 60:02d}:{older % 60:02d}+00:00"
+            expected = 0
+            for s in _SUBJECTS:
+                row = self.model[s].get(n.name)
+                if row and row[0] == NODE_RUNNING and row[1] < older_than:
+                    del self.model[s][n.name]
+                    expected += 1
+            assert self.journal.release(n.name, older_than) == expected
+
+        @invariant()
+        def the_journal_holds_the_model(self) -> None:
+            if not hasattr(self, "journal"):
+                return
+            for s in _SUBJECTS:
+                assert self.journal.progress(s) == self._statuses(s), s
+
+    return Machine
 
 
 def _race(claim: Any, commit_claim: Any, commit_other: Any) -> None:

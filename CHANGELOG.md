@@ -50,5 +50,6 @@ First release, planned as 0.1.0.
   node rows and one revision per subject — with eligibility expressed as
   your own `SELECT`.
 - A shared contract test suite any new driver can subclass to prove it
-  behaves like the reference, including concurrency tests: competing
-  claimers, and claims racing a requeue.
+  behaves like the reference, including concurrency tests (competing
+  claimers, claims racing a requeue) and random sequences of operations on
+  random graphs checked step by step against the rule.
