@@ -262,24 +262,34 @@ function render(state) {
       g.getBoundingClientRect();
     }
     const at = target(brick, slots);
+    // WHERE IT WAS DEFUSED, not where it is going. A defused brick becomes
+    // claimable at `pack` in the same breath, so by the time this runs it has
+    // already been given the packing queue's slot — and the sparkle would go
+    // off there instead of at the defuse station.
+    const was = before && before.at ? before.at : at;
     if (at.hidden) overflow[brick.node] = (overflow[brick.node] || 0) + 1;
     if (brick.place === "inbox" && brick.cooldown > 0) {
       nextCooldown = nextCooldown === null ? brick.cooldown : Math.min(nextCooldown, brick.cooldown);
     }
-    Lab.place(g, at);
+    const revealing = brick.tnt && brick.revealed && before && !before.revealed;
+    // A BRICK BEING DEFUSED STAYS PUT while it happens. It becomes claimable
+    // at `pack` the instant `defuse` concludes, so moving it first would play
+    // the whole reveal at the packing queue — which is not where it was
+    // defused.
+    if (!revealing) Lab.place(g, at);
     g.style.opacity = at.hidden ? "0" : "";
     g.classList.toggle("working", brick.place === "station");
     g.classList.toggle("selected", brick.id === selected);
     g.classList.remove("returnable");
 
-    if (brick.tnt && brick.revealed && before && !before.revealed) {
-      // Defused: the brick shows its true colour once it has arrived.
+    if (revealing) {
+      Lab.paint(g, brick, true, colours, brick.crate === "salvage");
+      g.classList.add("revealing");
+      Lab.sparkle(effects, was.x, was.y);
       setTimeout(() => {
-        Lab.paint(g, brick, true, colours, brick.crate === "salvage");
-        g.classList.add("revealing");
-        Lab.sparkle(effects, at.x, at.y);
-      }, 450);
-      setTimeout(() => g.classList.remove("revealing"), 1600);
+        g.classList.remove("revealing");
+        Lab.place(g, at);          // …and only then does it move on
+      }, 900);
     } else {
       Lab.paint(g, brick, brick.revealed, colours, brick.crate === "salvage");
     }
@@ -288,7 +298,7 @@ function render(state) {
       Lab.puff(effects, at.x, at.y);
     }
     if (brick.place !== "boom") g.classList.remove("wasted");
-    seen.set(brick.id, { place: brick.place, revealed: brick.revealed });
+    seen.set(brick.id, { place: brick.place, revealed: brick.revealed, at });
   }
 
   for (const g of [...layer.children]) {

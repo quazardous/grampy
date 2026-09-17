@@ -8,6 +8,7 @@ What grampy guarantees, mechanism by mechanism. The short version is in the
 - [Joins, choices and failure edges](#joins-choices-and-failure-edges)
 - [Going back: history, loops, replay](#going-back-history-loops-replay)
 - [Time: retries, leases, waits, grace](#time-retries-leases-waits-grace)
+- [Groups: subjects worked together](#groups-subjects-worked-together)
 - [Lanes: subjects that come back](#lanes-subjects-that-come-back)
 - [Policies: one workflow, different limits](#policies-one-workflow-different-limits)
 - [Rate limits and concurrency](#rate-limits-and-concurrency)
@@ -82,6 +83,36 @@ time.
 
 **One clock.** The journal takes its time from the driver — the database server
 for PostgreSQL — so workers on several machines agree on what is due.
+
+## Groups: subjects worked together
+
+`Node("pack", parents=("sort",), group=Group(size=5))` is not claimed one
+subject at a time. The claim gathers `size` subjects **sharing a key** and
+hands them back under one lease, so a worker does one thing with all of them —
+a bag of five bricks of a colour, a feed file of ten thousand lines, one call
+to a service that charges per call.
+
+**The key is not grampy's.** It travels with the candidates — a second column
+of your query, a `(subject, key)` pair in a plain iterable, or `group_of` in
+[the items layer](items.md) — and is compared, never read, like a lane's `ref`.
+`per_key=False` gathers any subjects, whatever their key.
+
+**A whole group or none.** A short group is simply not claimable, and nothing
+is written while one fills: there is no half-gathered state to repair after a
+crash. Two workers whose candidate lists overlap without matching could
+otherwise each win a piece — one bag of two and one of one, neither of them a
+group — so a grouped claim takes the driver's guard on `group|<node>|<key>`,
+the same one lanes and rate limits take.
+
+**`max_wait` is optional, and its absence is a choice.** Past `max_wait` after
+the OLDEST member became ready, an incomplete group goes as it is, and the
+worker sees how many it really got. Without it, a key that never gathers
+`size` subjects waits for ever — which is what you want for a bag that must be
+full, and starvation for a key that is merely rare. The shared contract tests
+both, so neither is an accident.
+
+The clock is the parents' conclusion: a node with no parents has no clock, and
+a group of those only ever goes when it is full.
 
 ## Lanes: subjects that come back
 

@@ -19,6 +19,17 @@ def ordered_subjects(subjects):
     return Query(f"SELECT column1 FROM (VALUES {values}) ORDER BY column2", params)
 
 
+def keyed_subjects(pairs):
+    """Candidates carrying a grouping key: subject, key, then the order."""
+    pairs = list(pairs)
+    if not pairs:
+        return Query("SELECT NULL, NULL WHERE 0")
+    values = ", ".join("(?, ?, ?)" for _ in pairs)
+    params = tuple(x for i, (s, k) in enumerate(pairs) for x in (s, k, i))
+    return Query(f"SELECT column1, column2 FROM (VALUES {values}) ORDER BY column3",
+                 params)
+
+
 def connect(path):
     return sqlite3.connect(path, timeout=30, check_same_thread=False)
 
@@ -39,6 +50,9 @@ class SqliteHarness:
 
     def candidates(self, subjects):
         return ordered_subjects(subjects)
+
+    def keyed(self, pairs):
+        return keyed_subjects(pairs)
 
     def seed(self, journal, subject, progress):
         for name, status in progress.items():
@@ -81,6 +95,9 @@ class SqliteSession:
 
     def candidates(self, subjects):
         return ordered_subjects(subjects)
+
+    def keyed(self, pairs):
+        return keyed_subjects(pairs)
 
     def commit(self):
         self.conn.commit()

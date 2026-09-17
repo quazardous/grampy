@@ -52,6 +52,7 @@ from .dag import (
     NODE_SCHEDULED,
     NODE_SKIPPED,
     DagError,
+    Group,
     Lane,
     Loop,
     Node,
@@ -780,6 +781,127 @@ class JournalContract:
                 assert check.journal.counts("gpu")["running"] == 3
             finally:
                 check.rollback()
+        finally:
+            store.close()
+
+    # -- groups ----------------------------------------------------------------
+
+    #: Sorting, then packing five of a colour together.
+    PACKING = (Node("sort"), Node("pack", parents=("sort",), group=Group(size=3)))
+
+    def _sorted(self, harness, journal, bricks):
+        """Every brick through `sort`, so `pack` is the only thing left."""
+        lease = journal.claim("sort", len(bricks),
+                              candidates=harness.candidates(list(bricks)))
+        journal.conclude("sort", list(lease), token=lease.token)
+
+    def test_a_group_goes_whole_or_not_at_all(self, harness, clock):
+        journal = harness.journal(self.PACKING, clock)
+        bricks = {"b1": "red", "b2": "blue", "b3": "red", "b4": "blue", "b5": "red"}
+        self._sorted(harness, journal, bricks)
+        candidates = harness.keyed(bricks.items())
+
+        assert sorted(journal.claim("pack", 10, candidates=candidates)) == \
+            ["b1", "b3", "b5"], "the three reds went together"
+        assert journal.claim("pack", 10, candidates=candidates) == [], \
+            "two blues are not a group of three, and nothing was written for them"
+
+    def test_a_group_is_one_lease_over_every_member(self, harness, clock):
+        journal = harness.journal(self.PACKING, clock)
+        bricks = {"b1": "red", "b2": "red", "b3": "red"}
+        self._sorted(harness, journal, bricks)
+        lease = journal.claim("pack", 10, candidates=harness.keyed(bricks.items()))
+        assert sorted(lease) == ["b1", "b2", "b3"]
+        # ONE token for the group: the worker concludes them together, and
+        # the rows carry it, which is what makes the batch findable later.
+        assert journal.conclude("pack", list(lease), token=lease.token) == 3
+
+    def test_two_keys_never_end_up_in_one_group(self, harness, clock):
+        journal = harness.journal(self.PACKING, clock)
+        bricks = {"b1": "red", "b2": "blue", "b3": "red", "b4": "blue",
+                  "b5": "blue", "b6": "red"}
+        self._sorted(harness, journal, bricks)
+        candidates = harness.keyed(bricks.items())
+        first = sorted(journal.claim("pack", 10, candidates=candidates))
+        second = sorted(journal.claim("pack", 10, candidates=candidates))
+        assert first == ["b1", "b3", "b6"], "reds, in the order they were offered"
+        assert second == ["b2", "b4", "b5"], "then blues — never a mixture"
+
+    def test_max_wait_lets_a_short_group_go_as_it_is(self, harness, clock):
+        nodes = (Node("sort"),
+                 Node("pack", parents=("sort",), group=Group(size=3, max_wait="1h")))
+        journal = harness.journal(nodes, clock)
+        clock.now = _at(0)
+        bricks = {"b1": "blue", "b2": "blue"}
+        self._sorted(harness, journal, bricks)
+        candidates = harness.keyed(bricks.items())
+
+        clock.now = _at(59)
+        assert journal.claim("pack", 10, candidates=candidates) == [], "not yet"
+        clock.now = _at(61)
+        assert sorted(journal.claim("pack", 10, candidates=candidates)) == ["b1", "b2"], \
+            "past max_wait an incomplete group goes, and the worker sees its size"
+
+    def test_without_max_wait_a_short_group_waits_for_ever(self, harness, clock):
+        """Said plainly because it is a choice, not an oversight: a rare key
+        with no `max_wait` never fills, and never goes."""
+        journal = harness.journal(self.PACKING, clock)
+        clock.now = _at(0)
+        self._sorted(harness, journal, {"b1": "pink"})
+        candidates = harness.keyed([("b1", "pink")])
+        clock.now = _at(60 * 24 * 365)
+        assert journal.claim("pack", 10, candidates=candidates) == []
+
+    def test_a_group_without_a_key_takes_any_subjects(self, harness, clock):
+        nodes = (Node("sort"),
+                 Node("pack", parents=("sort",), group=Group(size=3, per_key=False)))
+        journal = harness.journal(nodes, clock)
+        bricks = {"b1": "red", "b2": "blue", "b3": "green"}
+        self._sorted(harness, journal, bricks)
+        assert sorted(journal.claim("pack", 10, candidates=harness.keyed(bricks.items()))) \
+            == ["b1", "b2", "b3"], "a feed file of ten thousand of anything"
+
+    def test_two_claimers_never_split_one_group(self, harness, clock):
+        """Both workers see the same three reds and both decide to take them.
+        Only one may end up holding any of them: a group half taken is a bag
+        that will never be filled and a worker that cannot finish.
+
+        Nothing new guards this — it is `insert_if_unchanged`, the same write
+        that stops two workers holding one node. The test is here because a
+        group makes the failure worse, not because the rule is different.
+        """
+        store = harness.store(self.PACKING, clock)
+        try:
+            bricks = {"b1": "red", "b2": "red", "b3": "red", "b4": "red"}
+            setup = store.session()
+            lease = setup.journal.claim("sort", 3,
+                                        candidates=setup.candidates(list(bricks)))
+            setup.journal.conclude("sort", list(lease), token=lease.token)
+            setup.commit()
+
+            # THE TWO SEE OVERLAPPING BUT DIFFERENT CANDIDATES — b4 reached
+            # one worker and not the other, which is ordinary when each runs
+            # its own query a moment apart. This is what makes a split
+            # possible: the write refuses a subject one at a time, so each
+            # could win the part the other did not ask for and walk away
+            # holding a piece. Reversing one list would not do: the same set
+            # in another order still conflicts on every row.
+            one, two = store.session(), store.session()
+            first: list[Any] = []
+            second: list[Any] = []
+            mine = [("b1", "red"), ("b2", "red"), ("b3", "red")]
+            theirs = [("b2", "red"), ("b3", "red"), ("b4", "red")]
+
+            def other() -> None:
+                second.extend(two.journal.claim("pack", 10,
+                                                candidates=two.keyed(theirs)))
+
+            first.extend(one.journal.claim("pack", 10, candidates=one.keyed(mine)))
+            _race(other, two.commit, one.commit)
+
+            assert not [s for s in (first, second) if s and len(s) < 3], (
+                f"a lease holds part of a group: {first} and {second} — a bag "
+                f"that can never be filled, and a worker that cannot finish")
         finally:
             store.close()
 

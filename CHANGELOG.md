@@ -20,6 +20,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Work several subjects together: a node can gather a group of a size you set,
+  sharing a key your candidates carry — five bricks of one colour, ten thousand
+  lines for one file — and hand them to a worker under a single lease. A group
+  goes whole or not at all, and nothing is stored while one fills. Set a
+  maximum wait and a short group goes anyway once its oldest member has waited
+  that long; leave it out and the group waits until it is full.
+
 ## [0.2.0] - 2026-09-18
 
 The first release. Installed as `grampy-q`, imported as

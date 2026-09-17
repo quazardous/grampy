@@ -92,6 +92,19 @@ def ordered_subjects(subjects, subject_type=str):
     return sa.select(values.c.subject).order_by(values.c.rank)
 
 
+def keyed_subjects(pairs, subject_type=str):
+    """Candidates carrying a grouping key: subject, key, then the order."""
+    kind = _type(subject_type)
+    pairs = list(pairs)
+    if not pairs:
+        return sa.select(sa.cast(sa.null(), kind).label("subject"),
+                         sa.cast(sa.null(), sa.Text).label("grampy_key")).where(sa.false())
+    values = sa.values(sa.column("subject", kind), sa.column("grampy_key", sa.Text),
+                       sa.column("rank", sa.Integer),
+                       name="candidates").data([(s, k, i) for i, (s, k) in enumerate(pairs)])
+    return sa.select(values.c.subject, values.c.grampy_key).order_by(values.c.rank)
+
+
 class PostgresHarness:
     def __init__(self, conn):
         self.conn = conn
@@ -120,6 +133,9 @@ class PostgresHarness:
 
     def candidates(self, subjects):
         return ordered_subjects(subjects, self.subject_type)
+
+    def keyed(self, pairs):
+        return keyed_subjects(pairs, self.subject_type)
 
     def seed(self, journal, subject, progress):
         for name, status in progress.items():
@@ -169,6 +185,9 @@ class PostgresSession:
 
     def candidates(self, subjects):
         return ordered_subjects(subjects)
+
+    def keyed(self, pairs):
+        return keyed_subjects(pairs)
 
     def commit(self):
         self.transaction.commit()

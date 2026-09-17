@@ -66,6 +66,7 @@ Each line links to [the rules](https://github.com/quazardous/grampy/blob/main/do
 | [retries](https://github.com/quazardous/grampy/blob/main/docs/rules.md#time-retries-leases-waits-grace) | declared backoff — constant, linear or exponential, capped, with jitter |
 | [leases](https://github.com/quazardous/grampy/blob/main/docs/rules.md#time-retries-leases-waits-grace) | per node, given back by `journal.expire()` when a worker dies |
 | [waits and grace](https://github.com/quazardous/grampy/blob/main/docs/rules.md#time-retries-leases-waits-grace) | settled by a durable signal, recorded even before the wait, or failed at its timeout |
+| [groups](https://github.com/quazardous/grampy/blob/main/docs/rules.md#groups-subjects-worked-together) | subjects worked together — five of a colour, ten thousand for one file — a whole group or none |
 | [lanes](https://github.com/quazardous/grampy/blob/main/docs/rules.md#lanes-subjects-that-come-back) | a subject that comes back waits, merges with the version waiting, runs again after a cooldown |
 | [policies](https://github.com/quazardous/grampy/blob/main/docs/rules.md#policies-one-workflow-different-limits) | one workflow, subjects treated differently: their own retries, leases and **budgets** |
 | [rate and concurrency](https://github.com/quazardous/grampy/blob/main/docs/rules.md#rate-limits-and-concurrency) | several bands at once (GCRA, with bursts), a cap per node, per policy |

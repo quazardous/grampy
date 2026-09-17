@@ -80,17 +80,27 @@ def test_the_build_packs_grampy_and_the_scenario(tmp_path, monkeypatch, scenario
 def test_a_sorted_brick_sent_back_twice_runs_once_more_with_its_last_version(scenario):
     world = scenario.World(seed=5, settings=scenario.Settings(
         arrivals_per_minute=0.0, tnt_share=0.0, returns_share=0.0))
-    world.add_bricks(1, tnt=False)
-    for _ in range(60):
+    # A BAG IS FIVE OF A COLOUR, so one brick alone never leaves the line:
+    # the lane is what this test is about, and it needs a shipped brick to
+    # send back.
+    world.add_bricks(5, tnt=False)
+    for brick in world.bricks.values():
+        brick.colour = "red"
+    for _ in range(90):
         world.tick(1.0)
         if world.finished.get(1, ("",))[0] == "shipped":
             break
-    assert world.shipped == 1
+    assert world.shipped == 5
     shipped_at = world.elapsed
     assert world.send_back(1) is True
     world.tick(1.0)
     assert world.send_back(1) is True, "a waiting brick merges its new version"
     assert world.send_back(999) is False
+    # THE WHOLE BAG GOES BACK, or the second pass could never pack: five of a
+    # colour are needed, and brick 1 alone would wait for ever. Brick 1 is
+    # still the one sent back twice, which is what this test is about.
+    for other in (2, 3, 4, 5):
+        assert world.send_back(other) is True
     state = json.loads(world.tick(1.0))
     [brick] = [b for b in state["bricks"] if b["id"] == 1]
     assert brick["place"] == "inbox" and brick["version"] == 3 and brick["cooldown"] > 0
@@ -99,11 +109,11 @@ def test_a_sorted_brick_sent_back_twice_runs_once_more_with_its_last_version(sce
     while world.elapsed - shipped_at < scenario.COOLDOWN - 1:
         state = json.loads(world.tick(1.0))
         assert [b for b in state["bricks"] if b["id"] == 1][0]["place"] == "inbox"
-    for _ in range(80):
+    for _ in range(120):
         world.tick(1.0)
-        if world.shipped == 2:
+        if world.shipped == 10:
             break
-    assert world.shipped == 2, "one more pass, not two"
+    assert world.shipped == 10, "one more pass for the bag, not two"
     history = world.journal.history(1)
     assert [e["lease"] for e in history if e["status"] == "entered"] == ["v1", "v3"]
     assert any(e["node"] == "pack" and e["reason"] == "arrival" for e in history)

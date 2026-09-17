@@ -176,11 +176,17 @@ class PostgresDriver:
         parent not concluded — so that a page is mostly takable."""
         t, r = self.table, self.revisions
         c = _ranked(candidates)
-        candidate = list(c.c)[0]
+        columns = list(c.c)
+        candidate = columns[0]
+        # A SECOND COLUMN IS THE GROUPING KEY, carried and never read. The
+        # rank this driver adds is always last, so anything between the two
+        # is the caller's.
+        grouped = columns[1] if len(columns) > 2 else sa.literal(None)
         held = t.alias("d")
         query = (
             sa.select(candidate, c.c.grampy_rank,
-                      sa.func.coalesce(r.c.revision, 0), r.c.policy, r.c.version)
+                      sa.func.coalesce(r.c.revision, 0), r.c.policy, r.c.version,
+                      grouped.label("grampy_key"))
             .select_from(c.outerjoin(r, self._rev_subject == candidate))
             .order_by(c.c.grampy_rank)
             .limit(int(page)))
@@ -210,7 +216,8 @@ class PostgresDriver:
                     due[subject][n] = started
                 if ended is not None:
                     finished[subject][n] = ended
-            yield [Entry(f[0], int(f[2]), rows[f[0]], due[f[0]], finished[f[0]], f[3], f[4])
+            yield [Entry(f[0], int(f[2]), rows[f[0]], due[f[0]], finished[f[0]], f[3], f[4],
+                         f[5])
                    for f in found]
             if len(found) < page:
                 return

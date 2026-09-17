@@ -7,6 +7,7 @@
     omitted_by       what a choice leaves dead when it takes one branch
     Loop             a declared way back: which statuses send the subject where
     Lane             a declared way in: how a subject coming back waits
+    Group            subjects worked together: a whole group or none
     descendants      everything downstream of a node
     ancestors        everything upstream of a node
     claimable        can this node be taken, given what is recorded?
@@ -193,6 +194,40 @@ class Lane:
 
 
 @dataclass(frozen=True)
+class Group:
+    """SUBJECTS WORKED TOGETHER: the claim hands out a whole group or none.
+
+    A node that groups is not claimed one subject at a time. The claim
+    gathers `size` subjects sharing a key and hands them back under ONE
+    lease, so the worker does one thing with all of them — a bag of five
+    bricks of a colour, a feed file of ten thousand lines, one call to a
+    service that charges per call.
+
+        size       how many go together
+        max_wait   past this long after the OLDEST member became ready, an
+                   incomplete group goes anyway. Without it a rare key waits
+                   for as long as it takes to fill — which is sometimes what
+                   you want, and sometimes starvation; see `docs/rules.md`
+        per_key    False gathers any subjects, whatever their key: a feed
+                   file of ten thousand of anything
+
+    THE KEY IS NOT GRAMPY'S. It travels with the candidates — a second
+    column of your query, a `(subject, key)` pair in a plain iterable — and
+    is compared, never read, like a lane's `ref` or a subject's policy.
+
+    Nothing is stored while a group fills: a node whose group is short is
+    simply not claimable. There is no half-gathered state to clean up.
+    """
+
+    size: int
+    max_wait: float | int | str | None = None
+    per_key: bool = True
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "max_wait", canonical(self.max_wait))
+
+
+@dataclass(frozen=True)
 class Node:
     """A node of the graph: who it descends from, and what it projects.
 
@@ -286,6 +321,7 @@ class Node:
     concurrency: int | None = None
     per: str = "all"
     lane: Lane | None = None
+    group: Group | None = None
 
     def __post_init__(self) -> None:
         for name in ("lease", "timeout", "grace"):
@@ -540,6 +576,8 @@ def check_dag(dag: tuple[Node, ...]) -> None:
             raise DagError(f"node {n.name!r}: grace skips an optional node — this one is not")
         if n.lane is not None:
             _check_lane(n)
+        if n.group is not None:
+            _check_group(n)
 
 
     # ── NO CYCLE, PROVEN BY A WALK ─────────────────────────────────
@@ -589,6 +627,31 @@ def check_dag(dag: tuple[Node, ...]) -> None:
                     f"state {state!r} is posted by {posted_by[state]!r} AND by "
                     f"{n.name!r} — the label becomes ambiguous")
             posted_by[state] = n.name
+
+
+def _check_group(n: Node) -> None:
+    """A group gathers subjects a worker takes together; it cannot sit on a
+    node no worker claims, nor on one that concludes by naming a branch."""
+    group = n.group
+    assert group is not None
+    if not isinstance(group, Group):
+        raise DagError(f"node {n.name!r}: group takes a Group")
+    if group.size < 1:
+        raise DagError(f"node {n.name!r}: group size={group.size!r} — a group of "
+                       f"fewer than one subject is not a group")
+    if group.max_wait is not None:
+        try:
+            if seconds(group.max_wait) <= 0:
+                raise ValueError("a duration must last")
+        except ValueError as exc:
+            raise DagError(f"node {n.name!r}: group max_wait "
+                           f"{group.max_wait!r} — {exc}") from exc
+    unfit = [label for label in ("wait", "lane", "choice")
+             if getattr(n, label) not in (None, False)]
+    if unfit:
+        raise DagError(
+            f"node {n.name!r} groups its subjects, so a worker takes them "
+            f"together: it cannot also take {unfit}")
 
 
 def _check_lane(n: Node) -> None:

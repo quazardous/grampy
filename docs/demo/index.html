@@ -17,7 +17,7 @@
     <div class="brand">
       <p class="kicker">grampy brick lab</p>
       <h1>Brick Sorter</h1>
-      <p>A sorting line run by <a href="https://github.com/quazardous/grampy">grampy</a> — the real library, executing in your browser. Every brick is a subject, every tray a node, and the line sorts bricks by colour. A TNT brick hides its colour: defused, it shows it and gets sorted; past saving, it goes to waste. A sorted brick sent back waits in the inbox lane before it runs again. <a href="#code">See the code</a>.</p>
+      <p>A sorting line run by <a href="https://github.com/quazardous/grampy">grampy</a> — the real library, executing in your browser. Every brick is a subject, every tray a node, and the line sorts bricks by colour. A TNT brick hides its colour: defused, it shows it and gets sorted; past saving, it goes to waste. A sorted brick sent back waits in the inbox lane before it runs again, and the packing station holds its bricks until five share a colour. <a href="#code">See the code</a>.</p>
     </div>
     <dl class="tally" aria-live="polite">
       <div><dt>Clock</dt><dd id="clock">--:--:--</dd></div>
@@ -151,6 +151,7 @@ journal.expire()</code></pre>
     <li><span class="glyph glyph-retry"></span><span><b>defuse</b> has a <code>Retry(limit=3, exponential)</code>: a failure goes round the return belt and comes back later — 8 s, 16 s, 32 s.</span></li>
     <li><span class="glyph glyph-fail"></span><span><b>reject</b> accepts only <em>failed</em> parents (<code>on=…</code>, <code>need=1</code>): past the last retry, or when the squad never came, the brick goes to waste.</span></li>
     <li><span class="glyph glyph-join"></span><span><b>pack</b> joins both routes: <code>omitted</code> satisfies it, so a clean brick and a defused one both land in the tray of their colour.</span></li>
+    <li><span class="glyph glyph-queue"></span><span><b>pack waits for five bricks of one colour</b> before it runs — a bag is uniform or it is not a bag. Bricks pile up in front of it until a colour has five, then the whole group goes to one worker under one lease. Nothing is stored while a group fills: a short group simply is not claimable, so there is no half-filled bag to repair after a crash.</span></li>
     <li><span class="glyph glyph-queue"></span><span>The dashed pads are <b>waiting</b>: a brick sits there until its node is claimable and a worker is free. Inside a tray, it is being worked.</span></li>
   </ul>
 </section>

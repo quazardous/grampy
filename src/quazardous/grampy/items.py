@@ -139,6 +139,12 @@ class Adapter:
         it up rather than doing it — see the module docstring."""
         return True
 
+    def group_of(self, item: Any) -> str | None:
+        """What this item is grouped BY, for a node that works subjects
+        together — a colour, a destination, a customer. Compared, never read.
+        `None` puts everything in one group."""
+        return None
+
 
 class ItemLease(list):
     """The items a claim took — a plain list of YOUR objects — with the
@@ -217,7 +223,8 @@ class Items:
         same call and left out of the lease, so what comes back is what there
         is work to do on.
         """
-        given, candidates = self._subjects(candidates)
+        given, candidates = self._subjects(
+            candidates, grouping=node(name, self.journal.dag).group is not None)
         lease = self.journal.claim(name, limit, candidates=candidates)
         # Objects handed in travel with the claim; anything known only by
         # its id is loaded, exactly as a driver's query would be.
@@ -294,14 +301,22 @@ class Items:
         _, candidates = self._subjects(candidates)
         return self.journal.settle(candidates)
 
-    def _subjects(self, candidates: Any) -> tuple[dict[Any, Any], Any]:
+    def _subjects(self, candidates: Any, *,
+                  grouping: bool = False) -> tuple[dict[Any, Any], Any]:
         """`({id: item}, what the journal gets)`. Items become their ids and
-        stay in hand; a driver's query travels on untouched."""
+        stay in hand; a driver's query travels on untouched.
+
+        A NODE THAT GROUPS gets `(id, key)` pairs instead, the key coming
+        from `group_of` — the one place the application says what makes two
+        subjects belong together.
+        """
         if not _are_items(candidates):
             return {}, candidates
         # THE ADAPTER SEES THE BATCH AS IT CAME, and says what is an item.
         given = {self.adapter.id_of(i): i
                  for i in self.adapter.inflate(list(candidates))}
+        if grouping:
+            return given, [(s, self.adapter.group_of(i)) for s, i in given.items()]
         return given, list(given)
 
     def _loaded(self, lease: Lease) -> dict[Any, Any]:

@@ -25,6 +25,7 @@ from quazardous.grampy import (
     NODE_SCHEDULED,
     Document,
     Graph,
+    Group,
     Lane,
     Node,
     NodeJournal,
@@ -51,7 +52,10 @@ GRAPH = Graph(Document("brick-sorter", version="1", namespace="demo"), (
     # policy's grace is the safety net, for a line running no polisher at
     # all. A policy changes settings, never the structure.
     Node("polish", parents=("sort",), optional=True),
-    Node("pack", parents=("polish", "defuse")),
+    # FIVE OF A COLOUR MAKE A BAG. `pack` is not claimed one brick at a
+    # time: the claim gathers a group sharing a key — here the colour, which
+    # the adapter below hands over — and a worker bags them together.
+    Node("pack", parents=("polish", "defuse"), group=Group(size=5)),
 ), policies={"salvage": {"polish": {"grace": "20s"}}})
 # --8<-- [end:graph]
 
@@ -90,6 +94,11 @@ class Bricks(Adapter):
     def branch(self, brick, node):
         """A TNT brick goes to quarantine; the others go straight to sorting."""
         return "quarantine" if brick.tnt else "sort"
+
+    def group_of(self, brick):
+        """WHAT MAKES A BAG UNIFORM: its colour. grampy compares this and
+        never reads it — it has no idea what a colour is."""
+        return brick.colour
 
     def applies(self, brick, node):
         """SALVAGE BRICKS ARE NOT POLISHED — the one difference between the

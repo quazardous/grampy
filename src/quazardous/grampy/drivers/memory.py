@@ -42,6 +42,15 @@ class Row:
     lease: str | None = None
 
 
+def _split(candidate: Any) -> tuple[Any, str | None]:
+    """A candidate is a subject, or a `(subject, key)` pair for a node that
+    groups. A subject that IS a two-item tuple would be ambiguous, which is
+    why ids are documented as an integer or a string."""
+    if isinstance(candidate, tuple) and len(candidate) == 2:
+        return candidate[0], candidate[1]
+    return candidate, None
+
+
 class MemoryDriver:
     """`(subject, node) → Row`, `subject → revision`. A lock makes each call
     atomic across threads."""
@@ -74,12 +83,15 @@ class MemoryDriver:
 
     def scan(self, candidates: Any, *, name: str | None, nodes: tuple[str, ...],
              parents: tuple[str, ...], page: int, now: str) -> Iterator[list[Entry]]:
-        """No pre-filter: every candidate is read, the journal decides."""
-        subjects = list(candidates)
-        for start in range(0, len(subjects), page):
+        """No pre-filter: every candidate is read, the journal decides.
+
+        A candidate may be a subject, or a `(subject, key)` pair when the
+        node groups: the key is carried, never read."""
+        listed = [_split(c) for c in candidates]
+        for start in range(0, len(listed), page):
             with self._lock:
                 entries = []
-                for subject in subjects[start:start + page]:
+                for subject, key in listed[start:start + page]:
                     held = {n: self.rows[(subject, n)] for n in nodes
                             if (subject, n) in self.rows}
                     entries.append(Entry(
@@ -89,7 +101,7 @@ class MemoryDriver:
                          if row.status == NODE_SCHEDULED},
                         {n: row.finished_at for n, row in held.items()
                          if row.finished_at is not None},
-                        self.policy_of.get(subject), self.version_of.get(subject)))
+                        self.policy_of.get(subject), self.version_of.get(subject), key))
             yield entries
 
     def insert_if_unchanged(self, name: str, entries: list[tuple[Any, int]], *,

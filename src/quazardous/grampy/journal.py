@@ -131,6 +131,14 @@ from .timing import admit, seconds, shift
 PAGE = 200
 
 
+def _ready_at(n: Node, entry: Entry) -> str | None:
+    """WHEN THIS SUBJECT BECAME READY for a grouping node: the last of its
+    parents to conclude. A node with no parent has no clock, so a group of
+    those only ever goes when it is full."""
+    ends = [entry.finished[p] for p in n.parents if p in entry.finished]
+    return max(ends) if ends else None
+
+
 def _encode_refs(refs: tuple[str, ...]) -> str | None:
     """The refs a lane keeps, as the text a driver stores. `None` when there
     is nothing to keep, so a lane that keeps one ref stores no list."""
@@ -174,6 +182,21 @@ class Entry(NamedTuple):
     policy: str | None = None
     #: The graph the subject is pinned to, None before its first write.
     version: str | None = None
+    #: WHAT THE CANDIDATES SAID TO GROUP THIS SUBJECT BY — a second column of
+    #: the query, or the second half of a `(subject, key)` pair. Compared,
+    #: never read; None when the candidates named none.
+    key: str | None = None
+
+
+class _Ready(NamedTuple):
+    """A candidate a grouping node could take: what it is, what groups it,
+    and since when it has been waiting for its group to fill."""
+
+    subject: Any
+    revision: int
+    key: str | None
+    ready_at: str | None
+    policy: str | None
 
 
 class Arrival(NamedTuple):
@@ -429,38 +452,108 @@ class NodeJournal:
         chosen: list[tuple[Any, int]] = []
         policy_of: dict[Any, str | None] = {}
         seen: set[Any] = set()
-        for page in self.driver.scan(candidates, name=name,
-                                     nodes=(name, *n.parents, *after),
-                                     parents=parents, page=max(limit, PAGE), now=now):
-            for e in page:
-                # A SUBJECT LISTED TWICE COUNTS ONCE: it would otherwise take
-                # a place in the limit and be refused by the write.
-                if e.subject in seen or not self._mine(e):
-                    continue
-                seen.add(e.subject)
-                if self._takable(n, after, _due_away(name, e, now), require_parents):
+        # A GROUP IS GATHERED BEFORE IT IS JUDGED: the claim must read enough
+        # candidates to know whether one is complete, so `limit` alone is not
+        # how far it reads.
+        enough = limit if n.group is None else max(limit, n.group.size)
+        ready: list[_Ready] = []
+        # A GROUPING CLAIM READS AND WRITES UNDER THE GUARD, taken before it
+        # reads anything. Two claimers would otherwise each decide on a state
+        # the other was about to change, and each win a piece of one group:
+        # a bag of two and a bag of one, neither of them a group, and no row
+        # looking wrong. Guarding the NODE rather than the key keeps it to one
+        # lock, held over a read a grouping node makes rarely and in bulk.
+        def gather() -> list[tuple[Any, int]]:
+            """Read candidates until there is enough to decide."""
+            for page in self.driver.scan(candidates, name=name,
+                                         nodes=(name, *n.parents, *after),
+                                         parents=parents, page=max(enough, PAGE),
+                                         now=now):
+                for e in page:
+                    # A SUBJECT LISTED TWICE COUNTS ONCE: it would otherwise
+                    # take a place in the limit and be refused by the write.
+                    if e.subject in seen or not self._mine(e):
+                        continue
+                    seen.add(e.subject)
+                    if not self._takable(n, after, _due_away(name, e, now),
+                                         require_parents):
+                        continue
+                    if n.group is not None:
+                        ready.append(_Ready(e.subject, e.revision, e.key,
+                                            _ready_at(n, e), e.policy))
+                        continue
                     chosen.append((e.subject, e.revision))
                     policy_of[e.subject] = e.policy
                     if len(chosen) >= limit:
-                        break
-            if len(chosen) >= limit:
-                break
+                        return chosen
+                if n.group is None and len(chosen) >= limit:
+                    return chosen
+            if n.group is None:
+                return chosen
+            picked = self._group(n, ready, now)
+            policy_of.update({m.subject: m.policy for m in picked})
+            return [(m.subject, m.revision) for m in picked]
+
+        def write(group: list[tuple[Any, int]]) -> list[Any]:
+            if not group:
+                return []
+            if self._limited(n):
+                return self._within_limits(
+                    n, group, policy_of, now,
+                    lambda part: self.driver.insert_if_unchanged(
+                        name, part, status=NODE_RUNNING, now=now, lease=token))
+            return self.driver.insert_if_unchanged(
+                name, group, status=NODE_RUNNING, now=now, lease=token)
+
+        # A GROUPING CLAIM READS AND WRITES UNDER THE GUARD, taken before it
+        # reads anything. Two claimers would otherwise each decide on a state
+        # the other was about to change and each win a piece of one group — a
+        # bag of two and a bag of one, neither of them a group, and no row
+        # looking wrong. The guard is on the NODE: one lock, over a read a
+        # grouping node makes rarely and in bulk.
         # ONE WRITE PER CLAIM. A storage that locks while writing takes its
         # locks in one go, in one order, and two claimers cannot hold each
-        # other. The price: a subject refused by the write (another claimer
-        # took it, a revision moved) is not replaced — under contention a
-        # claim may take fewer than `limit`, never a wrong one.
-        if chosen and self._limited(n):
-            taken = self._within_limits(
-                n, chosen, policy_of, now,
-                lambda group: self.driver.insert_if_unchanged(
-                    name, group, status=NODE_RUNNING, now=now, lease=token))
+        # other. The price: a subject refused by the write is not replaced —
+        # under contention a claim may take fewer than `limit`, never a wrong
+        # one.
+        if n.group is None:
+            taken = write(gather())
         else:
-            taken = (self.driver.insert_if_unchanged(
-                         name, chosen, status=NODE_RUNNING, now=now, lease=token)
-                     if chosen else [])
+            with self.driver.guard([f"group|{name}"]):
+                taken = write(gather())
         self._pin(taken)
         return Lease(taken, token)
+
+    def _group(self, n: Node, ready: list[_Ready], now: str) -> list[_Ready]:
+        """THE ONE GROUP THIS CLAIM MAY TAKE, or nothing.
+
+        Candidates keep the order the application gave them, so the group
+        that goes is the one whose members have waited longest. A group goes
+        when it is FULL, or when its oldest member has been ready longer than
+        `max_wait` — an incomplete group then goes as it is, and the worker
+        sees how many it really got.
+
+        Nothing is written while a group fills: a short group simply is not
+        claimable, so there is no half-gathered state to repair after a
+        crash. The price is that the claim reads its candidates again next
+        time, which is the same price every claim already pays.
+        """
+        group = n.group
+        assert group is not None
+        gathered: dict[Any, list[_Ready]] = {}
+        for member in ready:
+            gathered.setdefault(member.key if group.per_key else None, []).append(member)
+        late = (shift(now, -seconds(group.max_wait))
+                if group.max_wait is not None else None)
+        for members in gathered.values():
+            if len(members) >= group.size:
+                return members[:group.size]
+            # AN INCOMPLETE GROUP GOES ONLY WHEN IT HAS WAITED. `ready_at` is
+            # None for a node with no parents: no clock, so no way to be late.
+            oldest = [m.ready_at for m in members if m.ready_at is not None]
+            if late is not None and oldest and min(oldest) <= late:
+                return members
+        return []
 
     def _limited(self, n: Node) -> bool:
         return bool(n.rate) or n.concurrency is not None or any(

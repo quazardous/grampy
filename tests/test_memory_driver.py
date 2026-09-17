@@ -18,6 +18,9 @@ class MemoryHarness:
     def candidates(self, subjects):
         return list(subjects)
 
+    def keyed(self, pairs):
+        return list(pairs)
+
     def seed(self, journal, subject, progress):
         for name, status in progress.items():
             journal.driver.rows[(subject, name)] = Row(
@@ -51,6 +54,9 @@ class MemorySession:
 
     def candidates(self, subjects):
         return list(subjects)
+
+    def keyed(self, pairs):
+        return list(pairs)
 
     def commit(self):
         pass

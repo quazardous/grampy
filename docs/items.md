@@ -152,6 +152,7 @@ right choice when you already hold ids and no objects.
 | `conclude(node, items, token=None, status=…)` | asks `branch` for a choice |
 | `fail(node, items, token=None)` | |
 | `signal(items, event)` · `progress(item)` · `history(item)` | in items' terms |
+| `group_of(item)` on the adapter | what makes two subjects belong in one group |
 
 Everything else — `settle`, `expire`, `migrate`, the counts — stays on the
 journal, which the layer holds as `items.journal`.

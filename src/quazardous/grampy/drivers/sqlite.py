@@ -135,13 +135,14 @@ class SqliteDriver:
     def scan(self, candidates: Any, *, name: str | None, nodes: tuple[str, ...],
              parents: tuple[str, ...], page: int, now: str) -> Iterator[list[Entry]]:
         """No pre-filter: the journal decides on every candidate read."""
-        subjects = self._candidates(candidates)
+        pairs = self._candidates(candidates)
         while True:
-            batch = _take(subjects, page)
-            if not batch:
+            chunk = _take(pairs, page)
+            if not chunk:
                 return
-            yield self._entries(batch, nodes)
-            if len(batch) < page:
+            keys = dict(chunk)
+            yield self._entries([s for s, _ in chunk], nodes, keys)
+            if len(chunk) < page:
                 return
 
     def insert_if_unchanged(self, name: str, entries: list[tuple[Any, int]], *,
@@ -545,12 +546,14 @@ class SqliteDriver:
             candidates = Query(candidates)
         if isinstance(candidates, Query):
             # Read at once: the cursor must not stay open while this very
-            # connection writes the claim.
-            return iter([row[0] for row in
+            # connection writes the claim. A SECOND COLUMN IS THE GROUPING
+            # KEY, carried and never read.
+            return iter([(row[0], row[1] if len(row) > 1 else None) for row in
                          self.conn.execute(candidates.sql, candidates.params).fetchall()])
-        return iter(candidates)
+        return iter(_split(c) for c in candidates)
 
-    def _entries(self, batch: list[Any], nodes: tuple[str, ...]) -> list[Entry]:
+    def _entries(self, batch: list[Any], nodes: tuple[str, ...],
+                 keys: dict[Any, str | None] | None = None) -> list[Entry]:
         rows: dict[Any, dict[str, str]] = {s: {} for s in batch}
         due: dict[Any, dict[str, str]] = {s: {} for s in batch}
         finished: dict[Any, dict[str, str]] = {s: {} for s in batch}
@@ -584,12 +587,20 @@ class SqliteDriver:
                 if ended is not None:
                     finished[subject][n] = ended
         return [Entry(s, int(revisions.get(s, 0)), rows[s], due[s], finished[s],
-                      policy_of.get(s), version_of.get(s)) for s in batch]
+                      policy_of.get(s), version_of.get(s),
+                      (keys or {}).get(s)) for s in batch]
 
 
 def _check(name: str) -> None:
     if not _IDENTIFIER.fullmatch(name):
         raise ValueError(f"not a plain SQL identifier: {name!r}")
+
+
+def _split(candidate: Any) -> tuple[Any, str | None]:
+    """A subject, or a `(subject, key)` pair for a node that groups."""
+    if isinstance(candidate, tuple) and len(candidate) == 2:
+        return candidate[0], candidate[1]
+    return candidate, None
 
 
 def _take(iterator: Iterator[Any], size: int) -> list[Any]:
