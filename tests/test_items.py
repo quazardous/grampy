@@ -249,14 +249,33 @@ def test_arrivals_of_different_versions_are_counted_together():
     assert sum(counts.values()) == 3, "nothing lost between the groups"
 
 
-def test_passing_ids_where_items_go_says_so(world):
-    """The layer takes items; ids would fail inside the adapter, so the
-    mistake is named rather than surfacing as a broken adapter."""
+def test_ids_are_accepted_wherever_items_are(world):
+    """Ids work everywhere items do — and mixed with them. What was handed
+    over as an object is reused; what was named by id alone is loaded."""
     bricks, adapter, items = world
-    with pytest.raises(TypeError, match="not their ids"):
-        items.claim("scan", 10, candidates=[1, 2, 3])
-    with pytest.raises(TypeError, match="items.journal.claim"):
-        items.settle([1, 2, 3])
+    lease = items.claim("scan", 10, candidates=[1, 2, 3])
+    assert [b.id for b in lease] == [1, 2, 3]
+    assert all(isinstance(b, Brick) for b in lease), "ids came back as objects"
+    assert adapter.calls.count("load([1, 2, 3])") == 1
+
+    items.conclude("scan", lease)
+    assert items.settle([1, 2, 3]) is not None, "settle takes ids too"
+
+
+def test_objects_and_ids_may_be_mixed_in_one_call(world):
+    """Half a batch in hand, half named by id: neither is loaded twice."""
+    bricks, adapter, items = world
+    lease = items.claim("scan", 10, candidates=[bricks[0], 2, bricks[2]])
+    assert [b.id for b in lease] == [1, 2, 3]
+    assert lease[0] is bricks[0], "the object given is the object returned"
+    assert adapter.calls.count("load([2])") == 1, "only the id was fetched"
+
+
+def test_an_object_the_adapter_cannot_read_is_not_taken_for_an_id(world):
+    """A broken adapter must not pass silently as someone passing ids."""
+    bricks, adapter, items = world
+    with pytest.raises(TypeError, match="could not read"):
+        items.claim("scan", 10, candidates=[object()])
 
 
 def test_load_is_only_needed_when_a_query_names_the_candidates():

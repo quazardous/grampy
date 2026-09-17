@@ -14,10 +14,10 @@ never imports it, and never calls a handler.
 
 ## The adapter
 
-One method is yours to write — `id_of`. `load` is needed only when a
-driver's query names the candidates, since ids come back with no objects
-attached; pass your items instead and it is never called. The rest have
-answers that suit an application with nothing special to say.
+One method is yours to write — `id_of`. `load` is needed only when
+something arrives as an id with no object attached: a driver's query, or ids
+you passed yourself. Hand over your items and it is never called. The rest
+have answers that suit an application with nothing special to say.
 
 ```python
 from quazardous.grampy.items import Adapter, Items
@@ -53,11 +53,11 @@ any iterable of them, list, tuple or generator — and their ids are read with
 `id_of`. They are reused as they are, so a batch you already loaded is never
 loaded twice.
 
-**Ids are not accepted here.** A list of them cannot be told apart from a
-list of items — an application whose subjects *are* strings would be
-ambiguous — so passing ids raises, naming the mistake rather than letting
-your adapter look broken. When you genuinely hold ids, claim on the journal
-underneath: `items.journal.claim("sort", 10, candidates=[…])`.
+**Ids work everywhere items do**, and the two may be mixed in one call. An
+id is an int or a string — that is what tells them apart — so what you hand
+over as an object is reused, and what you name by id alone is loaded. An
+object the adapter cannot read, and that could not be an id, is an adapter
+to fix, and says so.
 
 A **driver's query** is handed to the journal untouched. That is the one
 place ids are unavoidable: the storage produces the candidate set, and it

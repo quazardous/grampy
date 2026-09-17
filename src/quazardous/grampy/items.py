@@ -57,6 +57,12 @@ from .dag import NODE_DONE, NODE_FAILED, NODE_SKIPPED, node
 from .journal import Lease, NodeJournal
 
 
+def _could_be_an_id(candidate: Any) -> bool:
+    """An id is "unique, stable, and an integer or a string" — nothing else
+    is one, so nothing else may be mistaken for one."""
+    return isinstance(candidate, (int, str)) and not isinstance(candidate, bool)
+
+
 def _are_items(candidates: Any) -> bool:
     """Your objects, rather than something a driver reads itself.
 
@@ -175,10 +181,14 @@ class Items:
     def claim(self, name: str, limit: int, *, candidates: Any) -> ItemLease:
         """Take up to `limit` candidates and HAND BACK THE OBJECTS.
 
-        `candidates` ARE ITEMS TOO — any iterable of your own objects, list,
-        tuple or generator: nothing here asks you to hold ids. Their ids are
-        read with `id_of`, and the objects are reused, so a batch you already
-        loaded is not loaded twice.
+        `candidates` MAY BE ANYTHING YOU HAVE: your own objects, their ids, or
+        a mix of the two, in any iterable. Objects travel with the claim and
+        are handed straight back — a batch you already loaded is not loaded
+        twice — and whatever was named by id alone is loaded with `load`.
+
+        An id is an int or a string, which is what tells the two apart. An
+        object `id_of` cannot read, and that could not be an id, is an adapter
+        to fix, and says so.
 
         A DRIVER'S OWN QUERY is handed to the journal untouched, and the lease
         is loaded with `load`. That is the one place ids are unavoidable —
@@ -193,8 +203,14 @@ class Items:
         """
         given, candidates = self._subjects(candidates)
         lease = self.journal.claim(name, limit, candidates=candidates)
-        loaded = ({s: given[s] for s in lease if s in given} if given
-                  else self._loaded(lease))
+        # Objects handed in travel with the claim; anything known only by
+        # its id is loaded, exactly as a driver's query would be.
+        held = {s: given[s] for s in lease if s in given}
+        rest = [s for s in lease if s not in held]
+        if rest:
+            held.update(self._loaded(Lease(rest, lease.token)))
+        # THE LEASE'S OWN ORDER, whichever half each item came from.
+        loaded = {s: held[s] for s in lease if s in held}
         keep: list[Any] = []
         give_up: list[Any] = []
         for item in loaded.values():
@@ -267,19 +283,25 @@ class Items:
         stay in hand; a driver's query travels on untouched."""
         if not _are_items(candidates):
             return {}, candidates
-        given = {}
+        given: dict[Any, Any] = {}
+        subjects: list[Any] = []
         for candidate in candidates:
             try:
-                given[self.adapter.id_of(candidate)] = candidate
+                subject = self.adapter.id_of(candidate)
             except (AttributeError, TypeError, KeyError, IndexError) as why:
-                # THE LIKELY MISTAKE IS PASSING IDS. Say so, rather than let
-                # the adapter's own line surface as if it were broken.
-                raise TypeError(
-                    f"{type(self.adapter).__name__}.id_of could not read "
-                    f"{candidate!r} ({why}) — candidates here are your ITEMS, "
-                    f"not their ids. Pass the objects, or claim ids on the "
-                    f"journal itself: items.journal.claim(...)") from why
-        return given, list(given)
+                # AN ID IS AN INT OR A STRING, and nothing else is. One the
+                # adapter cannot read but that could be an id IS one; a wider
+                # object that fails is an adapter that needs fixing.
+                if not _could_be_an_id(candidate):
+                    raise TypeError(
+                        f"{type(self.adapter).__name__}.id_of could not read "
+                        f"{candidate!r} ({why}) — candidates are your items, or "
+                        f"their ids as int or str") from why
+                subjects.append(candidate)
+                continue
+            given[subject] = candidate
+            subjects.append(subject)
+        return given, subjects
 
     def _loaded(self, lease: Lease) -> dict[Any, Any]:
         """`{id: item}` for a lease, in the lease's order, in ONE load."""
