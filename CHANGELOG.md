@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-18
+
 ### Added
 
 - Work several subjects together: a node can gather a group of a size you set,
@@ -28,6 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   goes whole or not at all, and nothing is stored while one fills. Set a
   maximum wait and a short group goes anyway once its oldest member has waited
   that long; leave it out and the group waits until it is full.
+- A page on living next to grampy's tables: what each column means when you
+  read it, the joins worth having, and the one thing never to do — write to
+  them yourself, which slips past the guard every claim relies on.
+
+### Changed
+
+- The documentation no longer calls two different things a version. A subject
+  has one graph version, pinned for its lifetime, and as many refs as it has
+  comebacks.
 
 ## [0.2.0] - 2026-09-18
 
@@ -151,5 +162,6 @@ The first release. Installed as `grampy-q`, imported as
   claimers, claims racing a requeue) and random sequences of operations on
   random graphs checked step by step against the rule.
 
-[Unreleased]: https://github.com/quazardous/grampy/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/quazardous/grampy/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/quazardous/grampy/releases/tag/v0.3.0
 [0.2.0]: https://github.com/quazardous/grampy/releases/tag/v0.2.0
