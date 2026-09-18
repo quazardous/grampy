@@ -44,13 +44,7 @@ import pytest
 
 from .dag import (
     NODE_CONCLUDED,
-    NODE_DONE,
-    NODE_FAILED,
-    NODE_OMITTED,
-    NODE_RUNNING,
     NODE_SATISFYING,
-    NODE_SCHEDULED,
-    NODE_SKIPPED,
     DagError,
     Group,
     Lane,
@@ -66,6 +60,7 @@ from .dag import (
 )
 from .graph import Document, Graph
 from .journal import MigrationError
+from .names import Merge, Per, Position, Reason, Status, WhileRunning
 from .timing import Rate, Retry, seconds, shift
 
 #: A fork, a join, an optional branch — the diamond.
@@ -166,16 +161,16 @@ class Clock:
 def _progresses() -> list[dict[str, str]]:
     """Every progress of the diamond with at most two rows, plus a few
     deeper ones — many of them unreachable through the API."""
-    statuses = (NODE_RUNNING, NODE_DONE, NODE_SKIPPED, NODE_FAILED, NODE_OMITTED)
+    statuses = (Status.RUNNING, Status.DONE, Status.SKIPPED, Status.FAILED, Status.OMITTED)
     names = [n.name for n in DIAMOND]
     out: list[dict[str, str]] = [{}]
     for size in (1, 2):
         for chosen in itertools.combinations(names, size):
             for values in itertools.product(statuses, repeat=size):
                 out.append(dict(zip(chosen, values, strict=True)))
-    out += [{"start": NODE_DONE, "left": NODE_DONE, "right": NODE_SKIPPED},
-            {"start": NODE_DONE, "left": NODE_DONE, "right": NODE_FAILED},
-            {"start": NODE_DONE, "right": NODE_DONE, "end": NODE_RUNNING}]
+    out += [{"start": Status.DONE, "left": Status.DONE, "right": Status.SKIPPED},
+            {"start": Status.DONE, "left": Status.DONE, "right": Status.FAILED},
+            {"start": Status.DONE, "right": Status.DONE, "end": Status.RUNNING}]
     return out
 
 
@@ -216,7 +211,7 @@ class JournalContract:
         # the returned list is not part of the contract.
         taken = self._claim(harness, journal, "start", ["b", "a", "c"], limit=2)
         assert sorted(taken) == ["a", "b"]
-        assert journal.progress("b") == {"start": NODE_RUNNING}
+        assert journal.progress("b") == {"start": Status.RUNNING}
         assert journal.progress("c") == {}
 
     def test_a_held_node_is_not_taken_twice(self, harness, journal):
@@ -235,13 +230,13 @@ class JournalContract:
         assert self._claim(harness, journal, "left", ["s1"]) == []
 
     def test_a_started_descendant_closes_the_node(self, harness, journal):
-        harness.seed(journal, "s1", {"start": NODE_DONE, "end": NODE_RUNNING})
+        harness.seed(journal, "s1", {"start": Status.DONE, "end": Status.RUNNING})
         assert self._claim(harness, journal, "left", ["s1"]) == []
 
     def test_lifting_parents_keeps_the_two_other_guards(self, harness, journal):
         assert self._claim(harness, journal, "left", ["s1"], require_parents=False) == ["s1"]
         assert self._claim(harness, journal, "left", ["s1"], require_parents=False) == []
-        harness.seed(journal, "s2", {"end": NODE_DONE})
+        harness.seed(journal, "s2", {"end": Status.DONE})
         assert self._claim(harness, journal, "left", ["s2"], require_parents=False) == []
 
     def test_an_unknown_node_raises(self, harness, journal):
@@ -258,11 +253,11 @@ class JournalContract:
         assert journal.conclude("start", ["s1", "s1", "ghost"], token=lease.token) == 1
         assert journal.conclude("start", ["s1"], token=lease.token) == 0, (
             "a duplicate report rewrites nothing")
-        assert journal.progress("s1") == {"start": NODE_DONE}
+        assert journal.progress("s1") == {"start": Status.DONE}
 
     def test_an_unknown_status_raises(self, harness, journal):
         with pytest.raises(ValueError):
-            journal.conclude("start", ["s1"], token=None, status=NODE_RUNNING)
+            journal.conclude("start", ["s1"], token=None, status=Status.RUNNING)
 
     def test_concluding_nobody_is_zero(self, harness, journal):
         assert journal.conclude("nope", [], token=None) == 0
@@ -279,7 +274,7 @@ class JournalContract:
         first = self._claim(harness, journal, "start", ["s1"])
         second = self._claim(harness, journal, "start", ["s2"])
         assert journal.conclude("start", ["s1", "s2"], token=first.token) == 1
-        assert journal.progress("s2") == {"start": NODE_RUNNING}
+        assert journal.progress("s2") == {"start": Status.RUNNING}
         assert journal.fail("start", ["s2"], token="forged") == 0
         assert journal.fail("start", ["s2"], token=second.token) == 1
 
@@ -291,7 +286,7 @@ class JournalContract:
         fresh = self._claim(harness, journal, "start", ["s1"])
         assert journal.conclude("start", ["s1"], token=slow.token) == 0, (
             "the slow worker came back after its lease went to another")
-        assert journal.progress("s1") == {"start": NODE_RUNNING}
+        assert journal.progress("s1") == {"start": Status.RUNNING}
         assert journal.conclude("start", ["s1"], token=fresh.token) == 1
 
     def test_no_token_is_the_operators_override(self, harness, journal):
@@ -324,7 +319,7 @@ class JournalContract:
         self._run(harness, journal, "e1", ["s3"])
         assert sorted(self._claim(harness, journal, "merge", ["s1", "s3"])) == ["s1"]
         assert journal.skip("merge", candidates=harness.candidates(["s2", "s3"])) == 1
-        assert journal.progress("s2")["merge"] == NODE_SKIPPED
+        assert journal.progress("s2")["merge"] == Status.SKIPPED
         assert self._claim(harness, journal, "e3", ["s1", "s2", "s3"]) == ["s3"], (
             "s1 and s2 moved past e3; s3 has not")
 
@@ -333,14 +328,14 @@ class JournalContract:
         lease = self._claim(harness, journal, "classify", ["s1", "s2"])
         assert journal.conclude("classify", ["s1"], token=lease.token, branch="publish") == 1
         assert journal.conclude("classify", ["s2"], token=lease.token, branch="reject") == 1
-        assert journal.progress("s1") == {"classify": NODE_DONE, "reject": NODE_OMITTED,
-                                          "notify": NODE_OMITTED}
-        assert journal.progress("s2") == {"classify": NODE_DONE, "publish": NODE_OMITTED}
+        assert journal.progress("s1") == {"classify": Status.DONE, "reject": Status.OMITTED,
+                                          "notify": Status.OMITTED}
+        assert journal.progress("s2") == {"classify": Status.DONE, "publish": Status.OMITTED}
         assert self._claim(harness, journal, "reject", ["s1", "s2"]) == ["s2"]
         self._run(harness, journal, "publish", ["s1"])
         assert self._claim(harness, journal, "end", ["s1", "s2"]) == ["s1"]
         assert journal.stages(["s1"], at="2026-01-01T00:00:00+00:00")["s1"][0][0] == "classify"
-        assert all(line[3] != NODE_OMITTED
+        assert all(line[3] != Status.OMITTED
                    for line in journal.stages(["s1"], at="2026-01-01T00:00:00+00:00")["s1"])
 
     def test_a_choice_must_name_a_branch_and_only_a_choice_may(self, harness, clock):
@@ -353,7 +348,7 @@ class JournalContract:
         with pytest.raises(ValueError, match="failed"):
             journal.fail("classify", ["s1"], token=lease.token, branch="publish")
         assert journal.fail("classify", ["s1"], token=lease.token) == 1
-        assert journal.progress("s1") == {"classify": NODE_FAILED}, "a failure omits nothing"
+        assert journal.progress("s1") == {"classify": Status.FAILED}, "a failure omits nothing"
         with pytest.raises(ValueError, match="not a choice"):
             journal.conclude("publish", ["s1"], token=None, branch="end")
 
@@ -361,7 +356,7 @@ class JournalContract:
         journal = harness.journal(ROUTE, clock)
         self._claim(harness, journal, "classify", ["s1"])
         assert journal.conclude("classify", ["s1"], token="stale", branch="publish") == 0
-        assert journal.progress("s1") == {"classify": NODE_RUNNING}
+        assert journal.progress("s1") == {"classify": Status.RUNNING}
 
     # -- history and loops ----------------------------------------------------
 
@@ -374,11 +369,11 @@ class JournalContract:
         assert journal.release("start", "2026-01-01T00:30:00+00:00") == 1
         assert journal.forget("start", ["s1"]) == 1
         assert journal.history("s1") == [{
-            "node": "start", "status": NODE_DONE, "started_at": "2026-01-01T00:00:00+00:00",
+            "node": "start", "status": Status.DONE, "started_at": "2026-01-01T00:00:00+00:00",
             "finished_at": "2026-01-01T00:00:00+00:00", "lease": lease.token,
             "archived_at": "2026-01-01T01:00:00+00:00", "reason": "forget"}]
         [released] = journal.history("s2")
-        assert (released["status"], released["reason"]) == (NODE_RUNNING, "release")
+        assert (released["status"], released["reason"]) == (Status.RUNNING, "release")
         assert journal.history("ghost") == []
 
     def test_a_loop_goes_back_until_its_bound_then_the_failure_stands(self, harness, clock):
@@ -391,16 +386,16 @@ class JournalContract:
             if round_ < 2:
                 assert journal.progress("s1") == {}, "sent back to draft"
                 assert journal.passes("s1", "draft") == round_ + 1
-        assert journal.progress("s1") == {"draft": NODE_DONE, "review": NODE_FAILED}
+        assert journal.progress("s1") == {"draft": Status.DONE, "review": Status.FAILED}
         assert self._claim(harness, journal, "escalate", ["s1"]) == ["s1"]
         reasons = [(e["node"], e["status"], e["reason"]) for e in journal.history("s1")]
-        assert reasons == [("draft", NODE_DONE, "loop"), ("review", NODE_FAILED, "loop")] * 2
+        assert reasons == [("draft", Status.DONE, "loop"), ("review", Status.FAILED, "loop")] * 2
 
     def test_a_loop_does_not_fire_on_other_statuses(self, harness, clock):
         journal = harness.journal(REVIEW, clock)
         self._run(harness, journal, "draft", ["s1"])
         self._run(harness, journal, "review", ["s1"])
-        assert journal.progress("s1") == {"draft": NODE_DONE, "review": NODE_DONE}
+        assert journal.progress("s1") == {"draft": Status.DONE, "review": Status.DONE}
         assert journal.history("s1") == []
 
     def test_a_loop_refused_by_its_token_sends_nobody_back(self, harness, clock):
@@ -408,7 +403,7 @@ class JournalContract:
         self._run(harness, journal, "draft", ["s1"])
         self._claim(harness, journal, "review", ["s1"])
         assert journal.fail("review", ["s1"], token="stale") == 0
-        assert journal.progress("s1") == {"draft": NODE_DONE, "review": NODE_RUNNING}
+        assert journal.progress("s1") == {"draft": Status.DONE, "review": Status.RUNNING}
         assert journal.history("s1") == []
 
     # -- retries ---------------------------------------------------------------
@@ -419,8 +414,8 @@ class JournalContract:
         self._run(harness, journal, "prepare", ["s1"])
         lease = self._claim(harness, journal, "call", ["s1"])
         assert journal.fail("call", ["s1"], token=lease.token) == 1
-        assert journal.progress("s1") == {"prepare": NODE_DONE, "call": NODE_SCHEDULED}
-        assert journal.counts("call")[NODE_SCHEDULED] == 1
+        assert journal.progress("s1") == {"prepare": Status.DONE, "call": Status.SCHEDULED}
+        assert journal.counts("call")[Status.SCHEDULED] == 1
         assert self._claim(harness, journal, "call", ["s1"]) == [], "not due yet"
         assert self._claim(harness, journal, "alert", ["s1"]) == [], "a retry is not a failure"
 
@@ -434,7 +429,7 @@ class JournalContract:
         lease = self._claim(harness, journal, "call", ["s1"])
         journal.fail("call", ["s1"], token=lease.token)
 
-        assert journal.progress("s1") == {"prepare": NODE_DONE, "call": NODE_FAILED}
+        assert journal.progress("s1") == {"prepare": Status.DONE, "call": Status.FAILED}
         assert journal.retries("s1", "call") == 2
         assert [e["reason"] for e in journal.history("s1")] == ["retry", "retry"]
         assert self._claim(harness, journal, "alert", ["s1"]) == ["s1"]
@@ -449,7 +444,7 @@ class JournalContract:
         clock.now = "2026-01-01T01:00:01+00:00"
         assert journal.expire() == {"prepare": 1}
         assert journal.progress("old") == {}
-        assert journal.progress("young") == {"prepare": NODE_RUNNING}
+        assert journal.progress("young") == {"prepare": Status.RUNNING}
         assert [e["reason"] for e in journal.history("old")] == ["release"]
 
     def test_a_scheduled_row_closes_what_it_guards(self, harness, clock):
@@ -462,14 +457,14 @@ class JournalContract:
         assert journal.conclude("call", ["s1"], token=None) == 0, "a scheduled row is not held"
         assert self._claim(harness, journal, "prepare", ["s1"]) == []
         assert journal.forget("call", ["s1"]) == 1
-        assert [e["status"] for e in journal.history("s1")] == [NODE_FAILED, NODE_SCHEDULED]
+        assert [e["status"] for e in journal.history("s1")] == [Status.FAILED, Status.SCHEDULED]
 
     def test_a_retry_refused_by_its_token_schedules_nothing(self, harness, clock):
         journal = harness.journal(FLAKY, clock)
         self._run(harness, journal, "prepare", ["s1"])
         self._claim(harness, journal, "call", ["s1"])
         assert journal.fail("call", ["s1"], token="stale") == 0
-        assert journal.progress("s1")["call"] == NODE_RUNNING
+        assert journal.progress("s1")["call"] == Status.RUNNING
         assert journal.history("s1") == []
 
     # -- waits, signals, grace -------------------------------------------------
@@ -482,8 +477,8 @@ class JournalContract:
         with pytest.raises(ValueError, match="settled"):
             self._claim(harness, journal, "clicked", ["early"])
         assert journal.settle(harness.candidates(["early", "late"])) == {
-            "clicked": {NODE_DONE: 1}}
-        assert journal.progress("early")["clicked"] == NODE_DONE
+            "clicked": {Status.DONE: 1}}
+        assert journal.progress("early")["clicked"] == Status.DONE
         assert "clicked" not in journal.progress("late")
         assert self._claim(harness, journal, "activate", ["early", "late"]) == ["early"]
         [received] = journal.history("early")
@@ -497,7 +492,7 @@ class JournalContract:
         clock.now = "2026-01-07T23:59:59+00:00"
         assert "clicked" not in journal.settle(harness.candidates(["s1"])), "one second early"
         clock.now = "2026-01-08T00:00:00+00:00"
-        assert journal.settle(harness.candidates(["s1"]))["clicked"] == {NODE_FAILED: 1}
+        assert journal.settle(harness.candidates(["s1"]))["clicked"] == {Status.FAILED: 1}
         assert self._claim(harness, journal, "remind", ["s1"]) == ["s1"]
         journal.signal(["s1"], "email.clicked")
         assert journal.settle(harness.candidates(["s1"])).get("clicked") is None, (
@@ -510,9 +505,9 @@ class JournalContract:
         self._claim(harness, journal, "survey", ["busy"])
         clock.now = "2026-01-02T00:00:00+00:00"
         assert journal.settle(harness.candidates(["idle", "busy"]))["survey"] == {
-            NODE_SKIPPED: 1}
-        assert journal.progress("idle")["survey"] == NODE_SKIPPED
-        assert journal.progress("busy")["survey"] == NODE_RUNNING
+            Status.SKIPPED: 1}
+        assert journal.progress("idle")["survey"] == Status.SKIPPED
+        assert journal.progress("busy")["survey"] == Status.RUNNING
 
     def test_a_signal_counts_again_only_after_the_wait_went_back(self, harness, clock):
         journal = harness.journal(ONBOARDING, clock)
@@ -527,7 +522,7 @@ class JournalContract:
             "the old click was spent before the node went back")
         clock.now = "2026-01-01T00:03:00+00:00"
         journal.signal(["s1"], "email.clicked")
-        assert journal.settle(harness.candidates(["s1"]))["clicked"] == {NODE_DONE: 1}
+        assert journal.settle(harness.candidates(["s1"]))["clicked"] == {Status.DONE: 1}
 
     # -- policies ----------------------------------------------------------------
 
@@ -573,8 +568,8 @@ class JournalContract:
 
         clock.now = "2026-01-01T00:00:05+00:00"
         assert journal.settle(harness.candidates(["rich1", "plain1"])) == {
-            "enrich": {NODE_SKIPPED: 1}}, "only the policy with a grace"
-        assert journal.progress("plain1")["enrich"] == NODE_SKIPPED
+            "enrich": {Status.SKIPPED: 1}}, "only the policy with a grace"
+        assert journal.progress("plain1")["enrich"] == Status.SKIPPED
         assert "enrich" not in journal.progress("rich1"), "no grace: never skipped alone"
 
         # What follows goes on for the skipped one, and waits for the other.
@@ -593,8 +588,8 @@ class JournalContract:
             lease = self._claim(harness, journal, "call", ["slow", "fast"])
             journal.fail("call", list(lease), token=lease.token)
             clock.now = shift(clock.now, 3600)
-        assert journal.progress("fast")["call"] == NODE_FAILED
-        assert journal.progress("slow")["call"] == NODE_SCHEDULED
+        assert journal.progress("fast")["call"] == Status.FAILED
+        assert journal.progress("slow")["call"] == Status.SCHEDULED
 
         # leases: 1h by default, 5h for `slow`
         lease = self._claim(harness, journal, "call", ["slow"])
@@ -607,8 +602,8 @@ class JournalContract:
         # timeouts and graces, measured from `send` concluding
         clock.now = "2026-01-08T00:00:00+00:00"
         settled = journal.settle(harness.candidates(["slow", "fast"]))
-        assert settled["clicked"] == {NODE_FAILED: 1}
-        assert settled["survey"] == {NODE_SKIPPED: 1}
+        assert settled["clicked"] == {Status.FAILED: 1}
+        assert settled["survey"] == {Status.SKIPPED: 1}
         assert "clicked" not in journal.progress("slow")
         assert "survey" not in journal.progress("slow")
 
@@ -669,7 +664,8 @@ class JournalContract:
         self._run(harness, v1, "thumb", ["s1"])
         assert v2.migrate(["s1"], self.V1, {"crop": "trim"}) == 1
         assert v2.pinned("s1") == self.V2.document.identity
-        assert v2.progress("s1") == {"fetch": NODE_DONE, "trim": NODE_DONE, "thumb": NODE_DONE}
+        assert v2.progress("s1") == {"fetch": Status.DONE, "trim": Status.DONE,
+                                     "thumb": Status.DONE}
         assert self._claim(harness, v2, "watermark", ["s1"]) == ["s1"], (
             "the new node is next, as if the subject had started on v2")
 
@@ -686,7 +682,7 @@ class JournalContract:
         assert "publish" in caught.value.problems["late"]
         assert v2.pinned("early") == self.V1.document.identity, (
             "the compliant one did not move either")
-        assert v1.progress("early")["crop"] == NODE_DONE
+        assert v1.progress("early")["crop"] == Status.DONE
 
     def test_a_dropped_node_is_archived_unless_someone_holds_it(self, harness, clock):
         v1 = harness.journal(self.V1, clock)
@@ -699,7 +695,7 @@ class JournalContract:
         with pytest.raises(MigrationError, match="held"):
             v3.migrate(["done", "held"], self.V1, {"crop": None})
         assert v3.migrate(["done"], self.V1, {"crop": None}) == 1
-        assert v3.progress("done") == {"fetch": NODE_DONE}
+        assert v3.progress("done") == {"fetch": Status.DONE}
         assert [(e["node"], e["reason"]) for e in v3.history("done")] == [("crop", "migrate")]
 
     def test_a_mapping_that_cannot_hold_is_refused(self, harness, clock):
@@ -735,7 +731,7 @@ class JournalContract:
             "the minute band is full again, the hour band is spent")
 
     def test_per_policy_gives_each_policy_its_own_budget(self, harness, clock):
-        graph = Graph(Document("api"), (Node("call", concurrency=1, per="policy"),),
+        graph = Graph(Document("api"), (Node("call", concurrency=1, per=Per.POLICY),),
                       policies={"big": {"call": {"concurrency": 3}}})
         journal = harness.journal(graph, clock)
         journal.enroll(["b1", "b2", "b3", "b4"], "big")
@@ -925,7 +921,7 @@ class JournalContract:
         assert journal.counts("arrive")["waiting"] == 1
         assert journal.arrival("s1", "arrive").ref == "v1"
         assert self._settle(harness, journal, ["s1"]) == 1
-        assert journal.progress("s1") == {"arrive": NODE_DONE}
+        assert journal.progress("s1") == {"arrive": Status.DONE}
         assert journal.arrival("s1", "arrive") is None
         assert journal.counts("arrive")["waiting"] == 0
         assert self._claim(harness, journal, "scrape", ["s1"]) == ["s1"]
@@ -952,7 +948,7 @@ class JournalContract:
         assert [e["lease"] for e in merged] == ["v2"]
 
     def test_dedupe_keeps_the_first_version(self, harness, clock):
-        journal = harness.journal(_listing(merge="first"), clock)
+        journal = harness.journal(_listing(merge=Merge.FIRST), clock)
         clock.now = _at(0)
         journal.arrive("arrive", ["s1"], ref="v1")
         clock.now = _at(5)
@@ -960,7 +956,7 @@ class JournalContract:
         assert journal.arrival("s1", "arrive").ref == "v1"
 
     def test_batch_keeps_every_version_in_the_order_they_came(self, harness, clock):
-        journal = harness.journal(_listing(merge="all"), clock)
+        journal = harness.journal(_listing(merge=Merge.ALL), clock)
         for minute, ref in enumerate(("v1", "v2", "v3")):
             clock.now = _at(minute)
             journal.arrive("arrive", ["s1"], ref=ref)
@@ -968,7 +964,7 @@ class JournalContract:
         assert journal.arrival("s1", "arrive").ref == "v3", "the latest is still named"
 
     def test_a_batch_past_its_size_lets_the_oldest_go_and_says_so(self, harness, clock):
-        journal = harness.journal(_listing(merge="all", max_size=2), clock)
+        journal = harness.journal(_listing(merge=Merge.ALL, max_size=2), clock)
         for minute, ref in enumerate(("v1", "v2", "v3")):
             clock.now = _at(minute)
             journal.arrive("arrive", ["s1"], ref=ref)
@@ -1000,7 +996,8 @@ class JournalContract:
             journal.arrive("arrive", ["s1"], ref="v1")
 
     def test_debounce_waits_for_quiet_and_max_wait_ends_it(self, harness, clock):
-        journal = harness.journal(_listing(position="last", delay="10m", max_wait="25m"), clock)
+        journal = harness.journal(
+            _listing(position=Position.LAST, delay="10m", max_wait="25m"), clock)
         for minute in (0, 5, 10):
             clock.now = _at(minute)
             journal.arrive("arrive", ["s1"], ref=f"v{minute}")
@@ -1027,15 +1024,15 @@ class JournalContract:
         clock.now = _at(89)
         assert self._settle(harness, journal, ["s1"]) == 0, "the pass ended at 30"
         assert journal.progress("s1") == {
-            "arrive": NODE_DONE, "scrape": NODE_DONE, "publish": NODE_DONE}, (
+            "arrive": Status.DONE, "scrape": Status.DONE, "publish": Status.DONE}, (
             "the previous pass stays visible while the next version waits")
         clock.now = _at(90)
         assert self._settle(harness, journal, ["s1"]) == 1
-        assert journal.progress("s1") == {"arrive": NODE_DONE}
+        assert journal.progress("s1") == {"arrive": Status.DONE}
         archived = sorted((e["node"], e["status"]) for e in journal.history("s1")
                           if e["reason"] == "arrival")
-        assert archived == [("arrive", NODE_DONE), ("publish", NODE_DONE),
-                            ("scrape", NODE_DONE)]
+        assert archived == [("arrive", Status.DONE), ("publish", Status.DONE),
+                            ("scrape", Status.DONE)]
         assert self._claim(harness, journal, "scrape", ["s1"]) == ["s1"]
 
     def test_an_arrival_during_a_running_pass_waits_for_it(self, harness, clock):
@@ -1048,7 +1045,7 @@ class JournalContract:
         assert self._settle(harness, journal, ["s1"]) == 0, "scrape is running"
         journal.conclude("scrape", lease, token=lease.token)
         assert self._settle(harness, journal, ["s1"]) == 1
-        assert journal.progress("s1") == {"arrive": NODE_DONE}
+        assert journal.progress("s1") == {"arrive": Status.DONE}
 
     def test_the_driver_never_lets_an_arrival_in_over_a_running_pass(self, harness, clock):
         """What the journal checks before, the driver holds on its own: a
@@ -1066,12 +1063,12 @@ class JournalContract:
                                     archive=("arrive", "scrape", "publish"), now=_at(0)) == []
         assert journal.driver.enter("arrive", [("s1", entry.revision + 1)],
                                     archive=("arrive",), now=_at(0)) == [], "stale revision"
-        assert journal.progress("s1") == {"arrive": NODE_DONE, "scrape": NODE_RUNNING}
+        assert journal.progress("s1") == {"arrive": Status.DONE, "scrape": Status.RUNNING}
         assert journal.driver.enter("scrape", [("s1", entry.revision)],
                                     archive=("scrape",), now=_at(0)) == [], "nothing waits there"
 
     def test_skip_drops_an_arrival_during_a_running_pass(self, harness, clock):
-        journal = harness.journal(_listing(while_running="skip"), clock)
+        journal = harness.journal(_listing(while_running=WhileRunning.SKIP), clock)
         clock.now = _at(0)
         journal.arrive("arrive", ["s1"], ref="v1")
         self._settle(harness, journal, ["s1"])
@@ -1121,11 +1118,11 @@ class JournalContract:
             journal.arrive("arrive", [subject])
         clock.now = _at(3)
         assert self._settle(harness, journal, ["a", "b", "c"]) == 1
-        assert journal.progress("c") == {"arrive": NODE_DONE}, "c arrived first"
+        assert journal.progress("c") == {"arrive": Status.DONE}, "c arrived first"
         assert self._settle(harness, journal, ["a", "b", "c"]) == 0, "one a minute"
         clock.now = _at(4)
         assert self._settle(harness, journal, ["a", "b", "c"]) == 1
-        assert journal.progress("a") == {"arrive": NODE_DONE}
+        assert journal.progress("a") == {"arrive": Status.DONE}
 
     def test_a_lane_after_other_nodes_waits_for_its_parents(self, harness, clock):
         nodes = (Node("fetch"), Node("tag", parents=("fetch",), lane=Lane()),
@@ -1135,7 +1132,7 @@ class JournalContract:
         assert journal.settle(harness.candidates(["s1"])) == {}
         self._run(harness, journal, "fetch", ["s1"])
         assert journal.settle(harness.candidates(["s1"])) == {"tag": {"entered": 1}}
-        assert journal.progress("s1") == {"fetch": NODE_DONE, "tag": NODE_DONE}
+        assert journal.progress("s1") == {"fetch": Status.DONE, "tag": Status.DONE}
 
     def test_a_migration_carries_the_arrivals_of_a_renamed_lane(self, harness, clock):
         v1 = Graph(Document("listings", version="1"), LISTING)
@@ -1156,25 +1153,25 @@ class JournalContract:
             journal.skip("left", candidates=harness.candidates(["s1"]))
 
     def test_a_skip_needs_concluded_parents_and_satisfies_children(self, harness, journal):
-        harness.seed(journal, "s1", {"start": NODE_RUNNING})
-        harness.seed(journal, "s2", {"start": NODE_DONE, "left": NODE_DONE})
+        harness.seed(journal, "s1", {"start": Status.RUNNING})
+        harness.seed(journal, "s2", {"start": Status.DONE, "left": Status.DONE})
         assert journal.skip("right", candidates=harness.candidates(["s1", "s2"])) == 1
-        assert journal.progress("s2")["right"] == NODE_SKIPPED
+        assert journal.progress("s2")["right"] == Status.SKIPPED
         assert "right" not in journal.progress("s1")
         assert self._claim(harness, journal, "end", ["s2"]) == ["s2"]
 
     def test_a_skip_never_overwrites(self, harness, journal):
-        harness.seed(journal, "s1", {"start": NODE_DONE, "right": NODE_FAILED})
+        harness.seed(journal, "s1", {"start": Status.DONE, "right": Status.FAILED})
         assert journal.skip("right", candidates=harness.candidates(["s1"])) == 0
-        assert journal.progress("s1")["right"] == NODE_FAILED
+        assert journal.progress("s1")["right"] == Status.FAILED
 
     # -- adopt / forget / release -------------------------------------------
 
     def test_adopt_records_done_and_never_overwrites(self, harness, journal):
-        harness.seed(journal, "s2", {"start": NODE_FAILED})
+        harness.seed(journal, "s2", {"start": Status.FAILED})
         assert journal.adopt("start", ["s1", "s1", "s2"]) == 1
-        assert journal.progress("s1") == {"start": NODE_DONE}
-        assert journal.progress("s2") == {"start": NODE_FAILED}
+        assert journal.progress("s1") == {"start": Status.DONE}
+        assert journal.progress("s2") == {"start": Status.FAILED}
         assert journal.adopt("start", []) == 0
         with pytest.raises(DagError):
             journal.adopt("nope", [])
@@ -1194,18 +1191,18 @@ class JournalContract:
         self._claim(harness, journal, "start", ["young"])
         assert journal.release("start", "2026-01-01T00:30:00+00:00") == 1
         assert journal.progress("old") == {}
-        assert journal.progress("done") == {"start": NODE_DONE}
-        assert journal.progress("young") == {"start": NODE_RUNNING}
+        assert journal.progress("done") == {"start": Status.DONE}
+        assert journal.progress("young") == {"start": Status.RUNNING}
 
     # -- read ----------------------------------------------------------------
 
     def test_counts_cover_every_status(self, harness, journal):
-        harness.seed(journal, "a", {"start": NODE_DONE})
-        harness.seed(journal, "b", {"start": NODE_DONE})
-        harness.seed(journal, "c", {"start": NODE_FAILED})
-        harness.seed(journal, "d", {"start": NODE_OMITTED})
-        assert journal.counts("start") == {NODE_RUNNING: 0, NODE_SCHEDULED: 0, NODE_DONE: 2,
-                                           NODE_SKIPPED: 0, NODE_FAILED: 1, NODE_OMITTED: 1}
+        harness.seed(journal, "a", {"start": Status.DONE})
+        harness.seed(journal, "b", {"start": Status.DONE})
+        harness.seed(journal, "c", {"start": Status.FAILED})
+        harness.seed(journal, "d", {"start": Status.OMITTED})
+        assert journal.counts("start") == {Status.RUNNING: 0, Status.SCHEDULED: 0, Status.DONE: 2,
+                                           Status.SKIPPED: 0, Status.FAILED: 1, Status.OMITTED: 1}
 
     def test_stages_measure_what_worked_in_order(self, harness, journal, clock):
         clock.now = "2026-01-01T00:00:00+00:00"
@@ -1217,13 +1214,13 @@ class JournalContract:
         stages = journal.stages(["s1", "ghost"], at="2026-01-01T00:00:15+00:00")
         assert list(stages) == ["s1"]
         assert [[n, e, float(s), st] for n, e, s, st in stages["s1"]] == [
-            ["start", "2026-01-01T00:00:10+00:00", 10.0, NODE_DONE],
-            ["left", "2026-01-01T00:00:15+00:00", 5.0, NODE_RUNNING],
+            ["start", "2026-01-01T00:00:10+00:00", 10.0, Status.DONE],
+            ["left", "2026-01-01T00:00:15+00:00", 5.0, Status.RUNNING],
         ]
 
     def test_parents_concluded_reads_like_the_rule(self, harness, journal):
-        harness.seed(journal, "s1", {"left": NODE_DONE, "right": NODE_SKIPPED})
-        harness.seed(journal, "s2", {"left": NODE_DONE, "right": NODE_FAILED})
+        harness.seed(journal, "s1", {"left": Status.DONE, "right": Status.SKIPPED})
+        harness.seed(journal, "s2", {"left": Status.DONE, "right": Status.FAILED})
         assert harness.parents_concluded(journal, "end", "s1") is True
         assert harness.parents_concluded(journal, "end", "s2") is False
         assert harness.parents_concluded(journal, "start", "s3") is True, (
@@ -1279,7 +1276,7 @@ class JournalContract:
         assert sorted(lease) == [1, 3, big]
         assert all(type(s) is int for s in lease)
         assert journal.conclude("prepare", [3, big], token=lease.token) == 2
-        assert journal.progress(big) == {"prepare": NODE_DONE}
+        assert journal.progress(big) == {"prepare": Status.DONE}
         lease = self._claim(harness, journal, "call", [big])
         assert lease == [big]
         journal.fail("call", [big], token=lease.token)
@@ -1342,7 +1339,7 @@ class JournalContract:
         v1, PostgreSQL likewise. The memory driver runs both arrivals in one
         process, so it has no window to lose; the test holds there without
         proving anything, which is worth knowing when reading a green run."""
-        store = harness.store(_listing(merge="all", max_size=10), clock)
+        store = harness.store(_listing(merge=Merge.ALL, max_size=10), clock)
         try:
             one, two = store.session(), store.session()
 
@@ -1390,7 +1387,7 @@ class JournalContract:
             check = store.session()
             try:
                 if granted:
-                    assert check.journal.progress("s1").get("publish") == NODE_RUNNING, (
+                    assert check.journal.progress("s1").get("publish") == Status.RUNNING, (
                         "the lane archived a pass while a worker held publish")
                     assert check.journal.arrival("s1", "arrive") is not None
             finally:
@@ -1537,7 +1534,7 @@ def _model_machine(harness: Any, subject_type: type = str, lane_root: bool = Fal
                 loop = Loop(to=draw(st.sampled_from([spec["name"], *upstream(spec["name"])])),
                             max=draw(st.integers(1, 2)),
                             on=tuple(draw(st.lists(st.sampled_from(
-                                (NODE_DONE, NODE_SKIPPED, NODE_FAILED)),
+                                (Status.DONE, Status.SKIPPED, Status.FAILED)),
                                 min_size=1, max_size=2, unique=True))))
             retry = None
             if not root_lane and draw(st.integers(0, 3)) == 0:
@@ -1628,18 +1625,18 @@ def _model_machine(harness: Any, subject_type: type = str, lane_root: bool = Fal
             for s in candidates:
                 statuses = self._statuses(s)
                 row = self.model[s].get(n.name)
-                if row and row[0] == NODE_SCHEDULED and row[1] <= self.clock.now:
+                if row and row[0] == Status.SCHEDULED and row[1] <= self.clock.now:
                     del statuses[n.name]          # due: as if absent
                 if len(expected) < limit and claimable(n.name, self.dag, statuses):
-                    if row and row[0] == NODE_SCHEDULED:
+                    if row and row[0] == Status.SCHEDULED:
                         del self.model[s][n.name]   # replaced, not archived
-                    self.model[s][n.name] = (NODE_RUNNING, self.clock.now, got.token, None)
+                    self.model[s][n.name] = (Status.RUNNING, self.clock.now, got.token, None)
                     expected.append(s)
             assert sorted(got) == sorted(expected), f"claim {n.name} {candidates}"
             return got
 
         @rule(data=st.data(), candidates=subjects,
-              status=st.sampled_from((NODE_DONE, NODE_SKIPPED, NODE_FAILED)))
+              status=st.sampled_from((Status.DONE, Status.SKIPPED, Status.FAILED)))
         def conclude(self, data: Any, candidates: list[str], status: str,
                      node: Node | None = None, token: Any = "draw") -> None:
             n = node or self._node(data)
@@ -1647,7 +1644,7 @@ def _model_machine(harness: Any, subject_type: type = str, lane_root: bool = Fal
                 token = data.draw(st.sampled_from([None, "forged", *self.tokens]))
             branch = None
             omit: tuple[str, ...] = ()
-            if n.choice and status != NODE_FAILED:
+            if n.choice and status != Status.FAILED:
                 branch = data.draw(st.sampled_from(
                     [c.name for c in self.dag if n.name in c.parents]))
                 omit = omitted_by(n.name, branch, self.dag)
@@ -1655,20 +1652,20 @@ def _model_machine(harness: Any, subject_type: type = str, lane_root: bool = Fal
             expected = 0
             for s in dict.fromkeys(candidates):
                 row = self.model[s].get(n.name)
-                if row and row[0] == NODE_RUNNING and token in (None, row[2]):
+                if row and row[0] == Status.RUNNING and token in (None, row[2]):
                     self.model[s][n.name] = (status, row[1], row[2], self.clock.now)
                     retries = self.retried.get((s, n.name), 0)
-                    if (n.retry is not None and status == NODE_FAILED
+                    if (n.retry is not None and status == Status.FAILED
                             and retries < n.retry.limit):
                         self._archive(s, n.name, "retry")
                         due = shift(self.clock.now, n.retry.wait(retries + 1))
-                        self.model[s][n.name] = (NODE_SCHEDULED, due, None, None)
+                        self.model[s][n.name] = (Status.SCHEDULED, due, None, None)
                         self.retried[(s, n.name)] = retries + 1
                         expected += 1
                         continue
                     for other in omit:
                         self.model[s].setdefault(
-                            other, (NODE_OMITTED, self.clock.now, None, self.clock.now))
+                            other, (Status.OMITTED, self.clock.now, None, self.clock.now))
                     loop = n.loop
                     if (loop is not None and status in loop.on
                             and self.passes.get((s, loop.to), 0) < loop.max):
@@ -1691,7 +1688,7 @@ def _model_machine(harness: Any, subject_type: type = str, lane_root: bool = Fal
             n = data.draw(st.sampled_from(workable))
             got = self._claim(data, list(_SUBJECTS), 4, node=n)
             if got:
-                self.conclude(data, list(got), NODE_DONE, node=n, token=got.token)
+                self.conclude(data, list(got), Status.DONE, node=n, token=got.token)
 
         @rule(data=st.data(), candidates=subjects)
         def skip(self, data: Any, candidates: list[str]) -> None:
@@ -1703,7 +1700,7 @@ def _model_machine(harness: Any, subject_type: type = str, lane_root: bool = Fal
             for s in dict.fromkeys(candidates):
                 statuses = self._statuses(s)
                 if n.name not in statuses and joined(n.name, self.dag, statuses):
-                    self.model[s][n.name] = (NODE_SKIPPED, self.clock.now, None, self.clock.now)
+                    self.model[s][n.name] = (Status.SKIPPED, self.clock.now, None, self.clock.now)
                     expected += 1
             got = self.journal.skip(n.name, candidates=harness.candidates(candidates))
             assert got == expected, f"skip {n.name} {candidates}"
@@ -1715,7 +1712,7 @@ def _model_machine(harness: Any, subject_type: type = str, lane_root: bool = Fal
             expected = 0
             for s in dict.fromkeys(candidates):
                 if n.name not in self.model[s]:
-                    self.model[s][n.name] = (NODE_DONE, self.clock.now, None, self.clock.now)
+                    self.model[s][n.name] = (Status.DONE, self.clock.now, None, self.clock.now)
                     expected += 1
             assert self.journal.adopt(n.name, candidates) == expected
 
@@ -1731,7 +1728,7 @@ def _model_machine(harness: Any, subject_type: type = str, lane_root: bool = Fal
             return (n.name, *sorted(descendants(n.name, self.dag)))
 
         def _running(self, s: Any, n: Node) -> bool:
-            return any(self.model[s].get(x, ("",))[0] in (NODE_RUNNING, NODE_SCHEDULED)
+            return any(self.model[s].get(x, ("",))[0] in (Status.RUNNING, Status.SCHEDULED)
                        for x in self._pass(n))
 
         @rule(data=st.data(), candidates=subjects, ref=st.sampled_from((None, "r1", "r2")),
@@ -1748,7 +1745,7 @@ def _model_machine(harness: Any, subject_type: type = str, lane_root: bool = Fal
             expected = {"queued": 0, "merged": 0, "skipped": 0}
             for s in dict.fromkeys(candidates):
                 current = self.waiting.get((s, n.name))
-                if lane.while_running == "skip" and self._running(s, n):
+                if lane.while_running == WhileRunning.SKIP and self._running(s, n):
                     self.archived[s].append((now, n.name, "skipped", "lane"))
                     expected["skipped"] += 1
                 elif current is None:
@@ -1766,14 +1763,14 @@ def _model_machine(harness: Any, subject_type: type = str, lane_root: bool = Fal
                         assert gone is not None
                     self.waiting[(s, n.name)] = (
                         kept[-1] if kept else None,
-                        now if lane.position == "last" else current[1],
+                        now if lane.position == Position.LAST else current[1],
                         current[2], current[3] or urgent, _refs_text(kept))
                     self.archived[s].append((now, n.name, "merged", "lane"))
                     expected["merged"] += 1
                 else:
                     self.waiting[(s, n.name)] = (
-                        ref if lane.merge == "last" else current[0],
-                        now if lane.position == "last" else current[1],
+                        ref if lane.merge == Merge.LAST else current[0],
+                        now if lane.position == Position.LAST else current[1],
                         current[2], current[3] or urgent, current[4])
                     self.archived[s].append((now, n.name, "merged", "lane"))
                     expected["merged"] += 1
@@ -1816,7 +1813,7 @@ def _model_machine(harness: Any, subject_type: type = str, lane_root: bool = Fal
                     self._archive(s, x, "arrival")
                 ref, place, arrived_at, urgent, _refs = self.waiting.pop((s, n.name))
                 self.archived[s].append((now, n.name, "entered", "lane"))
-                self.model[s][n.name] = (NODE_DONE, arrived_at, None, now)
+                self.model[s][n.name] = (Status.DONE, arrived_at, None, now)
             return len(due)
 
         @rule(candidates=subjects, wait=st.integers(0, 5))
@@ -1836,7 +1833,7 @@ def _model_machine(harness: Any, subject_type: type = str, lane_root: bool = Fal
                 for s in dict.fromkeys(candidates):
                     statuses = self._statuses(s)
                     row = self.model[s].get(n.name)
-                    if row and row[0] == NODE_SCHEDULED and row[1] <= now:
+                    if row and row[0] == Status.SCHEDULED and row[1] <= now:
                         del statuses[n.name]
                     if not claimable(n.name, self.dag, statuses):
                         continue
@@ -1847,16 +1844,16 @@ def _model_machine(harness: Any, subject_type: type = str, lane_root: bool = Fal
                     status = None
                     if n.wait is not None:
                         heard = [a for a, name, _, reason in self.archived[s]
-                                 if name == n.wait and reason == "signal"]
+                                 if name == n.wait and reason == Reason.SIGNAL]
                         back = [a for a, name, _, _ in self.archived[s] if name == n.name]
                         if heard and max(heard) >= max(back, default=""):
-                            status = NODE_DONE
+                            status = Status.DONE
                         elif (n.timeout is not None and since is not None
                               and shift(since, seconds(n.timeout)) <= now):
-                            status = NODE_FAILED
+                            status = Status.FAILED
                     elif (n.grace is not None and since is not None
                           and shift(since, seconds(n.grace)) <= now):
-                        status = NODE_SKIPPED
+                        status = Status.SKIPPED
                     if status is None:
                         continue
                     self.model[s][n.name] = (status, now, None, now)
@@ -1881,7 +1878,7 @@ def _model_machine(harness: Any, subject_type: type = str, lane_root: bool = Fal
             expected = 0
             for s in _SUBJECTS:
                 row = self.model[s].get(n.name)
-                if row and row[0] == NODE_RUNNING and row[1] < older_than:
+                if row and row[0] == Status.RUNNING and row[1] < older_than:
                     self._archive(s, n.name, "release")
                     expected += 1
             assert self.journal.release(n.name, older_than) == expected

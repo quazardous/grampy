@@ -65,14 +65,10 @@ from datetime import datetime
 from typing import Any, NamedTuple
 
 from ..dag import (
-    NODE_DONE,
-    NODE_OMITTED,
-    NODE_RUNNING,
     NODE_SATISFYING,
-    NODE_SCHEDULED,
-    NODE_SKIPPED,
 )
 from ..journal import Arrival, Entry, utc_now
+from ..names import Merge, Outcome, Position, Reason, Status
 
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
@@ -147,7 +143,7 @@ class SqliteDriver:
 
     def insert_if_unchanged(self, name: str, entries: list[tuple[Any, int]], *,
                             status: str, now: str, lease: str | None) -> list[Any]:
-        finished = None if status == NODE_RUNNING else now
+        finished = None if status == Status.RUNNING else now
         taken: list[Any] = []
         for subject, revision in sorted(entries, key=lambda e: str(e[0])):
             cur = self.conn.execute(
@@ -161,7 +157,7 @@ class SqliteDriver:
                 f"finished_at = excluded.finished_at, lease = excluded.lease "
                 f"WHERE status = ? AND started_at <= ?",
                 (subject, name, status, now, finished, lease, subject, revision,
-                 NODE_SCHEDULED, now))
+                 Status.SCHEDULED, now))
             if cur.rowcount == 1:
                 taken.append(subject)
         return taken
@@ -173,7 +169,7 @@ class SqliteDriver:
         for subject in subjects:
             sql = (f"UPDATE {self.table} SET status = ?, finished_at = ? "
                    f"WHERE node = ? AND status = ? AND {self.subject} = ?")
-            params: list[Any] = [status, now, name, NODE_RUNNING, subject]
+            params: list[Any] = [status, now, name, Status.RUNNING, subject]
             if lease is not None:
                 sql += " AND lease = ?"
                 params.append(lease)
@@ -185,18 +181,18 @@ class SqliteDriver:
                     f"INSERT INTO {self.table} "
                     f"({self.subject}, node, status, started_at, finished_at) "
                     f"VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
-                    (subject, other, NODE_OMITTED, now, now))
+                    (subject, other, Status.OMITTED, now, now))
             if reset:
                 self._raise_revision(subject)
                 for other in reset:
                     self._take_away("node = ? AND {s} = ?", (other, subject),
-                                    now=now, reason="loop")
+                                    now=now, reason=Reason.LOOP)
             if reschedule is not None:
                 self._take_away("node = ? AND {s} = ?", (name, subject),
-                                now=now, reason="retry")
+                                now=now, reason=Reason.RETRY)
                 self.conn.execute(
                     f"INSERT INTO {self.table} ({self.subject}, node, status, started_at) "
-                    f"VALUES (?, ?, ?, ?)", (subject, name, NODE_SCHEDULED, reschedule))
+                    f"VALUES (?, ?, ?, ?)", (subject, name, Status.SCHEDULED, reschedule))
         return count
 
     def adopt(self, name: str, subjects: list[Any], *, now: str) -> int:
@@ -206,7 +202,7 @@ class SqliteDriver:
                 f"INSERT INTO {self.table} "
                 f"({self.subject}, node, status, started_at, finished_at) "
                 f"VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
-                (subject, name, NODE_DONE, now, now)).rowcount
+                (subject, name, Status.DONE, now, now)).rowcount
         return count
 
     def forget(self, name: str, subjects: list[Any], *, now: str) -> int:
@@ -215,14 +211,14 @@ class SqliteDriver:
         for subject in subjects:
             self._raise_revision(subject)
             count += self._take_away("node = ? AND {s} = ?", (name, subject),
-                                     now=now, reason="forget")
+                                     now=now, reason=Reason.FORGET)
         return count
 
     def release(self, name: str, *, older_than: str, now: str,
                 only: tuple[str, ...] | None = None, exclude: tuple[str, ...] = (),
                 version: str | None = None) -> int:
         where = "node = ? AND status = ? AND started_at < ?"
-        params: list[Any] = [name, NODE_RUNNING, older_than]
+        params: list[Any] = [name, Status.RUNNING, older_than]
         registry = f"SELECT {{s}} FROM {self.revisions} WHERE policy IN ({{marks}})"
         if only is not None:
             where += " AND {s} IN (" + registry.replace("{marks}", ", ".join("?" * len(only))) + ")"
@@ -235,7 +231,7 @@ class SqliteDriver:
             where += (" AND {s} NOT IN (SELECT {s} FROM " + self.revisions
                       + " WHERE version IS NOT NULL AND version != ?)")
             params.append(version)
-        return self._take_away(where, tuple(params), now=now, reason="release")
+        return self._take_away(where, tuple(params), now=now, reason=Reason.RELEASE)
 
     @contextmanager
     def guard(self, keys: list[str]) -> Iterator[None]:
@@ -264,7 +260,7 @@ class SqliteDriver:
 
     def running(self, name: str, policies: tuple[str | None, ...] | None) -> int:
         sql = f"SELECT COUNT(*) FROM {self.table} t WHERE node = ? AND status = ?"
-        params: list[Any] = [name, NODE_RUNNING]
+        params: list[Any] = [name, Status.RUNNING]
         if policies is not None:
             named = [c for c in policies if c is not None]
             tests = []
@@ -305,7 +301,7 @@ class SqliteDriver:
         self.conn.execute(f"UPDATE {self.revisions} SET version = ? WHERE {self.subject} = ?",
                           (version, subject))
         for name in drop:
-            self._take_away("node = ? AND {s} = ?", (name, subject), now=now, reason="migrate")
+            self._take_away("node = ? AND {s} = ?", (name, subject), now=now, reason=Reason.MIGRATE)
             self.conn.execute(
                 f"DELETE FROM {self.arrivals_table} WHERE {self.subject} = ? AND node = ?",
                 (subject, name))
@@ -407,23 +403,23 @@ class SqliteDriver:
                     f"({self.subject}, node, ref, place, arrived_at, urgent, refs) "
                     f"VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
                     (subject, name, ref, now, now, int(urgent), refs)).rowcount == 1:
-                out[subject] = "queued"
+                out[subject] = Outcome.QUEUED
                 continue
             sets = ["urgent = MAX(urgent, ?)"]
             params: list[Any] = [int(urgent)]
-            if merge in ("last", "set"):
+            if merge in (Merge.LAST, Merge.SET):
                 sets.append("ref = ?")
                 params.append(ref)
-            if merge == "set":
+            if merge == Merge.SET:
                 sets.append("refs = ?")
                 params.append(refs)
-            if position == "last":
+            if position == Position.LAST:
                 sets.append("place = ?")
                 params.append(now)
             self.conn.execute(
                 f"UPDATE {self.arrivals_table} SET {', '.join(sets)} "
                 f"WHERE {self.subject} = ? AND node = ?", (*params, subject, name))
-            out[subject] = "merged"
+            out[subject] = Outcome.MERGED
         return out
 
     def arrivals(self, subjects: list[Any], name: str) -> dict[Any, Arrival]:
@@ -457,12 +453,12 @@ class SqliteDriver:
             busy = self.conn.execute(
                 f"SELECT COUNT(*) FROM {self.table} WHERE {self.subject} = ? "
                 f"AND node IN ({marks}) AND status IN (?, ?)",
-                (subject, *archive, NODE_RUNNING, NODE_SCHEDULED)).fetchone()[0]
+                (subject, *archive, Status.RUNNING, Status.SCHEDULED)).fetchone()[0]
             if current != revision or arrival is None or busy:
                 continue
             self._raise_revision(subject)
             self._take_away(f"node IN ({marks}) AND {{s}} = ?", (*archive, subject),
-                            now=now, reason="arrival")
+                            now=now, reason=Reason.ARRIVAL)
             ref, arrived_at = arrival
             self.conn.execute(
                 f"DELETE FROM {self.arrivals_table} WHERE {self.subject} = ? AND node = ?",
@@ -470,12 +466,12 @@ class SqliteDriver:
             self.conn.execute(
                 f"INSERT INTO {self.history_table} ({self.subject}, node, status, "
                 f"started_at, finished_at, lease, archived_at, reason) "
-                f"VALUES (?, ?, 'entered', ?, ?, ?, ?, 'lane')",
-                (subject, name, arrived_at, now, ref, now))
+                f"VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (subject, name, Outcome.ENTERED, arrived_at, now, ref, now, Reason.LANE))
             self.conn.execute(
                 f"INSERT INTO {self.table} "
                 f"({self.subject}, node, status, started_at, finished_at) "
-                f"VALUES (?, ?, ?, ?, ?)", (subject, name, NODE_DONE, arrived_at, now))
+                f"VALUES (?, ?, ?, ?, ?)", (subject, name, Status.DONE, arrived_at, now))
             entered.append(subject)
         return entered
 
@@ -521,7 +517,7 @@ class SqliteDriver:
                 f"SELECT COALESCE(finished_at, ?), node, {self.subject}, started_at, status "
                 f"FROM {self.table} WHERE status NOT IN (?, ?, ?) "
                 f"AND {self.subject} IN ({marks})",
-                (at, NODE_SKIPPED, NODE_OMITTED, NODE_SCHEDULED, *chunk)).fetchall()
+                (at, Status.SKIPPED, Status.OMITTED, Status.SCHEDULED, *chunk)).fetchall()
         out: dict[str, list[list[Any]]] = {}
         for ended, n, subject, started, status in sorted(lines, key=lambda x: (x[0], x[1])):
             seconds = round(_epoch(ended) - _epoch(started), 1)
@@ -582,7 +578,7 @@ class SqliteDriver:
                     f"WHERE {self.subject} IN ({marks}) AND node IN ({node_marks})",
                     (*chunk, *nodes)).fetchall():
                 rows[subject][n] = status
-                if status == NODE_SCHEDULED:
+                if status == Status.SCHEDULED:
                     due[subject][n] = started
                 if ended is not None:
                     finished[subject][n] = ended

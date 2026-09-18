@@ -19,16 +19,15 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from quazardous.grampy import (
-    NODE_DONE,
-    NODE_FAILED,
-    NODE_RUNNING,
-    NODE_SCHEDULED,
+    Backoff,
     Document,
     Graph,
     Group,
     Lane,
     Node,
     NodeJournal,
+    Outcome,
+    Status,
     claimable_nodes,
 )
 from quazardous.grampy.diagram import overlay
@@ -44,9 +43,9 @@ GRAPH = Graph(Document("brick-sorter", version="1", namespace="demo"), (
     Node("sort", parents=("scan",), lease="30s"),
     Node("quarantine", parents=("scan",), wait="bomb-squad.arrived", timeout="90s"),
     Node("defuse", parents=("quarantine",), lease="40s",
-         retry=Retry(limit=3, delay="8s", backoff="exponential")),
+         retry=Retry(limit=3, delay="8s", backoff=Backoff.EXPONENTIAL)),
     Node("reject", parents=("quarantine", "defuse"), need=1,
-         on={"quarantine": ("failed",), "defuse": ("failed",)}),
+         on={"quarantine": (Status.FAILED,), "defuse": (Status.FAILED,)}),
     # TWO KINDS OF BRICK, ONE WORKFLOW. `polish` belongs to everyone and is
     # OPTIONAL: the adapter below says it is not for salvage bricks. The
     # policy's grace is the safety net, for a line running no polisher at
@@ -237,7 +236,7 @@ class World:
         self._returns.pop(brick_id, None)
         ref = f"v{brick.version}"
         outcome = self.journal.arrive("inbox", [brick_id], ref=ref)
-        kind = "merged" if outcome["merged"] else "queued"
+        kind = Outcome.MERGED if outcome[Outcome.MERGED] else Outcome.QUEUED
         self._log(f'journal.arrive("inbox", [{brick_id}], ref="{ref}")  # {kind}')
         return True
 
@@ -347,7 +346,7 @@ class World:
             if self.journal.arrival(brick_id, "inbox") is not None:
                 continue        # back in the inbox: its last pass is still on record
             progress = self.journal.progress(brick_id)
-            if progress.get("pack") == NODE_DONE:
+            if progress.get("pack") == Status.DONE:
                 self.finished[brick_id] = ("shipped", self.elapsed)
                 # THE BAG EXISTS WHEN THE LAST OF ITS BRICKS HAS ARRIVED —
                 # not when the first one did, or it would seal over bricks
@@ -365,7 +364,7 @@ class World:
                 self.sorted[self.bricks[brick_id].colour] += 1
                 if self.rng.random() < self.settings.returns_share:
                     self._returns[brick_id] = self.elapsed + self.rng.uniform(4, 30)
-            elif progress.get("reject") == NODE_DONE:
+            elif progress.get("reject") == Status.DONE:
                 self.finished[brick_id] = ("boom", self.elapsed)
                 self.exploded += 1
         # A BAG OUTLIVES ITS BRICKS: they leave the floor, it stays in the bin.
@@ -399,10 +398,10 @@ class World:
             return "inbox", "inbox"
         progress = self.journal.progress(brick_id)
         for name, status in progress.items():
-            if status == NODE_RUNNING:
+            if status == Status.RUNNING:
                 return "station", name
         for name, status in progress.items():
-            if status == NODE_SCHEDULED:
+            if status == Status.SCHEDULED:
                 return "retry", name
         ready = claimable_nodes(GRAPH.nodes, progress)
         if "quarantine" in ready:
@@ -411,12 +410,12 @@ class World:
         for name in order:
             if name in ready:
                 return "queue", name
-        failed = [n for n, s in progress.items() if s == NODE_FAILED]
+        failed = [n for n, s in progress.items() if s == Status.FAILED]
         return ("queue", "reject") if failed else ("queue", "scan")
 
     def _revealed(self, brick: Brick) -> bool:
         """A clean brick shows its colour; a TNT brick only once defused."""
-        return not brick.tnt or self.journal.progress(brick.id).get("defuse") == NODE_DONE
+        return not brick.tnt or self.journal.progress(brick.id).get("defuse") == Status.DONE
 
     def state(self) -> dict[str, Any]:
         bricks = []

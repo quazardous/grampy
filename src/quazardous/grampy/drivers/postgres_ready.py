@@ -59,8 +59,9 @@ from typing import Any
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
-from ..dag import NODE_RUNNING, NODE_SCHEDULED, Node
+from ..dag import Node
 from ..graph import Graph
+from ..names import Status
 from .postgres import PostgresDriver
 
 
@@ -122,7 +123,7 @@ class PostgresReadyDriver(PostgresDriver):
                     sa.select(self._subject, sa.literal(name)).distinct()
                     .where(t.c.node.in_(list(parents)), ~sa.exists().where(
                         own.c[self._key] == self._subject, own.c.node == name,
-                        own.c.status != NODE_SCHEDULED)))
+                        own.c.status != Status.SCHEDULED)))
                 .on_conflict_do_nothing()
                 .returning(self.ready.c[self._key])).fetchall())
         return count
@@ -146,7 +147,7 @@ class PostgresReadyDriver(PostgresDriver):
         written = super().insert_if_unchanged(name, entries, status=status, now=now,
                                               lease=lease)
         self._strike(written, name)
-        if status != NODE_RUNNING:
+        if status != Status.RUNNING:
             self._list(written, self._children_of([name]))
         return written
 
@@ -182,7 +183,7 @@ class PostgresReadyDriver(PostgresDriver):
         # Read before: every row this release can take is running and older
         # already, so the subjects read are a superset of those released.
         maybe = [r[0] for r in self._execute(
-            sa.select(self._subject).where(t.c.node == name, t.c.status == NODE_RUNNING,
+            sa.select(self._subject).where(t.c.node == name, t.c.status == Status.RUNNING,
                                            t.c.started_at < older_than)).fetchall()]
         count = super().release(name, older_than=older_than, now=now, only=only,
                                 exclude=exclude, version=version)
