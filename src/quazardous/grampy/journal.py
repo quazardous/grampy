@@ -321,6 +321,10 @@ class JournalDriver(Protocol):
         """`{subject: rows of `name` archived with `reason`}`, subjects
         without any left out."""
 
+    def prune_history(self, before: str, keep: tuple[str, ...]) -> int:
+        """Delete the history rows archived before `before` whose reason is
+        not in `keep`. Return the count deleted."""
+
     def note(self, subjects: list[Any], name: str, *, status: str, reason: str,
              now: str, ref: str | None) -> int:
         """Append to each subject's history a row `node=name`, `status`,
@@ -1218,6 +1222,22 @@ class NodeJournal:
         """Every row taken away from ONE subject — by `forget`, `release` or
         a loop — oldest first, each with `archived_at` and `reason`."""
         return self.driver.history(subject)
+
+    #: THE HISTORY ROWS A BOUND COUNTS — a retry limit, a loop's `max`.
+    #: Pruning never touches them: they are the counters.
+    COUNTED = (Reason.RETRY, Reason.LOOP)
+
+    def prune_history(self, before: str | datetime) -> int:
+        """KEEP THE HISTORY FROM GROWING FOREVER: delete what was archived
+        before `before`, except the rows a bound counts (`COUNTED`).
+
+        Forgets, releases, lane notes and signals go; the `retry` and `loop`
+        rows stay, whatever their age. A subject pruned, then brought back —
+        a replay, a requeue, a late result — keeps the retries and the loop
+        passes it had used: a limit cannot be reset by a clean-up. Meant for
+        the application's janitor, like `expire`. Return the count deleted.
+        """
+        return self.driver.prune_history(stamp(before), keep=self.COUNTED)
 
     def passes(self, subject: Any, name: str) -> int:
         """How many times a declared loop sent this subject back through

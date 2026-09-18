@@ -263,6 +263,24 @@ class JournalContract:
         with pytest.raises(ValueError, match="grampy_key"):
             journal.claim("pack", 2, candidates=harness.candidates(["a", "b"]))
 
+    def test_pruning_the_history_keeps_what_a_bound_counts(self, harness, clock):
+        """A pruned subject brought back keeps the retries it had used."""
+        journal = harness.journal(
+            (Node("call", retry=Retry(limit=2, delay="10s")), Node("next", parents=("call",))),
+            clock)
+        lease = self._claim(harness, journal, "call", ["s1"])
+        journal.fail("call", ["s1"], token=lease.token)        # a retry, archived
+        journal.forget("call", ["s1"])                          # a forget, archived
+        assert {row["reason"] for row in journal.history("s1")} == {Reason.RETRY,
+                                                                    Reason.FORGET}
+        clock.now = "2026-02-01T00:00:00+00:00"
+        assert journal.prune_history(clock.now) == 1, "the forget goes"
+        assert [row["reason"] for row in journal.history("s1")] == [Reason.RETRY]
+        assert journal.retries("s1", "call") == 1, "the retry used is still counted"
+        lease = self._claim(harness, journal, "call", ["s1"])   # back again
+        journal.fail("call", ["s1"], token=lease.token)
+        assert journal.retries("s1", "call") == 2, "and the limit still stands"
+
     # -- scale and cost --------------------------------------------------------
 
     #: ONE CALL, TENS OF THOUSANDS OF SUBJECTS. Past the number of parameters a

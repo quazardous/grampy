@@ -578,6 +578,13 @@ class SqliteDriver:
             out.update(self.conn.execute(sql + f" GROUP BY {self.subject}", params).fetchall())
         return out
 
+    def prune_history(self, before: str, keep: tuple[str, ...]) -> int:
+        self._require_transaction()
+        marks = ", ".join("?" * len(keep)) or "NULL"
+        return self.conn.execute(
+            f"DELETE FROM {self.history_table} WHERE archived_at < ? "
+            f"AND reason NOT IN ({marks})", (before, *keep)).rowcount
+
     def archived(self, subjects: list[Any], name: str, reason: str) -> dict[Any, int]:
         counts: dict[Any, int] = {}
         for chunk in _chunks(subjects):

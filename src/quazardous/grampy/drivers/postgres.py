@@ -365,6 +365,12 @@ class PostgresCommon:
             query = query.where(h.c.reason == reason)
         return {row[0]: row[1] for row in self._execute(query).fetchall()}
 
+    def prune_history(self, before: str, keep: tuple[str, ...]) -> int:
+        h = self.history_table
+        return len(self._execute(
+            sa.delete(h).where(h.c.archived_at < before, h.c.reason.not_in(list(keep)))
+            .returning(h.c[self._key])).fetchall())
+
     def archived(self, subjects: list[Any], name: str, reason: str) -> dict[Any, int]:
         h = self.history_table
         subject = h.c[self._key]

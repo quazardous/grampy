@@ -257,6 +257,14 @@ class MemoryDriver:
                     counts[s] = counts.get(s, 0) + 1
         return counts
 
+    def prune_history(self, before: str, keep: tuple[str, ...]) -> int:
+        with self._lock:
+            kept = [(s, e) for s, e in self.archive
+                    if e["archived_at"] >= before or e["reason"] in keep]
+            pruned = len(self.archive) - len(kept)
+            self.archive = kept
+        return pruned
+
     def note(self, subjects: list[Any], name: str, *, status: str, reason: str,
              now: str, ref: str | None) -> int:
         with self._lock:

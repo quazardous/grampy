@@ -59,9 +59,15 @@ work was taken again, the token is the second one's.
 ### The history table
 
 The node table's columns, plus `archived_at` and `reason` — `forget`,
-`release`, `loop`, `retry`, `migrate`, `arrival`, `lane`. Nothing is ever
-deleted: a row taken away moves here. This is where "how many times did this
-go round" and "who held it before" are answered.
+`release`, `loop`, `retry`, `migrate`, `arrival`, `lane`. A row taken away
+moves here. This is where "how many times did this go round" and "who held it
+before" are answered.
+
+It grows with every replay and requeue, so a janitor may prune it:
+`journal.prune_history(before)` deletes what was archived before a date —
+except the `retry` and `loop` rows, which retry limits and loop bounds count.
+Those stay whatever their age: a subject pruned, then brought back, cannot
+win back retries it had already used.
 
 ### The two optional ones
 

@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `journal.prune_history(before)` keeps the history table from growing
+  forever: it deletes what was archived before a date, except the `retry` and
+  `loop` rows that retry limits and loop bounds count — so a subject pruned
+  and brought back later still has only the retries it had left.
 - Two more PostgreSQL layouts, picked by the class you instantiate — nothing
   switches on its own. `PostgresSubjectDriver` keeps one row per subject, its
   progress in JSONB: a claim reads its page and the progress at once and
