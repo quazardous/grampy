@@ -398,7 +398,8 @@ class PostgresDriver(PostgresCommon):
     # -- write -------------------------------------------------------------
 
     def scan(self, candidates: Any, *, name: str | None, nodes: tuple[str, ...],
-             parents: tuple[str, ...], page: int, now: str) -> Iterator[list[Entry]]:
+             parents: tuple[str, ...], page: int, now: str,
+             after: tuple[str, ...] = ()) -> Iterator[list[Entry]]:
         """Pre-filters in SQL what cannot be taken — a row for `name`, a
         parent not concluded — so that a page is mostly takable."""
         t, r = self.table, self.revisions
@@ -422,6 +423,11 @@ class PostgresDriver(PostgresCommon):
                 ~sa.and_(held.c.status == Status.SCHEDULED, held.c.started_at <= now)))
         if parents:
             query = query.where(self.parents_concluded(parents, candidate))
+        if after:
+            # THE SUBJECT HAS MOVED PAST `name`: a row, any, on a node after it.
+            later = t.alias("later")
+            query = query.where(~sa.exists().where(
+                later.c[self._subject.key] == candidate, later.c.node.in_(list(after))))
         query = self._narrow(query, candidate, name, parents)
         last = None
         while True:

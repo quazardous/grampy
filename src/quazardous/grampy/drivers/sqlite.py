@@ -162,7 +162,8 @@ class SqliteDriver:
         return utc_now()
 
     def scan(self, candidates: Any, *, name: str | None, nodes: tuple[str, ...],
-             parents: tuple[str, ...], page: int, now: str) -> Iterator[list[Entry]]:
+             parents: tuple[str, ...], page: int, now: str,
+             after: tuple[str, ...] = ()) -> Iterator[list[Entry]]:
         """Pre-filters in SQL what cannot be taken — a row for `name`, a
         parent not concluded — before reading the rows of what is left.
 
@@ -175,15 +176,15 @@ class SqliteDriver:
                 return
             keys = dict(chunk)
             subjects = [s for s, _ in chunk]
-            if name is not None or parents:
-                kept = self._takable(subjects, name, parents, now)
+            if name is not None or parents or after:
+                kept = self._takable(subjects, name, parents, now, after)
                 subjects = [s for s in subjects if s in kept]
             yield self._entries(subjects, nodes, keys)
             if len(chunk) < page:
                 return
 
     def _takable(self, subjects: list[Any], name: str | None, parents: tuple[str, ...],
-                 now: str) -> set[Any]:
+                 now: str, after: tuple[str, ...] = ()) -> set[Any]:
         """THE PRE-FILTER — a superset of what the journal will take, never
         less: no row for `name` other than a scheduled one due by `now`, and
         a satisfying row for every parent."""
@@ -204,6 +205,11 @@ class SqliteDriver:
                         f"WHERE p.{self.subject} = c.s AND p.node IN ({marks}) "
                         f"AND p.status IN ({satisfying})) = ?")
                 params += [*parents, *NODE_SATISFYING, len(parents)]
+            if after:
+                marks = ", ".join("?" * len(after))
+                sql += (f" AND NOT EXISTS (SELECT 1 FROM {self.table} a "
+                        f"WHERE a.{self.subject} = c.s AND a.node IN ({marks}))")
+                params += list(after)
             kept.update(row[0] for row in self.conn.execute(sql, params).fetchall())
         return kept
 

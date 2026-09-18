@@ -159,7 +159,8 @@ class PostgresSubjectDriver(PostgresCommon):
     # -- write ---------------------------------------------------------------
 
     def scan(self, candidates: Any, *, name: str | None, nodes: tuple[str, ...],
-             parents: tuple[str, ...], page: int, now: str) -> Iterator[list[Entry]]:
+             parents: tuple[str, ...], page: int, now: str,
+             after: tuple[str, ...] = ()) -> Iterator[list[Entry]]:
         """Pre-filters in SQL, and brings the progress in the same read."""
         s = self.subjects
         c = _ranked(candidates)
@@ -179,6 +180,8 @@ class PostgresSubjectDriver(PostgresCommon):
                         self._field(name, "started_at") <= now)))
         for p in parents:
             query = query.where(self._field(p, "status").in_(NODE_SATISFYING))
+        for d in after:
+            query = query.where(s.c.nodes.op("->", return_type=JSONB)(d).is_(None))
         wanted = set(nodes)
         last = None
         while True:

@@ -75,6 +75,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a lane's queue): an application executing through its own driver, honouring
   the documented `fetchall` / `fetchone` / `rowcount`, failed on its first
   claim. It now needs only those, and a test holds every layout to it.
+- A claim on a node that replayed subjects had moved past read every
+  candidate to take nothing: the SQL drivers now leave out, in the query
+  itself, a subject whose later steps have started. The journal names them to
+  the driver (`scan(..., after=)`); a driver of your own must accept the
+  argument, and may ignore it.
 - The PostgreSQL drivers failed outright on a call over more than about
   32,700 subjects — a janitor's `skip` over a large table, a bulk `forget` —
   on the 65,535 values one statement may bind. Every list of subjects is now

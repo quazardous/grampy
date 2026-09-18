@@ -81,7 +81,8 @@ class MemoryDriver:
         return utc_now()
 
     def scan(self, candidates: Any, *, name: str | None, nodes: tuple[str, ...],
-             parents: tuple[str, ...], page: int, now: str) -> Iterator[list[Entry]]:
+             parents: tuple[str, ...], page: int, now: str,
+             after: tuple[str, ...] = ()) -> Iterator[list[Entry]]:
         """No pre-filter: every candidate is read, the journal decides.
 
         A candidate may be a subject, or a `(subject, key)` pair when the

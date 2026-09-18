@@ -236,7 +236,8 @@ class JournalDriver(Protocol):
     """
 
     def scan(self, candidates: Any, *, name: str | None, nodes: tuple[str, ...],
-             parents: tuple[str, ...], page: int, now: str) -> Iterator[list[Entry]]:
+             parents: tuple[str, ...], page: int, now: str,
+             after: tuple[str, ...] = ()) -> Iterator[list[Entry]]:
         """The candidates, IN THEIR ORDER, page by page — each with its
         revision, its rows on `nodes`, and when its `scheduled` rows are due.
 
@@ -244,8 +245,11 @@ class JournalDriver(Protocol):
         that holds a row for `name` — other than a `scheduled` row due by
         `now` — or one of whose `parents` has no `NODE_SATISFYING` row
         (`parents` is empty when the node joins in a way a pre-filter cannot
-        know). It must not leave out anything else; with `name` None, nothing
-        for a row it holds."""
+        know), or one holding a row, of any status, for a node of `after` —
+        the nodes after `name`, whose start means the subject has moved past
+        it. It must not leave out anything else; with `name` None, nothing
+        for a row it holds. A driver that pre-filters nothing is correct,
+        only slower."""
 
     def insert_if_unchanged(self, name: str, entries: list[tuple[Any, int]], *,
                             status: str, now: str, lease: str | None) -> list[Any]:
@@ -478,7 +482,7 @@ class NodeJournal:
             for page in self.driver.scan(candidates, name=name,
                                          nodes=(name, *n.parents, *after),
                                          parents=parents, page=max(enough, PAGE),
-                                         now=now):
+                                         now=now, after=after):
                 for e in page:
                     # A SUBJECT LISTED TWICE COUNTS ONCE: it would otherwise
                     # take a place in the limit and be refused by the write.
@@ -1119,7 +1123,8 @@ class NodeJournal:
             after = tuple(sorted(descendants(n.name, self.dag)))
             entries = [e for page in self.driver.scan(
                            candidates, name=n.name, nodes=(n.name, *n.parents, *after),
-                           parents=() if n.custom_join else n.parents, page=PAGE, now=now)
+                           parents=() if n.custom_join else n.parents, page=PAGE, now=now,
+                           after=after)
                        for e in page]
             ready = list({e.subject: e for e in entries
                           if self._mine(e)
