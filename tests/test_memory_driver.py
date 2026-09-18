@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from quazardous.grampy import NodeJournal
+from quazardous.grampy import Keyed, NodeJournal
 from quazardous.grampy.drivers.memory import MemoryDriver, Row
 from quazardous.grampy.testing import JournalContract
 
@@ -19,7 +19,7 @@ class MemoryHarness:
         return list(subjects)
 
     def keyed(self, pairs):
-        return list(pairs)
+        return [Keyed(s, k) for s, k in pairs]
 
     def seed(self, journal, subject, progress):
         for name, status in progress.items():
@@ -56,7 +56,7 @@ class MemorySession:
         return list(subjects)
 
     def keyed(self, pairs):
-        return list(pairs)
+        return [Keyed(s, k) for s, k in pairs]
 
     def commit(self):
         pass
@@ -69,3 +69,14 @@ class TestMemoryDriver(JournalContract):
     @pytest.fixture
     def harness(self):
         return MemoryHarness()
+
+
+def test_a_bare_tuple_is_not_taken_for_a_subject_and_its_key():
+    import pytest
+
+    from quazardous.grampy import Group, Node
+    journal = NodeJournal(MemoryDriver(), (Node("pack", group=Group(size=2)),))
+    with pytest.raises(ValueError, match="Keyed"):
+        journal.claim("pack", 2, candidates=[("a", "red"), ("b", "red")])
+    assert sorted(journal.claim("pack", 2, candidates=[Keyed("a", "red"), Keyed("b", "red")])
+                  ) == ["a", "b"]

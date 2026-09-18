@@ -24,7 +24,7 @@ from typing import Any
 from ..dag import (
     NODE_SATISFYING,
 )
-from ..journal import Arrival, Entry, utc_now
+from ..journal import Arrival, Entry, Keyed, utc_now
 from ..names import Merge, Outcome, Position, Reason, Status
 
 
@@ -39,11 +39,14 @@ class Row:
 
 
 def _split(candidate: Any) -> tuple[Any, str | None]:
-    """A candidate is a subject, or a `(subject, key)` pair for a node that
-    groups. A subject that IS a two-item tuple would be ambiguous, which is
-    why ids are documented as an integer or a string."""
-    if isinstance(candidate, tuple) and len(candidate) == 2:
-        return candidate[0], candidate[1]
+    """A subject, or `Keyed(subject, key)` for a node that groups. Any other
+    tuple is refused: a subject is an int or a str, and a key only counts
+    when it is said to be one."""
+    if isinstance(candidate, Keyed):
+        return candidate.subject, candidate.key
+    if isinstance(candidate, tuple):
+        raise ValueError(f"candidate {candidate!r}: a subject is an int or a str; "
+                         f"a grouping key comes as Keyed(subject, key)")
     return candidate, None
 
 

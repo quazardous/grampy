@@ -67,7 +67,7 @@ from typing import Any, NamedTuple
 from ..dag import (
     NODE_SATISFYING,
 )
-from ..journal import Arrival, Entry, utc_now
+from ..journal import Arrival, Entry, Keyed, utc_now
 from ..names import Merge, Outcome, Position, Reason, Status
 
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -621,10 +621,14 @@ class SqliteDriver:
             candidates = Query(candidates)
         if isinstance(candidates, Query):
             # Read at once: the cursor must not stay open while this very
-            # connection writes the claim. A SECOND COLUMN IS THE GROUPING
-            # KEY, carried and never read.
-            return iter([(row[0], row[1] if len(row) > 1 else None) for row in
-                         self.conn.execute(candidates.sql, candidates.params).fetchall()])
+            # connection writes the claim. THE GROUPING KEY IS THE COLUMN
+            # NAMED `grampy_key`, carried and never read; any other column
+            # is the query's own business.
+            cursor = self.conn.execute(candidates.sql, candidates.params)
+            names = [d[0] for d in cursor.description or ()]
+            at = names.index("grampy_key") if "grampy_key" in names else None
+            return iter([(row[0], row[at] if at is not None else None)
+                         for row in cursor.fetchall()])
         return iter(_split(c) for c in candidates)
 
     def _entries(self, batch: list[Any], nodes: tuple[str, ...],
@@ -672,9 +676,14 @@ def _check(name: str) -> None:
 
 
 def _split(candidate: Any) -> tuple[Any, str | None]:
-    """A subject, or a `(subject, key)` pair for a node that groups."""
-    if isinstance(candidate, tuple) and len(candidate) == 2:
-        return candidate[0], candidate[1]
+    """A subject, or `Keyed(subject, key)` for a node that groups. Any other
+    tuple is refused: a subject is an int or a str, and a key only counts
+    when it is said to be one."""
+    if isinstance(candidate, Keyed):
+        return candidate.subject, candidate.key
+    if isinstance(candidate, tuple):
+        raise ValueError(f"candidate {candidate!r}: a subject is an int or a str; "
+                         f"a grouping key comes as Keyed(subject, key)")
     return candidate, None
 
 

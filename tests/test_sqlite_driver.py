@@ -24,10 +24,11 @@ def keyed_subjects(pairs):
     """Candidates carrying a grouping key: subject, key, then the order."""
     pairs = list(pairs)
     if not pairs:
-        return Query("SELECT NULL, NULL WHERE 0")
+        return Query("SELECT NULL, NULL AS grampy_key WHERE 0")
     values = ", ".join("(?, ?, ?)" for _ in pairs)
     params = tuple(x for i, (s, k) in enumerate(pairs) for x in (s, k, i))
-    return Query(f"SELECT column1, column2 FROM (VALUES {values}) ORDER BY column3",
+    return Query(f"SELECT column1, column2 AS grampy_key FROM (VALUES {values}) "
+                 f"ORDER BY column3",
                  params)
 
 

@@ -162,6 +162,17 @@ class Lease(list):
         self.token = token
 
 
+class Keyed(NamedTuple):
+    """A CANDIDATE CARRYING ITS GROUPING KEY, for a node that groups, in a
+    plain iterable of candidates. In SQL, the key is the column named
+    `grampy_key`; in the items layer, `Adapter.group_of`. A bare tuple is
+    never read as one: an extra value that only happened to be there would
+    otherwise group subjects by it, silently."""
+
+    subject: Any
+    key: str | None
+
+
 class Entry(NamedTuple):
     """A candidate as a driver read it: its revision, and its rows on the
     nodes the decision needs — `{node: status}`, absent nodes left out."""
@@ -535,6 +546,13 @@ class NodeJournal:
         assert group is not None
         gathered: dict[Any, list[_Ready]] = {}
         for member in ready:
+            if group.per_key and member.key is None:
+                # NO KEY IS NOT ONE KEY: grouping every keyless candidate
+                # together would hand out groups nobody declared.
+                raise ValueError(
+                    f"node {n.name!r} groups by key, and a candidate carries none: "
+                    f"name the key column `grampy_key` in SQL, pass Keyed(subject, "
+                    f"key) otherwise, or give the adapter a group_of")
             gathered.setdefault(member.key if group.per_key else None, []).append(member)
         late = (shift(now, -seconds(group.max_wait))
                 if group.max_wait is not None else None)

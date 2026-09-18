@@ -53,7 +53,7 @@ from collections.abc import Iterable, Sequence
 from typing import Any
 
 from .dag import node
-from .journal import Lease, NodeJournal
+from .journal import Keyed, Lease, NodeJournal
 from .names import Status
 
 
@@ -309,7 +309,7 @@ class Items:
         """`({id: item}, what the journal gets)`. Items become their ids and
         stay in hand; a driver's query travels on untouched.
 
-        A NODE THAT GROUPS gets `(id, key)` pairs instead, the key coming
+        A NODE THAT GROUPS gets `Keyed(id, key)` instead, the key coming
         from `group_of` — the one place the application says what makes two
         subjects belong together.
         """
@@ -319,7 +319,7 @@ class Items:
         given = {self.adapter.id_of(i): i
                  for i in self.adapter.inflate(list(candidates))}
         if grouping:
-            return given, [(s, self.adapter.group_of(i)) for s, i in given.items()]
+            return given, [Keyed(s, self.adapter.group_of(i)) for s, i in given.items()]
         return given, list(given)
 
     def _loaded(self, lease: Lease) -> dict[Any, Any]:

@@ -165,7 +165,7 @@ class PostgresSubjectDriver(PostgresCommon):
         c = _ranked(candidates)
         columns = list(c.c)
         candidate = columns[0]
-        grouped = columns[1] if len(columns) > 2 else sa.literal(None)
+        grouped = c.c["grampy_key"] if "grampy_key" in c.c else sa.literal(None)
         query = (
             sa.select(candidate, c.c.grampy_rank, sa.func.coalesce(s.c.revision, 0),
                       s.c.policy, s.c.version, grouped.label("grampy_key"), s.c.nodes)

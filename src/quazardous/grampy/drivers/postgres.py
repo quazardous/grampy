@@ -405,10 +405,9 @@ class PostgresDriver(PostgresCommon):
         c = _ranked(candidates)
         columns = list(c.c)
         candidate = columns[0]
-        # A SECOND COLUMN IS THE GROUPING KEY, carried and never read. The
-        # rank this driver adds is always last, so anything between the two
-        # is the caller's.
-        grouped = columns[1] if len(columns) > 2 else sa.literal(None)
+        # THE GROUPING KEY IS THE COLUMN NAMED `grampy_key`, carried and never
+        # read; any other column is the query's own business.
+        grouped = c.c["grampy_key"] if "grampy_key" in c.c else sa.literal(None)
         held = t.alias("d")
         query = (
             sa.select(candidate, c.c.grampy_rank,

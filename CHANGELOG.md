@@ -54,6 +54,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A node that groups finds the key in the candidates' column named
+  `grampy_key` — or `Keyed(subject, key)` in a plain iterable — and nowhere
+  else. Before, any second column counted: a query selecting a priority to
+  order by grouped subjects by their priority, silently. A node grouping by
+  key now refuses a candidate that carries none. **If you group today,**
+  label your key column `grampy_key`, or wrap pairs in `Keyed`.
 - The README opens with an example that runs as pasted — two plain objects
   through a two-step graph — and its larger example defines the loader it
   calls. Both are run by the test suite as written. It also answers "why not

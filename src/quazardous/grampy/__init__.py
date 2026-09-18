@@ -39,7 +39,15 @@ from .dag import (
     omitted_by,
 )
 from .graph import Document, Graph, GraphFormatError
-from .journal import Arrival, JournalDriver, Lease, MigrationError, NodeJournal, utc_now
+from .journal import (
+    Arrival,
+    JournalDriver,
+    Keyed,
+    Lease,
+    MigrationError,
+    NodeJournal,
+    utc_now,
+)
 from .names import Backoff, Merge, Name, Outcome, Per, Position, Reason, Status, WhileRunning
 from .states import (
     allowed_transitions,
@@ -58,7 +66,7 @@ __all__ = [
     "NODE_CONCLUDED", "NODE_DONE", "NODE_FAILED", "NODE_OMITTED", "NODE_RUNNING",
     "NODE_SATISFYING", "NODE_SCHEDULED", "NODE_SKIPPED", "Rate", "Retry", "DagError",
     "Document", "Graph", "GraphFormatError",
-    "Arrival", "Group", "JournalDriver", "Lane", "Lease", "Loop", "MigrationError",
+    "Arrival", "Group", "JournalDriver", "Keyed", "Lane", "Lease", "Loop", "MigrationError",
     "Node", "accepts",
     "joined", "omitted_by",
     "NodeJournal", "allowed_transitions", "ancestors", "check_dag", "claimable",

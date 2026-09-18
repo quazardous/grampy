@@ -489,3 +489,29 @@ def test_candidates_with_a_limit_are_the_first_by_their_order(engine, layout):
         top = sa.select(items.c.id).order_by(items.c.priority).limit(3)
         assert sorted(journal.claim("a", 10, candidates=top)) == ["s0", "s1", "s2"]
         conn.rollback()
+
+
+def test_a_column_that_is_not_named_grampy_key_is_never_a_key(engine):
+    """select(id, priority) used to group by priority, silently."""
+    from quazardous.grampy import Group, Node
+    layout = RowLayout()
+    with engine.connect() as conn, conn.begin():
+        metadata = sa.MetaData()
+        tables = layout.tables(metadata, f"grampy_{next(_TABLES)}")
+        items = sa.Table(f"grampy_items_{next(_TABLES)}", metadata,
+                         sa.Column("id", sa.Text), sa.Column("priority", sa.Integer),
+                         sa.Column("colour", sa.Text))
+        metadata.create_all(conn)
+        conn.execute(sa.insert(items), [{"id": "a", "priority": 1, "colour": "red"},
+                                        {"id": "b", "priority": 1, "colour": "blue"}])
+        dag = (Node("pack", group=Group(size=2)), Node("plain"))
+        journal = NodeJournal(layout.driver(conn.execute, tables, dag), dag)
+        by_priority = sa.select(items.c.id, items.c.priority).order_by(items.c.id)
+        with pytest.raises(ValueError, match="grampy_key"):
+            journal.claim("pack", 2, candidates=by_priority)
+        assert sorted(journal.claim("plain", 2, candidates=by_priority)) == ["a", "b"], (
+            "on a plain node the extra column is the query's own business")
+        by_colour = sa.select(items.c.id, items.c.colour.label("grampy_key"))
+        assert journal.claim("pack", 2, candidates=by_colour.order_by(items.c.id)) == [], (
+            "red and blue are two keys: no group of two")
+        conn.rollback()

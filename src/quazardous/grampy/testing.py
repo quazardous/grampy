@@ -257,6 +257,12 @@ class JournalContract:
         with pytest.raises(ValueError, match="no time zone"):
             self._claim(harness, journal, "start", ["s1"])
 
+    def test_a_node_grouping_by_key_refuses_a_candidate_without_one(self, harness, clock):
+        """No key is not one key: the keyless would all be bagged together."""
+        journal = harness.journal((Node("pack", group=Group(size=2)),), clock)
+        with pytest.raises(ValueError, match="grampy_key"):
+            journal.claim("pack", 2, candidates=harness.candidates(["a", "b"]))
+
     # -- scale and cost --------------------------------------------------------
 
     #: ONE CALL, TENS OF THOUSANDS OF SUBJECTS. Past the number of parameters a

@@ -122,16 +122,23 @@ hands them back under one lease, so a worker does one thing with all of them —
 a bag of five bricks of a colour, a feed file of ten thousand lines, one call
 to a service that charges per call.
 
-**The key is not grampy's.** It travels with the candidates — a second column
-of your query, a `(subject, key)` pair in a plain iterable, or `group_of` in
-[the items layer](items.md) — and is compared, never read, like a lane's `ref`.
+**The key is not grampy's.** It travels with the candidates — the column of
+your query named **`grampy_key`**, `Keyed(subject, key)` in a plain iterable,
+or `group_of` in [the items layer](items.md) — and is compared, never read,
+like a lane's `ref`. Only that name counts: another column your query carries
+(a priority, a date) is never taken for a key. A node grouping by key refuses
+a candidate without one, rather than grouping every keyless subject together.
 `per_key=False` gathers any subjects, whatever their key.
+
+```python
+eligible = sa.select(bricks.c.id, bricks.c.colour.label("grampy_key")).order_by(bricks.c.id)
+```
 
 **A whole group or none.** A short group is simply not claimable, and nothing
 is written while one fills: there is no half-gathered state to repair after a
 crash. Two workers whose candidate lists overlap without matching could
 otherwise each win a piece — one bag of two and one of one, neither of them a
-group — so a grouped claim takes the driver's guard on `group|<node>|<key>`,
+group — so a grouped claim takes the driver's guard on `group|<node>`,
 the same one lanes and rate limits take.
 
 **`max_wait` is optional, and its absence is a choice.** Past `max_wait` after
