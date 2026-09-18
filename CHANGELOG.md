@@ -36,6 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The SQLite driver filters each page of candidates in SQL before reading
   their rows: a claim that finds nothing to take reads 2.5 times faster on a
   large table.
+- The shared driver contract checks one call on 70,000 subjects — past the
+  number of values a statement may bind, where a driver sending one per
+  subject fails outright — and holds a driver to the number of statements a
+  claim may send, when its harness declares one. The three PostgreSQL layouts
+  fail the first today, and are marked so until they bind arrays.
 - `benchmarks/layouts.py` runs the three layouts on the same data and prints
   statements and time per operation, to measure your own shape of data.
 - grampy's own words have names: `Status`, `Reason`, `Outcome`, `Merge`,

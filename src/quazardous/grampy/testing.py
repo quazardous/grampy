@@ -32,6 +32,15 @@ A harness provides:
                                  `.candidates(subjects)`, `.commit()`,
                                  `.rollback()`; sessions may live in threads
         .close()                 drops what the store created
+
+and, optionally, for the cost tests (skipped without them):
+
+    statement_bounds             {"claim": (base, per_subject)}: the most
+                                 statements a claim of one page may send —
+                                 the driver's own word, which the contract
+                                 holds it to
+    statements()                 a context manager yielding a function that
+                                 returns the statements sent inside it
 """
 from __future__ import annotations
 
@@ -203,6 +212,38 @@ class JournalContract:
             if self._claim(harness, journal, n.name, ["s1"]):
                 got.add(n.name)
         assert got == expected, f"{progress}: driver={sorted(got)} rule={sorted(expected)}"
+
+    # -- scale and cost --------------------------------------------------------
+
+    #: ONE CALL, TENS OF THOUSANDS OF SUBJECTS. Past the number of parameters a
+    #: statement may bind (65,535 for PostgreSQL, 32,766 for SQLite), a driver
+    #: that sends a value per subject fails outright — not slowly.
+    SCALE = 70_000
+
+    def test_one_call_handles_tens_of_thousands_of_subjects(self, harness, clock):
+        graph = (Node("a"), Node("b", parents=("a",), optional=True))
+        journal = harness.journal(graph, clock)
+        subjects = [f"s{i}" for i in range(self.SCALE)]
+        lease = journal.claim("a", self.SCALE, candidates=harness.candidates(subjects))
+        assert len(lease) == self.SCALE
+        assert journal.conclude("a", list(lease), token=lease.token) == self.SCALE
+        assert journal.skip("b", candidates=harness.candidates(subjects)) == self.SCALE
+        assert journal.forget("b", subjects) == self.SCALE
+        assert journal.progress(subjects[-1]) == {"a": Status.DONE}
+
+    def test_a_claim_stays_within_the_statements_its_driver_declares(self, harness, clock):
+        bounds = getattr(harness, "statement_bounds", None)
+        if not bounds:
+            pytest.skip("this driver declares no bound on its statements")
+        journal = harness.journal(DIAMOND, clock)
+        candidates = harness.candidates([f"s{i}" for i in range(30)])
+        with harness.statements() as sent:
+            taken = journal.claim("start", 30, candidates=candidates)
+        base, per_subject = bounds["claim"]
+        assert len(taken) == 30
+        assert sent() <= base + per_subject * len(taken), (
+            f"{sent()} statements for a claim of one page; the driver declares "
+            f"{base} + {per_subject} per subject")
 
     # -- claim ---------------------------------------------------------------
 

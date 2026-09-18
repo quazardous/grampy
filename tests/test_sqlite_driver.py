@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
 
 import pytest
 
@@ -39,17 +40,34 @@ class SqliteHarness:
         self.tmp_path = tmp_path
         self.count = 0
 
+    #: A claim reads the page's rows in two statements after the pre-filter,
+    #: then writes one statement per subject: SQLite runs in-process, where a
+    #: statement costs no round trip.
+    statement_bounds = {"claim": (5, 1)}
+
     def journal(self, dag, clock, subject_type=str, mergers=None):
         conn = sqlite3.connect(":memory:")
         for statement in schema():
             conn.execute(statement)
+        self.conn = conn
         return NodeJournal(SqliteDriver(conn), dag, clock=clock, mergers=mergers)
+
+    @contextmanager
+    def statements(self):
+        sent = []
+        self.conn.set_trace_callback(sent.append)
+        try:
+            yield lambda: len(sent)
+        finally:
+            self.conn.set_trace_callback(None)
 
     def journal_on(self, journal, dag, clock):
         return NodeJournal(SqliteDriver(journal.driver.conn), dag, clock=clock)
 
     def candidates(self, subjects):
-        return ordered_subjects(subjects)
+        # Past SQLite's cap on bound variables, the subjects themselves: the
+        # driver takes any iterable, in its order.
+        return list(subjects) if len(subjects) > 1000 else ordered_subjects(subjects)
 
     def keyed(self, pairs):
         return keyed_subjects(pairs)
