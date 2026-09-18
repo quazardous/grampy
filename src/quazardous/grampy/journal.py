@@ -108,12 +108,6 @@ from typing import Any, NamedTuple, Protocol
 
 from .dag import (
     NODE_CONCLUDED,
-    NODE_DONE,
-    NODE_FAILED,
-    NODE_OMITTED,
-    NODE_RUNNING,
-    NODE_SCHEDULED,
-    NODE_SKIPPED,
     Lane,
     Node,
     accepts,
@@ -124,6 +118,7 @@ from .dag import (
     omitted_by,
 )
 from .graph import Graph
+from .names import Merge, Outcome, Per, Reason, Status, WhileRunning
 from .timing import admit, seconds, shift
 
 #: HOW MANY CANDIDATES A CLAIM READS AT ONCE, at least — more when the
@@ -322,9 +317,10 @@ class JournalDriver(Protocol):
                refs: str | None = None) -> dict[Any, str]:
         """ATOMICALLY per subject, the arrival of `name`: when none waits,
         store one — `ref`, place and first arrival at `now`, `urgent`; when
-        one waits, merge — `ref` replaced when `merge` is "last", place moved
-        to `now` when `position` is "last", `urgent` kept once set. Return
-        `{subject: "queued" | "merged"}`."""
+        one waits, merge — `ref` replaced when `merge` is `Merge.LAST`, place
+        moved to `now` when `position` is `Position.LAST`, `urgent` kept once
+        set; `Merge.SET` replaces `refs` as given. Return
+        `{subject: Outcome.QUEUED | Outcome.MERGED}`."""
 
     def arrivals(self, subjects: list[Any], name: str) -> dict[Any, Arrival]:
         """`{subject: Arrival}` of the subjects waiting in `name`."""
@@ -336,7 +332,7 @@ class JournalDriver(Protocol):
         rows of `archive` is `running` or `scheduled`: archive with reason
         `arrival` and delete its rows of `archive`, raising its revision as
         `forget` does; append to its history the arrival — `node=name`,
-        `status="entered"`, started at its first arrival, finished and
+        `status=Outcome.ENTERED`, started at its first arrival, finished and
         archived at `now`, its `ref` in `lease`, reason `lane` — and delete
         it; insert a `done` row for `name`, started at the first arrival and
         finished at `now`. Return the subjects that entered."""
@@ -501,9 +497,9 @@ class NodeJournal:
                 return self._within_limits(
                     n, group, policy_of, now,
                     lambda part: self.driver.insert_if_unchanged(
-                        name, part, status=NODE_RUNNING, now=now, lease=token))
+                        name, part, status=Status.RUNNING, now=now, lease=token))
             return self.driver.insert_if_unchanged(
-                name, group, status=NODE_RUNNING, now=now, lease=token)
+                name, group, status=Status.RUNNING, now=now, lease=token)
 
         # A GROUPING CLAIM READS AND WRITES UNDER THE GUARD, taken before it
         # reads anything. Two claimers would otherwise each decide on a state
@@ -565,18 +561,18 @@ class NodeJournal:
         """RATE AND CONCURRENCY, decided here, kept by the storage's guard.
 
         Candidates are grouped by budget — one for the node, or one per
-        policy with `per="policy"`. Under the guard of every budget's keys,
+        policy with `per=Per.POLICY`. Under the guard of every budget's keys,
         each group is cut to what `concurrency` leaves free and what the rate
         bands let through (`timing.admit`), written by `write` — a claim, or
         a lane letting subjects in — and the bands advance by what was
         actually written."""
         groups: dict[str | None, list[tuple[Any, int]]] = {}
         for subject, revision in chosen:
-            budget = policy_of.get(subject) if n.per == "policy" else None
+            budget = policy_of.get(subject) if n.per == Per.POLICY else None
             groups.setdefault(budget, []).append((subject, revision))
         keys: dict[str | None, tuple[Node, list[str], str]] = {}
         for budget in groups:
-            seen_by = self.settings(n.name, budget) if n.per == "policy" else n
+            seen_by = self.settings(n.name, budget) if n.per == Per.POLICY else n
             prefix = f"{n.name}|{budget if budget is not None else '*'}"
             keys[budget] = (seen_by, [f"rate|{prefix}|{i}" for i in range(len(seen_by.rate))],
                             f"running|{prefix}")
@@ -591,7 +587,7 @@ class NodeJournal:
                 allowed = len(group)
                 if seen_by.concurrency is not None:
                     busy = self.driver.running(
-                        n.name, None if n.per != "policy" else (budget,))
+                        n.name, None if n.per != Per.POLICY else (budget,))
                     allowed = min(allowed, max(0, seen_by.concurrency - busy))
                 if seen_by.rate:
                     allowed, _ = admit(seen_by.rate, [stored.get(k) for k in band_keys],
@@ -631,7 +627,7 @@ class NodeJournal:
     # -- conclude ----------------------------------------------------------
 
     def conclude(self, name: str, subjects: list[Any], *, token: str | None,
-                 status: str = NODE_DONE, branch: str | None = None) -> int:
+                 status: str = Status.DONE, branch: str | None = None) -> int:
         """Finish this node on these subjects. Return the count touched.
 
         ONLY RUNNING ROWS HOLDING `token` ARE TOUCHED: a duplicate report — a
@@ -648,21 +644,21 @@ class NodeJournal:
         if not subjects:
             return 0
         n = node(name, self.dag)
-        if status not in NODE_CONCLUDED or status == NODE_OMITTED:
+        if status not in NODE_CONCLUDED or status == Status.OMITTED:
             raise ValueError(
                 f"unknown conclusion status: {status!r} — expected "
-                f"{NODE_DONE}, {NODE_SKIPPED} or {NODE_FAILED}")
+                f"{Status.DONE}, {Status.SKIPPED} or {Status.FAILED}")
         omit: tuple[str, ...] = ()
         subjects = _unique(subjects)
         now = self._clock()
         touched = 0
         retry_of = self._per_policy(name, "retry", subjects)
-        if any(r is not None for r in retry_of.values()) and status == NODE_FAILED \
+        if any(r is not None for r in retry_of.values()) and status == Status.FAILED \
                 and branch is None:
             # FIRST, THE RETRIES — each subject under its policy's policy: under
             # the limit, the failure is archived and the node scheduled again,
             # later for later attempts.
-            tries = self.driver.archived(subjects, name, "retry")
+            tries = self.driver.archived(subjects, name, Reason.RETRY)
             by_due: dict[str, list[Any]] = {}
             for s in subjects:
                 policy = retry_of[s]
@@ -681,7 +677,7 @@ class NodeJournal:
             # THE WAY BACK, per subject: under the bound, the conclusion sends
             # it to `loop.to` in the same write; at the bound, it stands.
             reset = (n.loop.to, *sorted(descendants(n.loop.to, self.dag)))
-            passes = self.driver.archived(subjects, n.loop.to, "loop")
+            passes = self.driver.archived(subjects, n.loop.to, Reason.LOOP)
             back = [s for s in subjects if passes.get(s, 0) < n.loop.max]
             stay = [s for s in subjects if passes.get(s, 0) >= n.loop.max]
             if back:
@@ -693,7 +689,7 @@ class NodeJournal:
                                                 lease=token, omit=(), reset=(),
                                                 reschedule=None)
             return touched
-        if n.choice and status != NODE_FAILED:
+        if n.choice and status != Status.FAILED:
             if branch is None:
                 raise ValueError(
                     f"node {name!r} is a choice: concluding it needs `branch=`, "
@@ -712,7 +708,7 @@ class NodeJournal:
         """This node did not produce. `failed` satisfies no child — unless a
         child's edge accepts it (`Node.on`). `branch` is accepted only to be
         refused: a failed choice names nothing."""
-        return self.conclude(name, subjects, token=token, status=NODE_FAILED,
+        return self.conclude(name, subjects, token=token, status=Status.FAILED,
                              branch=branch)
 
     def skip(self, name: str, *, candidates: Any) -> int:
@@ -738,7 +734,7 @@ class NodeJournal:
                 if self._mine(e) and name not in e.rows and joined(name, self.dag, e.rows)))
         # One write, as for a claim.
         written = self.driver.insert_if_unchanged(
-            name, list(chosen), status=NODE_SKIPPED, now=now, lease=None) if chosen else []
+            name, list(chosen), status=Status.SKIPPED, now=now, lease=None) if chosen else []
         self._pin(written)
         return len(written)
 
@@ -887,7 +883,7 @@ class NodeJournal:
                 continue
             progress = self.driver.progress(subject)
             drop = tuple(sorted(name for name in progress if full.get(name, name) is None))
-            held = [name for name in drop if progress[name] in (NODE_RUNNING, NODE_SCHEDULED)]
+            held = [name for name in drop if progress[name] in (Status.RUNNING, Status.SCHEDULED)]
             if held:
                 problems[subject] = f"{held} would be dropped while held or scheduled"
                 continue
@@ -956,8 +952,8 @@ class NodeJournal:
         since it last went back (a loop, a forget), however early."""
         if not subjects:
             return 0
-        return self.driver.note(_unique(subjects), event, status="received",
-                                reason="signal", now=self._clock(), ref=ref)
+        return self.driver.note(_unique(subjects), event, status=Outcome.RECEIVED,
+                                reason=Reason.SIGNAL, now=self._clock(), ref=ref)
 
     def arrive(self, name: str, subjects: list[Any], *, ref: str | None = None,
                urgent: bool = False) -> dict[str, int]:
@@ -966,17 +962,18 @@ class NodeJournal:
 
         An arrival for a subject already waiting is merged, as the lane says
         (`Lane.merge`, `Lane.position`); the merge is noted in the history.
-        With `while_running="skip"`, an arrival for a subject whose pass is
+        With `while_running=WhileRunning.SKIP`, an arrival for a subject whose pass is
         still running is dropped, and noted. `urgent` lets the arrival through
         at the next `settle` whatever its cooldown or delay — never over a
         running pass.
 
         Nothing runs here: `settle` lets due arrivals in. Return
-        `{"queued": n, "merged": n, "skipped": n}`."""
+        `{Outcome.QUEUED: n, Outcome.MERGED: n, Outcome.SKIPPED: n}` — keys that
+        are also the strings `"queued"`, `"merged"`, `"skipped"`."""
         n = node(name, self.dag)
         if n.lane is None:
             raise ValueError(f"node {name!r} is not a lane: nothing arrives in it")
-        out = {"queued": 0, "merged": 0, "skipped": 0}
+        out: dict[str, int] = {Outcome.QUEUED: 0, Outcome.MERGED: 0, Outcome.SKIPPED: 0}
         subjects = _unique(subjects)
         if not subjects:
             return out
@@ -986,12 +983,12 @@ class NodeJournal:
         groups: dict[Lane, list[Any]] = {}
         for subject in subjects:
             lane = lane_of[subject]
-            if lane.while_running == "skip" and any(
-                    self.driver.progress(subject).get(x) in (NODE_RUNNING, NODE_SCHEDULED)
+            if lane.while_running == WhileRunning.SKIP and any(
+                    self.driver.progress(subject).get(x) in (Status.RUNNING, Status.SCHEDULED)
                     for x in after):
-                self.driver.note([subject], name, status="skipped", reason="lane",
+                self.driver.note([subject], name, status=Outcome.SKIPPED, reason=Reason.LANE,
                                  now=now, ref=ref)
-                out["skipped"] += 1
+                out[Outcome.SKIPPED] += 1
                 continue
             groups.setdefault(lane, []).append(subject)
         for lane, group in groups.items():
@@ -1001,12 +998,12 @@ class NodeJournal:
                 continue
             outcome = self.driver.arrive(name, group, ref=ref, now=now, merge=lane.merge,
                                          position=lane.position, urgent=urgent)
-            merged = [s for s in group if outcome.get(s) == "merged"]
+            merged = [s for s in group if outcome.get(s) == Outcome.MERGED]
             if merged:
-                self.driver.note(merged, name, status="merged", reason="lane", now=now,
+                self.driver.note(merged, name, status=Outcome.MERGED, reason=Reason.LANE, now=now,
                                  ref=ref)
-            out["merged"] += len(merged)
-            out["queued"] += sum(1 for s in group if outcome.get(s) == "queued")
+            out[Outcome.MERGED] += len(merged)
+            out[Outcome.QUEUED] += sum(1 for s in group if outcome.get(s) == Outcome.QUEUED)
         self._pin(subjects)
         return out
 
@@ -1029,20 +1026,20 @@ class NodeJournal:
             dropped = [r for r in kept if r not in wanted]
             outcome = self.driver.arrive(
                 name, [subject], ref=wanted[-1] if wanted else None, now=now,
-                merge="set", position=lane.position, urgent=urgent,
+                merge=Merge.SET, position=lane.position, urgent=urgent,
                 refs=_encode_refs(wanted))
         if dropped:
             # A REF LET GO IS STILL SAID: past `max_size`, or refused by the
             # function, it leaves a trace rather than vanishing.
             for gone in dropped:
-                self.driver.note([subject], name, status="dropped", reason="lane",
+                self.driver.note([subject], name, status=Outcome.DROPPED, reason=Reason.LANE,
                                  now=now, ref=gone)
-        if outcome.get(subject) == "merged":
-            self.driver.note([subject], name, status="merged", reason="lane", now=now,
-                             ref=ref)
-            out["merged"] += 1
+        if outcome.get(subject) == Outcome.MERGED:
+            self.driver.note([subject], name, status=Outcome.MERGED, reason=Reason.LANE,
+                             now=now, ref=ref)
+            out[Outcome.MERGED] += 1
         else:
-            out["queued"] += 1
+            out[Outcome.QUEUED] += 1
 
     def _merger(self, lane: Lane) -> Callable[[tuple[str, ...], str | None], Any]:
         """The function this lane merges with: `all`'s, or the application's
@@ -1098,7 +1095,7 @@ class NodeJournal:
             if n.lane is not None:
                 entered = self._let_in(n, candidates, now)
                 if entered:
-                    out.setdefault(n.name, {})["entered"] = entered
+                    out.setdefault(n.name, {})[Outcome.ENTERED] = entered
                 continue
             if n.wait is None and n.grace is None and all(
                     v.grace is None for _, v in self._variants(n.name)):
@@ -1118,7 +1115,7 @@ class NodeJournal:
             heard: dict[Any, str] = {}
             went_back: dict[Any, str] = {}
             if n.wait is not None:
-                heard = self.driver.latest(subjects, n.wait, "signal")
+                heard = self.driver.latest(subjects, n.wait, Reason.SIGNAL)
                 went_back = self.driver.latest(subjects, n.name, None)
             for e in ready:
                 since = _joined_since(n, e)
@@ -1126,14 +1123,14 @@ class NodeJournal:
                 if n.wait is not None:
                     at = heard.get(e.subject)
                     if at is not None and at >= went_back.get(e.subject, ""):
-                        decided.setdefault(NODE_DONE, []).append((e.subject, e.revision))
+                        decided.setdefault(Status.DONE, []).append((e.subject, e.revision))
                         continue
                     if (seen_by.timeout is not None and since is not None
                             and shift(since, seconds(seen_by.timeout)) <= now):
-                        decided.setdefault(NODE_FAILED, []).append((e.subject, e.revision))
+                        decided.setdefault(Status.FAILED, []).append((e.subject, e.revision))
                 elif (since is not None and seen_by.grace is not None
                       and shift(since, seconds(seen_by.grace)) <= now):
-                    decided.setdefault(NODE_SKIPPED, []).append((e.subject, e.revision))
+                    decided.setdefault(Status.SKIPPED, []).append((e.subject, e.revision))
             for status, chosen in decided.items():
                 written = self.driver.insert_if_unchanged(n.name, chosen, status=status,
                                                           now=now, lease=None)
@@ -1168,7 +1165,7 @@ class NodeJournal:
             e = entries[subject]
             if not joined(n.name, self.dag, e.rows):
                 continue
-            if any(e.rows.get(x) in (NODE_RUNNING, NODE_SCHEDULED) for x in pass_nodes):
+            if any(e.rows.get(x) in (Status.RUNNING, Status.SCHEDULED) for x in pass_nodes):
                 continue
             lane = self.settings(n.name, e.policy).lane
             assert lane is not None
@@ -1205,12 +1202,12 @@ class NodeJournal:
         """How many times a declared loop sent this subject back through
         `name` — what `Loop.max` bounds."""
         node(name, self.dag)
-        return self.driver.archived([subject], name, "loop").get(subject, 0)
+        return self.driver.archived([subject], name, Reason.LOOP).get(subject, 0)
 
     def retries(self, subject: Any, name: str) -> int:
         """How many times a failure of `name` was retried for this subject."""
         node(name, self.dag)
-        return self.driver.archived([subject], name, "retry").get(subject, 0)
+        return self.driver.archived([subject], name, Reason.RETRY).get(subject, 0)
 
     def stages(self, subjects: list[Any], *,
                at: str) -> dict[str, list[list[Any]]]:
@@ -1225,10 +1222,10 @@ class NodeJournal:
         """How many subjects stand where, for this node."""
         n = node(name, self.dag)
         by_status = self.driver.status_counts(name)
-        out = {status: int(by_status.get(status, 0))
-               for status in (NODE_RUNNING, NODE_SCHEDULED, *NODE_CONCLUDED)}
+        out: dict[str, int] = {status: int(by_status.get(status, 0))
+                               for status in (Status.RUNNING, Status.SCHEDULED, *NODE_CONCLUDED)}
         if n.lane is not None:
-            out["waiting"] = int(self.driver.queued(name))
+            out[Outcome.WAITING] = int(self.driver.queued(name))
         return out
 
     def node_for_state(self, state: str) -> str | None:
@@ -1266,7 +1263,7 @@ def _joined_since(n: Node, entry: Entry) -> str | None:
 def _due_away(name: str, entry: Entry, now: str) -> dict[str, str]:
     """The rows the rule reads: a `scheduled` row of `name` due by `now`
     counts as absent — the node may be taken again."""
-    if entry.rows.get(name) == NODE_SCHEDULED and entry.due.get(name, now) <= now:
+    if entry.rows.get(name) == Status.SCHEDULED and entry.due.get(name, now) <= now:
         return {k: v for k, v in entry.rows.items() if k != name}
     return entry.rows
 

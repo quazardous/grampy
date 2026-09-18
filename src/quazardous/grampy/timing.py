@@ -25,11 +25,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from .names import Backoff
+
 _DURATION = re.compile(r"\s*(\d+(?:\.\d+)?)\s*([smhd]?)\s*")
 _UNIT = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
 
 #: THE BACKOFF SHAPES A RETRY MAY TAKE (the names Serverless Workflow uses).
-BACKOFFS = ("constant", "linear", "exponential")
+BACKOFFS = tuple(Backoff)
 
 
 def canonical(duration: Any) -> Any:
@@ -92,7 +94,7 @@ class Retry:
 
     limit: int
     delay: float | int | str = 0
-    backoff: str = "exponential"
+    backoff: str = Backoff.EXPONENTIAL
     max_delay: float | int | str | None = None
     jitter: float = 0.0
 
@@ -101,8 +103,7 @@ class Retry:
             object.__setattr__(self, name, canonical(getattr(self, name)))
         if self.limit < 1:
             raise ValueError(f"a retry needs limit >= 1, got {self.limit}")
-        if self.backoff not in BACKOFFS:
-            raise ValueError(f"unknown backoff {self.backoff!r} — expected one of {BACKOFFS}")
+        object.__setattr__(self, "backoff", Backoff.of(self.backoff, "backoff"))
         if not 0 <= self.jitter < 1:
             raise ValueError(f"jitter is a fraction in [0, 1), got {self.jitter}")
         seconds(self.delay)
@@ -112,9 +113,9 @@ class Retry:
     def wait(self, attempt: int, rng: random.Random | None = None) -> float:
         """Seconds to wait before retry number `attempt` (1 for the first)."""
         base = seconds(self.delay)
-        if self.backoff == "linear":
+        if self.backoff == Backoff.LINEAR:
             base *= attempt
-        elif self.backoff == "exponential":
+        elif self.backoff == Backoff.EXPONENTIAL:
             base *= 2 ** (attempt - 1)
         if self.max_delay is not None:
             base = min(base, seconds(self.max_delay))

@@ -38,6 +38,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+from .names import MERGE_FN, Merge, Name, Per, Position, Status, WhileRunning
 from .timing import Rate, Retry, canonical, seconds
 
 
@@ -57,24 +58,33 @@ class DagError(ValueError):
 #: that it will not be kept waiting. The distinction is for MEASURING, not
 #: for deciding. (A child of an omitted node never gets there: it is omitted
 #: with it — see `omitted_by`.)
-NODE_RUNNING = "running"
+NODE_RUNNING = Status.RUNNING
 #: WAITING TO BE TAKEN AGAIN — a retry's row: `started_at` is when it is
 #: due. Until then it holds the node like a running row; once due, a claim
 #: takes it as if the row were absent.
-NODE_SCHEDULED = "scheduled"
-NODE_DONE = "done"
-NODE_SKIPPED = "skipped"
-NODE_OMITTED = "omitted"
+NODE_SCHEDULED = Status.SCHEDULED
+NODE_DONE = Status.DONE
+NODE_SKIPPED = Status.SKIPPED
+NODE_OMITTED = Status.OMITTED
 #: THE END THAT SATISFIES NOBODY — BY DEFAULT.
 #:
 #: `failed` says "I did not produce what you expected". A child can NOT
 #: start on it — it would work on an input that does not exist — unless it
 #: says so on that edge: a compensation, an alert (`Node.on`).
-NODE_FAILED = "failed"
+NODE_FAILED = Status.FAILED
 #: WHAT SATISFIES A CHILD, unless the child's edge says otherwise.
 NODE_SATISFYING = (NODE_DONE, NODE_SKIPPED, NODE_OMITTED)
 #: WHAT IS NEVER TAKEN AGAIN. Going back means FORGETTING the row.
 NODE_CONCLUDED = (NODE_DONE, NODE_SKIPPED, NODE_FAILED, NODE_OMITTED)
+
+
+def _member(kind: type[Name], value: str) -> str:
+    """The member for a string that names one; anything else as given, for
+    `check_dag` to refuse with the node's name."""
+    try:
+        return kind(value)
+    except ValueError:
+        return value
 
 
 @dataclass(frozen=True)
@@ -91,21 +101,21 @@ class Loop:
 
     to: str
     max: int
-    on: tuple[str, ...] = ("failed",)
+    on: tuple[str, ...] = (Status.FAILED,)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "on", tuple(self.on))
+        object.__setattr__(self, "on", tuple(_member(Status, s) for s in self.on))
 
 
 #: HOW A LANE MERGES A NEW ARRIVAL INTO ONE ALREADY WAITING, and where the
 #: merged arrival stands in the lane. A merge may also be `fn:<name>`, a
 #: function the journal is given — see `Lane.merge`.
-LANE_MERGES = ("first", "last", "all")
+LANE_MERGES = (Merge.FIRST, Merge.LAST, Merge.ALL)
 #: WHAT NAMES A MERGE FUNCTION rather than one of the modes above.
-LANE_MERGE_FN = "fn:"
-LANE_POSITIONS = ("first", "last")
+LANE_MERGE_FN = MERGE_FN
+LANE_POSITIONS = tuple(Position)
 #: WHAT AN ARRIVAL DOES WHILE A PASS OF THE SUBJECT IS STILL RUNNING.
-LANE_WHILE_RUNNING = ("queue", "skip")
+LANE_WHILE_RUNNING = tuple(WhileRunning)
 
 
 @dataclass(frozen=True)
@@ -148,36 +158,40 @@ class Lane:
                                   Enterprise Integration Patterns)
     """
 
-    merge: str = "last"
-    position: str = "first"
+    merge: str = Merge.LAST
+    position: str = Position.FIRST
     cooldown: float | int | str | None = None
     delay: float | int | str | None = None
     max_wait: float | int | str | None = None
-    while_running: str = "queue"
+    while_running: str = WhileRunning.QUEUE
     max_size: int = 100
 
     def __post_init__(self) -> None:
         for name in ("cooldown", "delay", "max_wait"):
             object.__setattr__(self, name, canonical(getattr(self, name)))
+        object.__setattr__(self, "merge", _member(Merge, self.merge))
+        object.__setattr__(self, "position", _member(Position, self.position))
+        object.__setattr__(self, "while_running", _member(WhileRunning, self.while_running))
 
     @classmethod
     def throttle(cls, cooldown: float | int | str,
                  max_wait: float | int | str | None = None) -> Lane:
-        return cls(merge="last", position="first", cooldown=cooldown, max_wait=max_wait)
+        return cls(merge=Merge.LAST, position=Position.FIRST, cooldown=cooldown,
+                   max_wait=max_wait)
 
     @classmethod
     def debounce(cls, delay: float | int | str,
                  max_wait: float | int | str | None = None) -> Lane:
-        return cls(merge="last", position="last", delay=delay, max_wait=max_wait)
+        return cls(merge=Merge.LAST, position=Position.LAST, delay=delay, max_wait=max_wait)
 
     @classmethod
     def dedupe(cls, cooldown: float | int | str | None = None) -> Lane:
-        return cls(merge="first", position="first", cooldown=cooldown)
+        return cls(merge=Merge.FIRST, position=Position.FIRST, cooldown=cooldown)
 
     @classmethod
     def batch(cls, cooldown: float | int | str | None = None, *,
               max_size: int = 100, max_wait: float | int | str | None = None) -> Lane:
-        return cls(merge="all", position="first", cooldown=cooldown,
+        return cls(merge=Merge.ALL, position=Position.FIRST, cooldown=cooldown,
                    max_wait=max_wait, max_size=max_size)
 
     @property
@@ -190,7 +204,7 @@ class Lane:
     def keeps_every_ref(self) -> bool:
         """True when a merge has to read what waits before writing: the
         journal does those under the driver's guard."""
-        return self.merge == "all" or self.merger is not None
+        return self.merge == Merge.ALL or self.merger is not None
 
 
 @dataclass(frozen=True)
@@ -259,7 +273,7 @@ class Node:
     a parent not named accepts `NODE_SATISFYING`. A compensation that runs
     when a reservation failed and the payment went through:
 
-        Node("refund", parents=("pay", "reserve"), on={"reserve": ("failed",)})
+        Node("refund", parents=("pay", "reserve"), on={"reserve": (Status.FAILED,)})
 
     `need` is how many parents must be accepted — all of them when `None`.
     `need=2` over three engines starts as soon as two agree; the third,
@@ -288,8 +302,8 @@ class Node:
 
     `rate` (bands of `timing.Rate`) and `concurrency` protect what the node
     uses: a claim takes no more than the bands let through, nor more than
-    `concurrency` rows running at once. `per="policy"` gives each policy
-    its own budget; `per="all"` shares one.
+    `concurrency` rows running at once. `per=Per.POLICY` gives each
+    policy its own budget; `per=Per.ALL` shares one.
 
     `lane` makes the node a WAY IN for subjects that come back (`Lane`): no
     worker claims it; `journal.arrive` puts a subject in it, `journal.settle`
@@ -319,7 +333,7 @@ class Node:
     grace: float | int | str | None = None
     rate: tuple[Rate, ...] = ()
     concurrency: int | None = None
-    per: str = "all"
+    per: str = Per.ALL
     lane: Lane | None = None
     group: Group | None = None
 
@@ -329,7 +343,9 @@ class Node:
         object.__setattr__(self, "parents", tuple(self.parents))
         object.__setattr__(self, "rate", tuple(self.rate))
         object.__setattr__(self, "on", _Frozen(
-            (parent, tuple(statuses)) for parent, statuses in dict(self.on).items()))
+            (parent, tuple(_member(Status, x) for x in statuses))
+            for parent, statuses in dict(self.on).items()))
+        object.__setattr__(self, "per", _member(Per, self.per))
 
     @property
     def custom_join(self) -> bool:
@@ -536,7 +552,7 @@ def check_dag(dag: tuple[Node, ...]) -> None:
                     f"nor one of its ancestors")
             if n.loop.max < 1:
                 raise DagError(f"node {n.name!r}: a loop needs max >= 1, got {n.loop.max}")
-            if not n.loop.on or any(x not in (NODE_DONE, NODE_SKIPPED, NODE_FAILED)
+            if not n.loop.on or any(x not in (Status.DONE, Status.SKIPPED, Status.FAILED)
                                     for x in n.loop.on):
                 raise DagError(
                     f"node {n.name!r}: a loop fires on done, skipped or failed, "
@@ -563,8 +579,9 @@ def check_dag(dag: tuple[Node, ...]) -> None:
                     f"worked, so it cannot take {unfit}")
         elif n.timeout is not None:
             raise DagError(f"node {n.name!r}: a timeout needs a wait")
-        if n.per not in ("all", "policy"):
-            raise DagError(f"node {n.name!r}: per={n.per!r} — expected 'all' or 'policy'")
+        if n.per not in tuple(Per):
+            raise DagError(f"node {n.name!r}: per={n.per!r} — expected one of "
+                           f"{[p.value for p in Per]}")
         if n.concurrency is not None and n.concurrency < 1:
             raise DagError(f"node {n.name!r}: concurrency {n.concurrency} — at least 1")
         if any(not isinstance(band, Rate) for band in n.rate):

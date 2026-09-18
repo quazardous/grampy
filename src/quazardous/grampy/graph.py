@@ -35,6 +35,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .dag import DagError, Lane, Loop, Node, check_dag
+from .names import Name, Per, Status
 from .timing import Rate, Retry
 
 #: THE FORMAT THIS VERSION READS AND WRITES.
@@ -107,10 +108,10 @@ class Graph:
                     raise DagError(
                         f"policy {policy!r} changes the lane of {name!r}: a policy tunes "
                         f"a lane the node declares, it never adds or removes one")
-                if shared and base.per != "policy":
+                if shared and base.per != Per.POLICY:
                     raise DagError(
                         f"policy {policy!r} changes {shared} on {name!r}, whose budget is "
-                        f"shared by every policy — declare per='policy' first")
+                        f"shared by every policy — declare per=Per.POLICY first")
             check_dag(self.variant(policy))
 
     def variant(self, policy: str | None) -> tuple[Node, ...]:
@@ -146,7 +147,7 @@ class Graph:
                 spec["rate"] = [_rate_to_dict(band) for band in n.rate]
             if n.concurrency is not None:
                 spec["concurrency"] = n.concurrency
-            if n.per != "all":
+            if n.per != Per.ALL:
                 spec["per"] = n.per
             if n.lane is not None:
                 spec["lane"] = _lane_to_dict(n.lane)
@@ -164,7 +165,7 @@ class Graph:
                                  for key, value in settings.items()}
                           for name, settings in overrides.items()}
                 for policy, overrides in self.policies.items()}
-        return out
+        return _plain(out)
 
     def to_json(self, **kwargs: Any) -> str:
         kwargs.setdefault("indent", 2)
@@ -227,7 +228,7 @@ class Graph:
                 _string(raw_loop["to"], f"{path}.loop.to")
                 if isinstance(raw_loop["max"], bool) or not isinstance(raw_loop["max"], int):
                     raise GraphFormatError(f"{path}.loop.max: expected an integer")
-                loop_on = raw_loop.get("on", ["failed"])
+                loop_on = raw_loop.get("on", [Status.FAILED])
                 if not isinstance(loop_on, list):
                     raise GraphFormatError(f"{path}.loop.on: expected a list of statuses")
                 for i, status in enumerate(loop_on):
@@ -240,7 +241,7 @@ class Graph:
                 _string(spec["wait"], f"{path}.wait")
             rate = _rates_from(spec["rate"], f"{path}.rate") if "rate" in spec else ()
             concurrency = _count(spec.get("concurrency"), f"{path}.concurrency")
-            per = spec.get("per", "all")
+            per = spec.get("per", Per.ALL)
             _string(per, f"{path}.per")
             lane = _lane_from(spec["lane"], f"{path}.lane") if "lane" in spec else None
             nodes.append(Node(name, parents=tuple(parents), loop=loop, retry=retry, lane=lane,
@@ -398,3 +399,15 @@ def _mapping(value: Any, path: str, *, required: tuple[str, ...],
 def _string(value: Any, path: str) -> None:
     if not isinstance(value, str) or not value:
         raise GraphFormatError(f"{path}: expected a non-empty string")
+
+
+def _plain(value: Any) -> Any:
+    """The document as plain data: grampy's words written as the strings
+    they are, so that the dict reads, compares and prints like the JSON."""
+    if isinstance(value, Name):
+        return str(value)
+    if isinstance(value, dict):
+        return {k: _plain(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_plain(v) for v in value]
+    return value

@@ -4,6 +4,7 @@ What grampy guarantees, mechanism by mechanism. The short version is in the
 [README](../README.md); the names other tools give these notions are in
 [concepts](concepts.md).
 
+- [Your words and grampy's](#your-words-and-grampys)
 - [Subjects and the claim rule](#subjects-and-the-claim-rule)
 - [Joins, choices and failure edges](#joins-choices-and-failure-edges)
 - [Going back: history, loops, replay](#going-back-history-loops-replay)
@@ -14,6 +15,35 @@ What grampy guarantees, mechanism by mechanism. The short version is in the
 - [Rate limits and concurrency](#rate-limits-and-concurrency)
 - [Versions and migration](#versions-and-migration)
 - [What holds it together](#what-holds-it-together)
+
+## Your words and grampy's
+
+Node names, subjects and policies are **yours**: any string you like. Every
+value grampy gives a meaning to is **grampy's**, and has a name in
+`quazardous.grampy`:
+
+| | members |
+|---|---|
+| `Status` | a node's row: `RUNNING`, `SCHEDULED`, `DONE`, `SKIPPED`, `OMITTED`, `FAILED` |
+| `Reason` | why a row went to the history: `FORGET`, `RELEASE`, `RETRY`, `LOOP`, `MIGRATE`, `ARRIVAL`, `LANE`, `SIGNAL` |
+| `Outcome` | what a history note or a count says: `RECEIVED`, `WAITING`, `QUEUED`, `MERGED`, `SKIPPED`, `DROPPED`, `ENTERED` |
+| `Merge`, `Position`, `WhileRunning` | how a lane merges, where, and what it does meanwhile; `Merge.fn("name")` names a merge function |
+| `Backoff` | how a retry's wait grows |
+| `Per` | whose budget a rate or a concurrency counts |
+
+```python
+from quazardous.grampy import Reason, Status
+
+journal.progress("s1") == {"fetch": Status.DONE}
+retries = [row for row in journal.history("s1") if row["reason"] == Reason.RETRY]
+```
+
+**Each member is also its string**: `Status.DONE == "done"`, it hashes like
+`"done"`, and it is stored and written to JSON as `"done"`. Nothing stored
+depends on the member, a string still works wherever a member does, and what
+a storage hands back — a plain string — compares equal. `Reason.RETRY` and
+`Reason.LOOP` matter most: they are the rows a retry limit and a loop bound
+count.
 
 ## Subjects and the claim rule
 
@@ -43,7 +73,7 @@ its subjects; nothing in grampy reads them to decide. They are what
 ## Joins, choices and failure edges
 
 **Joins are data.** `on` says, per parent, which statuses a node accepts —
-`Node("refund", parents=("pay", "reserve"), on={"reserve": ("failed",)})` runs
+`Node("refund", parents=("pay", "reserve"), on={"reserve": (Status.FAILED,)})` runs
 on a failure — and `need=k` starts a node once `k` parents are accepted: the
 others, not started yet, are closed by it.
 
@@ -65,7 +95,7 @@ and a failure edge can escalate.
 ## Time: retries, leases, waits, grace
 
 **Retries are declared.** `Node("call", retry=Retry(limit=3, delay="10s",
-backoff="exponential", max_delay="5m", jitter=0.1))`: a failure is archived and
+backoff=Backoff.EXPONENTIAL, max_delay="5m", jitter=0.1))`: a failure is archived and
 the node `scheduled` again; the row becomes claimable when due. Past the limit
 the failure stands, for a loop or a failure edge.
 
@@ -125,7 +155,7 @@ same write.
 A ref arriving while one waits is merged; `cooldown` holds a subject back
 that long after its last pass ended, `delay` waits for quiet, `max_wait` caps
 both, an `urgent=True` arrival skips them, and a pass still running is never
-cut short (`while_running="queue"|"skip"`). A `rate` on the lane lets arrivals
+cut short (`while_running=WhileRunning.QUEUE` or `.SKIP`). A `rate` on the lane lets arrivals
 out in the order they came.
 
 ### What a merge keeps
@@ -148,9 +178,9 @@ why `merge` is yours to choose.
 
 | `merge` | |
 |---|---|
-| `"last"` | the latest ref wins (`Lane.throttle`, `Lane.debounce`) |
-| `"first"` | the one waiting stays, later ones are dropped (`Lane.dedupe`) |
-| `"all"` | every ref, oldest first, at most `max_size` (`Lane.batch`) |
+| `Merge.LAST` | the latest ref wins (`Lane.throttle`, `Lane.debounce`) |
+| `Merge.FIRST` | the one waiting stays, later ones are dropped (`Lane.dedupe`) |
+| `Merge.ALL` | every ref, oldest first, at most `max_size` (`Lane.batch`) |
 | `"fn:<name>"` | a function you give the journal decides |
 
 `journal.refs(subject, "arrive")` reads what waits — one ref, or the whole
@@ -166,7 +196,7 @@ def keep_the_ends(kept, arriving):
     whole = (*kept, arriving)
     return whole[:1] + whole[-1:] if len(whole) > 2 else whole
 
-Node("arrive", lane=Lane(merge="fn:ends"))
+Node("arrive", lane=Lane(merge=Merge.fn("ends")))
 NodeJournal(driver, GRAPH, mergers={"ends": keep_the_ends})
 ```
 
@@ -215,16 +245,16 @@ not slowed:
 GRAPH = Graph(Document("offers"), (
     Node("fetch"),
     Node("call", parents=("fetch",),
-         rate=(Rate(1000, "1m"),), concurrency=8, per="policy"),   # ← per policy
+         rate=(Rate(1000, "1m"),), concurrency=8, per=Per.POLICY),   # ← per policy
     Node("store", parents=("call",)),
 ), policies={
     "slow-partner": {"call": {"rate": (Rate(100, "1m"),), "concurrency": 2}},
 })
 ```
 
-`per="policy"` gives **each policy its own budget**, and the claim spends it.
+`per=Per.POLICY` gives **each policy its own budget**, and the claim spends it.
 A node whose budget is shared by everyone refuses to have it changed per
-policy — declare `per="policy"` first, or the graph will not build.
+policy — declare `per=Per.POLICY` first, or the graph will not build.
 
 Why nothing else does the job:
 
@@ -287,7 +317,7 @@ alive — worth it only when they really are two workflows.
 `Node("summarise", parents=("fetch",), rate=(Rate(100, "1m"), Rate(1000, "1h",
 burst=50)), concurrency=4)` — a claim takes no more than every band lets
 through (GCRA, one number stored per band) nor more than 4 rows running at
-once. `per="policy"` gives each policy its own budget. The journal decides;
+once. `per=Per.POLICY` gives each policy its own budget. The journal decides;
 the driver only guards the budget's keys while it does, so two claimers never
 overspend it.
 

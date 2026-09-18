@@ -20,6 +20,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- grampy's own words have names: `Status`, `Reason`, `Outcome`, `Merge`,
+  `Position`, `WhileRunning`, `Backoff` and `Per`, importable from
+  `quazardous.grampy`. A node name or a policy is yours, any string; a status
+  or a history reason is grampy's, and now reads as such
+  (`Status.DONE`, `Reason.RETRY`). Each member is also its string, so nothing
+  stored changes, strings keep working everywhere, and what a storage returns
+  still compares equal. `Merge.fn("name")` names a merge function without
+  typing its prefix.
+
 ## [0.3.1] - 2026-09-18
 
 ### Fixed

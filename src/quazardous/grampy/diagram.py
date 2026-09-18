@@ -38,10 +38,12 @@ from collections.abc import Mapping
 from typing import Any
 
 from .dag import NODE_SATISFYING, Node
+from .names import Merge, Outcome, Per, Status, WhileRunning
 
 #: How a count is shown, in this order.
-_COUNT_MARKS = (("waiting", "⧖"), ("running", "▶"), ("scheduled", "⏳"), ("done", "✓"),
-                ("skipped", "↷"), ("failed", "✗"), ("omitted", "∅"))
+_COUNT_MARKS = ((Outcome.WAITING, "⧖"), (Status.RUNNING, "▶"), (Status.SCHEDULED, "⏳"),
+                (Status.DONE, "✓"), (Status.SKIPPED, "↷"), (Status.FAILED, "✗"),
+                (Status.OMITTED, "∅"))
 
 _UNSAFE_ID = re.compile(r"[^A-Za-z0-9_]")
 
@@ -68,7 +70,7 @@ def to_mermaid(graph: Any, counts: Mapping[str, Mapping[str, int]] | None = None
             accepted = tuple(n.on.get(parent, NODE_SATISFYING))
             if parent in n.on:
                 lines.append(f'    {ids[parent]} -.->|"{" / ".join(accepted)}"| {ids[n.name]}')
-                if "failed" in accepted:
+                if Status.FAILED in accepted:
                     red.append(link)
             else:
                 lines.append(f"    {ids[parent]} --> {ids[n.name]}")
@@ -132,7 +134,7 @@ def to_state_diagram(graph: Any, *, direction: str = "LR") -> str:
             split = f"{ids[n.name]}_choice"
             lines += [f"    state {split} <<choice>>", f"    {ids[n.name]} --> {split}"]
             for i, (label, group) in enumerate(outcomes.items()):
-                shown = label or ("" if n.choice else "done")
+                shown = label or ("" if n.choice else Status.DONE)
                 arrow = f" : {shown}" if shown else ""
                 if len(group) == 1 or n.choice:
                     lines += [f"    {split} --> {target[c.name]}{arrow}" for c in group]
@@ -185,7 +187,7 @@ def _state_notes(n: Node, varying: set[str]) -> list[str]:
         notes.append("rate " + " + ".join(f"{b.limit}/{b.period}" for b in n.rate))
     if n.concurrency is not None:
         notes.append(f"≤{n.concurrency} at once")
-    if (n.rate or n.concurrency is not None) and n.per == "policy":
+    if (n.rate or n.concurrency is not None) and n.per == Per.POLICY:
         notes.append("per policy")
     if n.once:
         notes.append("once")
@@ -222,7 +224,7 @@ def to_dot(graph: Any, counts: Mapping[str, Mapping[str, int]] | None = None,
             edge = f'    "{_escape_dot(parent)}" -> "{_escape_dot(n.name)}"'
             if parent in n.on:
                 accepted = " / ".join(n.on[parent])
-                colour = ', color="#d33", fontcolor="#d33"' if "failed" in n.on[parent] else ""
+                colour = ', color="#d33", fontcolor="#d33"' if Status.FAILED in n.on[parent] else ""
                 edge += f' [style=dashed, label="{_escape_dot(accepted)}"{colour}]'
             lines.append(edge + ";")
         if n.loop is not None:
@@ -263,7 +265,7 @@ def _label(n: Node, varying: set[str], counts: Mapping[str, Mapping[str, int]] |
         badges.append("rate " + " + ".join(f"{b.limit}/{b.period}" for b in n.rate))
     if n.concurrency is not None:
         badges.append(f"≤{n.concurrency} at once")
-    if (n.rate or n.concurrency is not None) and n.per == "policy":
+    if (n.rate or n.concurrency is not None) and n.per == Per.POLICY:
         badges.append("per policy")
     if n.lease is not None:
         badges.append(f"⏱ {n.lease}")
@@ -296,7 +298,7 @@ def _describe_lane(n: Node) -> str:
     assert lane is not None
     if lane.merger is not None:
         head = f"lane: merged by {lane.merger}"
-    elif lane.merge == "all":
+    elif lane.merge == Merge.ALL:
         head = f"lane: every version, up to {lane.max_size}"
     else:
         head = f"lane: {lane.merge} version"
@@ -304,7 +306,7 @@ def _describe_lane(n: Node) -> str:
     for label in ("cooldown", "delay", "max_wait"):
         if getattr(lane, label) is not None:
             words.append(f"{label.replace('_', ' ')} {getattr(lane, label)}")
-    if lane.while_running == "skip":
+    if lane.while_running == WhileRunning.SKIP:
         words.append("skips while running")
     return " · ".join(words)
 

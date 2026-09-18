@@ -40,6 +40,7 @@ from .dag import (
 )
 from .graph import Document, Graph, GraphFormatError
 from .journal import Arrival, JournalDriver, Lease, MigrationError, NodeJournal, utc_now
+from .names import Backoff, Merge, Name, Outcome, Per, Position, Reason, Status, WhileRunning
 from .states import (
     allowed_transitions,
     replay_targets,
@@ -52,6 +53,8 @@ from .timing import Rate, Retry
 __version__ = "0.3.1"
 
 __all__ = [
+    "Backoff", "Merge", "Name", "Outcome", "Per", "Position", "Reason", "Status",
+    "WhileRunning",
     "NODE_CONCLUDED", "NODE_DONE", "NODE_FAILED", "NODE_OMITTED", "NODE_RUNNING",
     "NODE_SATISFYING", "NODE_SCHEDULED", "NODE_SKIPPED", "Rate", "Retry", "DagError",
     "Document", "Graph", "GraphFormatError",

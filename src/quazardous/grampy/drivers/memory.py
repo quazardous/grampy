@@ -22,14 +22,10 @@ from datetime import datetime
 from typing import Any
 
 from ..dag import (
-    NODE_DONE,
-    NODE_OMITTED,
-    NODE_RUNNING,
     NODE_SATISFYING,
-    NODE_SCHEDULED,
-    NODE_SKIPPED,
 )
 from ..journal import Arrival, Entry, utc_now
+from ..names import Merge, Outcome, Position, Reason, Status
 
 
 @dataclass
@@ -98,7 +94,7 @@ class MemoryDriver:
                         subject, self.revisions.get(subject, 0),
                         {n: row.status for n, row in held.items()},
                         {n: row.started_at for n, row in held.items()
-                         if row.status == NODE_SCHEDULED},
+                         if row.status == Status.SCHEDULED},
                         {n: row.finished_at for n, row in held.items()
                          if row.finished_at is not None},
                         self.policy_of.get(subject), self.version_of.get(subject), key))
@@ -111,12 +107,12 @@ class MemoryDriver:
             for subject, revision in entries:
                 current = self.rows.get((subject, name))
                 if current is not None and not (
-                        current.status == NODE_SCHEDULED and current.started_at <= now):
+                        current.status == Status.SCHEDULED and current.started_at <= now):
                     continue
                 if self.revisions.get(subject, 0) != revision:
                     continue
                 self.rows[(subject, name)] = Row(
-                    status, now, None if status == NODE_RUNNING else now, lease)
+                    status, now, None if status == Status.RUNNING else now, lease)
                 taken.append(subject)
         return taken
 
@@ -127,20 +123,20 @@ class MemoryDriver:
         with self._lock:
             for subject in subjects:
                 row = self.rows.get((subject, name))
-                if row is None or row.status != NODE_RUNNING:
+                if row is None or row.status != Status.RUNNING:
                     continue
                 if lease is not None and row.lease != lease:
                     continue
                 row.status, row.finished_at = status, now
                 for other in omit:
-                    self.rows.setdefault((subject, other), Row(NODE_OMITTED, now, now))
+                    self.rows.setdefault((subject, other), Row(Status.OMITTED, now, now))
                 if reset:
                     self.revisions[subject] = self.revisions.get(subject, 0) + 1
                     for other in reset:
-                        self._take_away(subject, other, now=now, reason="loop")
+                        self._take_away(subject, other, now=now, reason=Reason.LOOP)
                 if reschedule is not None:
-                    self._take_away(subject, name, now=now, reason="retry")
-                    self.rows[(subject, name)] = Row(NODE_SCHEDULED, reschedule)
+                    self._take_away(subject, name, now=now, reason=Reason.RETRY)
+                    self.rows[(subject, name)] = Row(Status.SCHEDULED, reschedule)
                 count += 1
         return count
 
@@ -150,7 +146,7 @@ class MemoryDriver:
             for subject in subjects:
                 if (subject, name) in self.rows:
                     continue
-                self.rows[(subject, name)] = Row(NODE_DONE, now, now)
+                self.rows[(subject, name)] = Row(Status.DONE, now, now)
                 count += 1
         return count
 
@@ -159,21 +155,21 @@ class MemoryDriver:
             for subject in subjects:
                 self.revisions[subject] = self.revisions.get(subject, 0) + 1
             return sum(1 for subject in subjects
-                       if self._take_away(subject, name, now=now, reason="forget"))
+                       if self._take_away(subject, name, now=now, reason=Reason.FORGET))
 
     def release(self, name: str, *, older_than: str, now: str,
                 only: tuple[str, ...] | None = None, exclude: tuple[str, ...] = (),
                 version: str | None = None) -> int:
         with self._lock:
             stale = [key for key, row in self.rows.items()
-                     if key[1] == name and row.status == NODE_RUNNING
+                     if key[1] == name and row.status == Status.RUNNING
                      and row.started_at < older_than
                      and (only is None or self.policy_of.get(key[0]) in only)
                      and self.policy_of.get(key[0]) not in exclude
                      and (version is None
                           or self.version_of.get(key[0]) in (None, version))]
             for subject, n in stale:
-                self._take_away(subject, n, now=now, reason="release")
+                self._take_away(subject, n, now=now, reason=Reason.RELEASE)
             return len(stale)
 
     def enroll(self, subjects: list[Any], policy: str | None) -> int:
@@ -206,7 +202,7 @@ class MemoryDriver:
     def running(self, name: str, policies: tuple[str | None, ...] | None) -> int:
         with self._lock:
             return sum(1 for (s, n), row in self.rows.items()
-                       if n == name and row.status == NODE_RUNNING
+                       if n == name and row.status == Status.RUNNING
                        and (policies is None or self.policy_of.get(s) in policies))
 
     def pin(self, subjects: list[Any], version: str) -> int:
@@ -224,7 +220,7 @@ class MemoryDriver:
                 version: str, now: str) -> None:
         with self._lock:
             for name in drop:
-                self._take_away(subject, name, now=now, reason="migrate")
+                self._take_away(subject, name, now=now, reason=Reason.MIGRATE)
                 self.waiting.pop((subject, name), None)
             moved = {new: self.rows.pop((subject, old)) for old, new in rename.items()
                      if (subject, old) in self.rows}
@@ -276,15 +272,15 @@ class MemoryDriver:
                 current = self.waiting.get((subject, name))
                 if current is None:
                     self.waiting[(subject, name)] = Arrival(ref, now, now, urgent, refs)
-                    out[subject] = "queued"
+                    out[subject] = Outcome.QUEUED
                     continue
                 # `set`: the journal worked out ref and refs under the guard.
                 self.waiting[(subject, name)] = Arrival(
-                    ref if merge in ("last", "set") else current.ref,
-                    now if position == "last" else current.place,
+                    ref if merge in (Merge.LAST, Merge.SET) else current.ref,
+                    now if position == Position.LAST else current.place,
                     current.arrived_at, current.urgent or urgent,
-                    refs if merge == "set" else current.refs)
-                out[subject] = "merged"
+                    refs if merge == Merge.SET else current.refs)
+                out[subject] = Outcome.MERGED
         return out
 
     def arrivals(self, subjects: list[Any], name: str) -> dict[Any, Arrival]:
@@ -299,18 +295,18 @@ class MemoryDriver:
                 arrival = self.waiting.get((subject, name))
                 if arrival is None or self.revisions.get(subject, 0) != revision:
                     continue
-                if any(self.rows[(subject, x)].status in (NODE_RUNNING, NODE_SCHEDULED)
+                if any(self.rows[(subject, x)].status in (Status.RUNNING, Status.SCHEDULED)
                        for x in archive if (subject, x) in self.rows):
                     continue
                 self.revisions[subject] = revision + 1
                 for x in archive:
-                    self._take_away(subject, x, now=now, reason="arrival")
+                    self._take_away(subject, x, now=now, reason=Reason.ARRIVAL)
                 del self.waiting[(subject, name)]
                 self.archive.append((subject, {
-                    "node": name, "status": "entered", "started_at": arrival.arrived_at,
+                    "node": name, "status": Outcome.ENTERED, "started_at": arrival.arrived_at,
                     "finished_at": now, "lease": arrival.ref, "archived_at": now,
-                    "reason": "lane"}))
-                self.rows[(subject, name)] = Row(NODE_DONE, arrival.arrived_at, now)
+                    "reason": Reason.LANE}))
+                self.rows[(subject, name)] = Row(Status.DONE, arrival.arrived_at, now)
                 entered.append(subject)
         return entered
 
@@ -343,7 +339,7 @@ class MemoryDriver:
             lines = [(row.finished_at or at, n, str(s), row)
                      for (s, n), row in self.rows.items()
                      if str(s) in wanted
-                     and row.status not in (NODE_SKIPPED, NODE_OMITTED, NODE_SCHEDULED)]
+                     and row.status not in (Status.SKIPPED, Status.OMITTED, Status.SCHEDULED)]
         out: dict[str, list[list[Any]]] = {}
         for ended, n, subject, row in sorted(lines, key=lambda x: (x[0], x[1])):
             seconds = round(_epoch(ended) - _epoch(row.started_at), 1)

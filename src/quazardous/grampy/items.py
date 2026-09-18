@@ -52,8 +52,9 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from typing import Any
 
-from .dag import NODE_DONE, NODE_FAILED, NODE_SKIPPED, node
+from .dag import node
 from .journal import Lease, NodeJournal
+from .names import Status
 
 
 def _are_items(candidates: Any) -> bool:
@@ -186,7 +187,7 @@ class Items:
         """These items arrive in a lane, each bringing its own `ref_of`.
 
         One call per distinct ref, and the counts are ADDED — the journal
-        reports `{"queued": n, "merged": n, "skipped": n}` per call, and what
+        reports `{Outcome.QUEUED: n, Outcome.MERGED: n, Outcome.SKIPPED: n}` per call, and what
         comes back here is the whole batch.
         """
         by_ref: dict[str | None, list[Any]] = {}
@@ -242,12 +243,12 @@ class Items:
             (keep if self.adapter.applies(item, name) else give_up).append(item)
         if give_up:
             self.journal.conclude(name, [self.adapter.id_of(i) for i in give_up],
-                                  token=lease.token, status=NODE_SKIPPED)
+                                  token=lease.token, status=Status.SKIPPED)
         missing = [s for s in lease if s not in loaded]
         return ItemLease(keep, lease.token, missing)
 
     def conclude(self, name: str, items: Sequence[Any], *,
-                 token: str | None = None, status: str = NODE_DONE) -> int:
+                 token: str | None = None, status: str = Status.DONE) -> int:
         """Finish this node on these items, asking `branch` for a choice.
 
         `items` is usually the `ItemLease` a claim gave back, and the token
@@ -259,14 +260,14 @@ class Items:
     def fail(self, name: str, items: Sequence[Any], *,
              token: str | None = None) -> int:
         """This node did not produce, on these items."""
-        return self._finish(name, items, token=token, status=NODE_FAILED)
+        return self._finish(name, items, token=token, status=Status.FAILED)
 
     def _finish(self, name: str, items: Sequence[Any], *,
                 token: str | None, status: str) -> int:
         token = token if token is not None else getattr(items, "token", None)
         # ONLY A CHOICE IS ASKED FOR A BRANCH. Anywhere else the core refuses
         # one, and rightly: there would be nothing to omit.
-        asking = node(name, self.journal.dag).choice and status != NODE_FAILED
+        asking = node(name, self.journal.dag).choice and status != Status.FAILED
         by_branch: dict[str | None, list[Any]] = {}
         for item in items:
             branch = self.adapter.branch(item, name) if asking else None
