@@ -34,6 +34,11 @@ class Name(str, Enum):
     def __format__(self, spec: str) -> str:
         return format(str(self.value), spec)
 
+    def __repr__(self) -> str:
+        """`Status.DONE`, as it is written — a dict of progress reads
+        `{'pay': Status.DONE}`, not `<Status.DONE: 'done'>`."""
+        return f"{type(self).__name__}.{self.name}"
+
     @classmethod
     def of(cls: type[N], value: str, what: str) -> N:
         """The member for `value`, or a `ValueError` naming what was expected."""

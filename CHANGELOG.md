@@ -52,6 +52,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still compares equal. `Merge.fn("name")` names a merge function without
   typing its prefix.
 
+### Changed
+
+- The README opens with an example that runs as pasted — two plain objects
+  through a two-step graph — and its larger example defines the loader it
+  calls. Both are run by the test suite as written. It also answers "why not
+  a status column?", shows where each claim is proven, gives a use for lanes,
+  and compares grampy with six other tools, each cell linked to its source.
+- grampy's words print as they are written: a progress reads
+  `{'pay': Status.DONE}`.
+
 ### Fixed
 
 - The PostgreSQL driver asked of an `execute` result more than its
