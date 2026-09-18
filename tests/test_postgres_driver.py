@@ -27,7 +27,10 @@ from quazardous.grampy.drivers.postgres_ready import PostgresReadyDriver  # noqa
 from quazardous.grampy.drivers.postgres_subject import PostgresSubjectDriver  # noqa: E402
 from quazardous.grampy.testing import JournalContract  # noqa: E402
 
-_TABLES = itertools.count()
+#: TABLE NAMES UNIQUE PER PROCESS: two runs against one database would
+#: otherwise create the same table, and the second waits on the first's open
+#: transaction until it ends.
+_TABLES = (f"{os.getpid()}_{n}" for n in itertools.count())
 
 
 def _type(subject_type):
