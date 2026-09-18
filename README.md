@@ -183,6 +183,8 @@ How each notion maps, tool by tool: [the same notions in other tools](https://gi
 - [Drivers and candidates](https://github.com/quazardous/grampy/blob/main/docs/drivers.md) — tables, queries, your own data.
 - [Writing a driver](https://github.com/quazardous/grampy/blob/main/docs/writing-a-driver.md) — the capabilities, what each method
   may return, certifying with the contract.
+- [Operating in production](https://github.com/quazardous/grampy/blob/main/docs/operating.md) — the indexes worth adding,
+  measured; what grows; the janitor.
 - [grampy's tables next to yours](https://github.com/quazardous/grampy/blob/main/docs/your-data.md) — what to read, what never to write.
 - [Drawings](https://github.com/quazardous/grampy/blob/main/docs/drawings.md) — diagrams from a graph.
 - [The same notions in other tools](https://github.com/quazardous/grampy/blob/main/docs/concepts.md) — Graphile Worker,

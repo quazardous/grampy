@@ -196,6 +196,9 @@ hot path — but it is the line to read if yours runs often.
 Run the bench on your own shape of data: its table sizes and progress are
 at the top of the file.
 
+Which indexes to add once the tables hold real volume, measured the same way:
+[operating in production](operating.md#indexes).
+
 ## SQLite
 
 ```python

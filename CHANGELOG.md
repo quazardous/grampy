@@ -42,6 +42,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A guide to writing a driver: the capabilities, which methods may return a
   superset and which must be exact, transactions, grouping keys, the optional
   fast paths, and certification.
+- A guide to operating in production: the indexes worth adding on each
+  PostgreSQL layout, each backed by a measured plan before and after
+  (`benchmarks/indexes.py`), what grows and how the janitor keeps it bounded.
 - `skip(..., limit=)` and `settle(..., limit=)`, on the journal and on `Items`, bound a
   janitor's pass: at most `limit` subjects written — per node for `settle` —
   the first in the order they would be taken. Call again while a pass writes
