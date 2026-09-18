@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `journal.progress_many(subjects)` and `Items.progress_many(objects)` read
+  many subjects' progress at once — one query on the PostgreSQL layouts —
+  instead of one `progress` call per subject.
 - On the PostgreSQL drivers, `arrive`, a lane keeping every version, and
   `migrate` send the same few statements whatever the number of subjects,
   instead of a few per subject: a migration of 30 subjects went from 156

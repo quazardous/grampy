@@ -288,6 +288,13 @@ class Items:
         """`{node: status}` for one item."""
         return self.journal.progress(self.adapter.id_of(item))
 
+    def progress_many(self, items: Iterable[Any]) -> list[tuple[Any, dict[str, str]]]:
+        """`(item, {node: status})` for each item, in their order — one read
+        for all of them when the driver offers it (`NodeJournal.progress_many`)."""
+        items = list(items)
+        read = self.journal.progress_many([self.adapter.id_of(i) for i in items])
+        return [(i, read.get(self.adapter.id_of(i), {})) for i in items]
+
     def history(self, item: Any) -> list[dict[str, Any]]:
         """Every row forget, release or a loop took away from this item."""
         return self.journal.history(self.adapter.id_of(item))

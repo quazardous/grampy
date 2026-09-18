@@ -330,3 +330,16 @@ def test_an_adapter_may_be_one_tolerant_method():
     assert [d.id for d in items.claim("b", 10, candidates=[Doc(1), Doc(2)])] == [1, 2]
     mixed = items.claim("a", 10, candidates=[3, Doc(4)])
     assert [getattr(x, "id", x) for x in mixed] == [3, 4]
+
+
+def test_progress_of_many_items_gives_each_item_back_with_it(world):
+    """The very objects, in their order, each with its progress — one read
+    for the batch, however many there are."""
+    bricks, adapter, items = world
+    lease = items.claim("scan", 1, candidates=bricks)
+    items.conclude("scan", lease)
+    read = items.progress_many(bricks)
+    assert [b for b, _ in read] == bricks and all(
+        b is bricks[i] for i, (b, _) in enumerate(read)), "the very objects given"
+    assert [p for _, p in read] == [items.progress(b) for b in bricks]
+    assert read[0][1] and not read[1][1]

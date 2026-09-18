@@ -834,6 +834,22 @@ class JournalContract:
         assert self._claim(harness, offers, "publish", ["s1"]) == ["s1"], (
             "and `offers` still owns it")
 
+    def test_progress_of_many_subjects_reads_as_progress_of_each(self, harness, clock):
+        """ONE READ FOR A BATCH, the same answer as one per subject: a subject
+        without rows reads empty, and so does one pinned to another graph."""
+        v1 = harness.journal(self.V1, clock)
+        invoices = harness.journal_on(v1, self.INVOICES, clock)
+        self._run(harness, v1, "fetch", ["s1", "s2"])
+        self._run(harness, v1, "crop", ["s2"])
+        self._run(harness, invoices, "fetch", ["theirs"])
+        subjects = ["s1", "s2", "never", "theirs", "s1"]
+        many = v1.progress_many(subjects)
+        assert list(many) == ["s1", "s2", "never", "theirs"], "each once, in order"
+        assert many == {s: v1.progress(s) for s in many}
+        assert many["theirs"] == {} and many["never"] == {}
+        assert many["s2"] == {"fetch": Status.DONE, "crop": Status.DONE}
+        assert v1.progress_many([]) == {}
+
     def test_a_compliant_subject_migrates_renamed_and_repinned(self, harness, clock):
         v1 = harness.journal(self.V1, clock)
         v2 = harness.journal_on(v1, self.V2, clock)

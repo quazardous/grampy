@@ -178,12 +178,23 @@ for offer in offers:                      # N queries, one per offer
     progress = journal.progress(offer.id)
 ```
 
-There is no plural read for this today — `journal.progress` and
-`journal.arrival` take one subject. `journal.stages(subjects, at=…)` does take
-a batch, and so does the driver's own `arrivals(subjects, node)`.
+Read them together instead — one query for the page on a PostgreSQL layout,
+whatever its size:
 
-Until the plural reads exist, a dashboard over many subjects is better served
-by one of the joins above, run against the tables directly. That is a legitimate
-use of this page, not a workaround.
+```python
+progress = journal.progress_many(offer.id for offer in offers)
+for offer in offers:
+    ...progress[offer.id]...              # {node: status}, empty when none
+
+for offer, progress in items.progress_many(offers):   # with Items: your objects back
+    ...
+```
+
+`journal.stages(subjects, at=…)` takes a batch too, and so does the driver's
+own `arrivals(subjects, node)`. `journal.arrival` still takes one subject.
+
+For anything these reads do not answer — counts across subjects, a join with
+your own columns — one of the joins above, run against the tables directly,
+is the legitimate way, not a workaround.
 
 Back to the [documentation index](README.md).

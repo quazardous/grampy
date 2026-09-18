@@ -100,6 +100,7 @@ decides where the transaction ends, because it knows what it put in it.
 from __future__ import annotations
 
 import secrets
+from collections.abc import Iterable
 from datetime import datetime
 from typing import Any, NamedTuple
 
@@ -526,6 +527,21 @@ class NodeJournal(_Lanes, _Migration):
             if pinned is not None and pinned != self.version:
                 return {}
         return self.driver.progress(subject)
+
+    def progress_many(self, subjects: Iterable[Any]) -> dict[Any, dict[str, str]]:
+        """`progress` for many subjects — `{subject: {node: status}}`, each
+        subject asked present — in one read when the driver offers it
+        (`progress_many`), one per subject otherwise. A subject pinned to
+        another graph reads empty, as in `progress`."""
+        subjects = _unique(subjects)
+        if not subjects:
+            return {}
+        read = self._progress_many(subjects)
+        elsewhere: set[Any] = set()
+        if self.version is not None:
+            elsewhere = {s for s, v in self.driver.versions(subjects).items()
+                         if v != self.version}
+        return {s: {} if s in elsewhere else dict(read.get(s, {})) for s in subjects}
 
     def expire(self) -> dict[str, int]:
         """Release, on every node declaring a `lease`, the rows held longer
