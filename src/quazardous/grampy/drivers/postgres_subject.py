@@ -58,9 +58,9 @@ from sqlalchemy.dialects.postgresql import JSONB
 from ..dag import (
     NODE_SATISFYING,
 )
-from ..journal import Entry
+from ..journal import Entry, Page
 from ..names import Outcome, Reason, Status
-from .postgres import PostgresCommon, _epoch, _ranked
+from .postgres import PostgresCommon, _clock, _epoch, _ranked
 
 #: THE COLUMNS THE SUBJECTS TABLE MUST CARRY, besides the subject.
 SUBJECT_COLUMNS = ("revision", "policy", "version", "nodes")
@@ -159,17 +159,20 @@ class PostgresSubjectDriver(PostgresCommon):
     # -- write ---------------------------------------------------------------
 
     def scan(self, candidates: Any, *, name: str | None, nodes: tuple[str, ...],
-             parents: tuple[str, ...], page: int, now: str,
+             parents: tuple[str, ...], page: int, now: str | None,
              after: tuple[str, ...] = ()) -> Iterator[list[Entry]]:
-        """Pre-filters in SQL, and brings the progress in the same read."""
+        """Pre-filters in SQL, and brings the progress in the same read —
+        and, when `now` is None, the server's clock."""
         s = self.subjects
         c = _ranked(candidates)
         columns = list(c.c)
         candidate = columns[0]
         grouped = c.c["grampy_key"] if "grampy_key" in c.c else sa.literal(None)
+        clock = _clock() if now is None else sa.literal(now)
         query = (
             sa.select(candidate, c.c.grampy_rank, sa.func.coalesce(s.c.revision, 0),
-                      s.c.policy, s.c.version, grouped.label("grampy_key"), s.c.nodes)
+                      s.c.policy, s.c.version, grouped.label("grampy_key"), s.c.nodes,
+                      clock.label("grampy_now"))
             .select_from(c.outerjoin(s, self._subject == candidate))
             .order_by(c.c.grampy_rank)
             .limit(int(page)))
@@ -177,7 +180,7 @@ class PostgresSubjectDriver(PostgresCommon):
             query = query.where(sa.or_(
                 s.c.nodes.op("->", return_type=JSONB)(name).is_(None),
                 sa.and_(self._field(name, "status") == Status.SCHEDULED,
-                        self._field(name, "started_at") <= now)))
+                        self._field(name, "started_at") <= clock)))
         for p in parents:
             query = query.where(self._field(p, "status").in_(NODE_SATISFYING))
         for d in after:
@@ -201,7 +204,7 @@ class PostgresSubjectDriver(PostgresCommon):
                     {n: r["finished_at"] for n, r in progress.items()
                      if r.get("finished_at") is not None},
                     f[3], f[4], f[5]))
-            yield entries
+            yield Page(entries, now=found[0][7])
             if len(found) < page:
                 return
 

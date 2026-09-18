@@ -61,7 +61,9 @@ re-read at its latest version. So:
     insert   locks the revision rows `FOR SHARE`, in the statement that
              inserts, and keeps only those whose revision is still the one
              read. A claim meeting a forget in flight waits for it, then
-             finds the revision raised and inserts nothing.
+             finds the revision raised and inserts nothing. A subject with
+             no revision row yet gets one inserted by that same statement,
+             which holds it as surely as a lock would.
 
 Subjects are written in sorted order, and the journal writes once per
 claim, so that two claiming transactions take their locks in the same
@@ -96,7 +98,7 @@ from sqlalchemy.sql.dml import UpdateBase
 from ..dag import (
     NODE_SATISFYING,
 )
-from ..journal import Arrival, Entry
+from ..journal import Arrival, Entry, Page
 from ..names import Merge, Outcome, Position, Reason, Status
 
 #: THE COLUMNS THE NODE TABLE MUST CARRY, besides the subject.
@@ -145,6 +147,12 @@ def _epoch(moment: Any) -> Any:
     """The seconds of an ISO timestamp stored as text — a `numeric`, which
     `round(x, 1)` accepts."""
     return sa.extract("epoch", sa.cast(moment, sa.TIMESTAMP(timezone=True)))
+
+
+def _clock() -> Any:
+    """The server's clock at the current statement, in the journal's format."""
+    return sa.func.to_char(sa.func.timezone("UTC", sa.func.statement_timestamp()),
+                           'YYYY-MM-DD"T"HH24:MI:SS"+00:00"')
 
 
 class PostgresCommon:
@@ -230,11 +238,12 @@ class PostgresCommon:
             raise RuntimeError(_OUTSIDE_A_TRANSACTION)
         self._in_transaction = True
 
+    #: `scan(now=None)` reads the server's clock in the page query.
+    scan_reads_clock = True
+
     def now(self) -> str:
         """The server's clock at this statement, in the journal's format."""
-        return self._execute(sa.select(sa.func.to_char(
-            sa.func.timezone("UTC", sa.func.statement_timestamp()),
-            'YYYY-MM-DD"T"HH24:MI:SS"+00:00"'))).fetchone()[0]
+        return self._execute(sa.select(_clock())).fetchone()[0]
 
     @contextmanager
     def guard(self, keys: list[str]) -> Iterator[None]:
@@ -412,10 +421,13 @@ class PostgresDriver(PostgresCommon):
     # -- write -------------------------------------------------------------
 
     def scan(self, candidates: Any, *, name: str | None, nodes: tuple[str, ...],
-             parents: tuple[str, ...], page: int, now: str,
+             parents: tuple[str, ...], page: int, now: str | None,
              after: tuple[str, ...] = ()) -> Iterator[list[Entry]]:
-        """Pre-filters in SQL what cannot be taken — a row for `name`, a
-        parent not concluded — so that a page is mostly takable."""
+        """ONE STATEMENT PER PAGE: the candidates, their revision, and their
+        rows on `nodes` gathered in a JSON column — and, when `now` is None,
+        the server's clock. Pre-filters in SQL what cannot be taken — a row
+        for `name`, a parent not concluded, a descendant started — so that a
+        page is mostly takable."""
         t, r = self.table, self.revisions
         c = _ranked(candidates)
         columns = list(c.c)
@@ -423,18 +435,26 @@ class PostgresDriver(PostgresCommon):
         # THE GROUPING KEY IS THE COLUMN NAMED `grampy_key`, carried and never
         # read; any other column is the query's own business.
         grouped = c.c["grampy_key"] if "grampy_key" in c.c else sa.literal(None)
+        clock = _clock() if now is None else sa.literal(now)
+        own = t.alias("own")
+        rows_of = (sa.select(sa.func.json_agg(sa.func.json_build_array(
+                       own.c.node, own.c.status, own.c.started_at, own.c.finished_at)))
+                   .where(own.c[self._subject.key] == candidate,
+                          own.c.node.in_(list(nodes)))
+                   .scalar_subquery())
         held = t.alias("d")
         query = (
             sa.select(candidate, c.c.grampy_rank,
                       sa.func.coalesce(r.c.revision, 0), r.c.policy, r.c.version,
-                      grouped.label("grampy_key"))
+                      grouped.label("grampy_key"), rows_of.label("grampy_rows"),
+                      clock.label("grampy_now"))
             .select_from(c.outerjoin(r, self._rev_subject == candidate))
             .order_by(c.c.grampy_rank)
             .limit(int(page)))
         if name is not None:
             query = query.where(~sa.exists().where(
                 held.c[self._subject.key] == candidate, held.c.node == name,
-                ~sa.and_(held.c.status == Status.SCHEDULED, held.c.started_at <= now)))
+                ~sa.and_(held.c.status == Status.SCHEDULED, held.c.started_at <= clock)))
         if parents:
             query = query.where(self.parents_concluded(parents, candidate))
         if after:
@@ -450,22 +470,19 @@ class PostgresDriver(PostgresCommon):
             if not found:
                 return
             last = found[-1][1]
-            rows: dict[Any, dict[str, str]] = {f[0]: {} for f in found}
-            due: dict[Any, dict[str, str]] = {f[0]: {} for f in found}
-            finished: dict[Any, dict[str, str]] = {f[0]: {} for f in found}
-            for subject, n, status, started, ended in self._execute(
-                    sa.select(self._subject, t.c.node, t.c.status, t.c.started_at,
-                              t.c.finished_at)
-                    .where(self._in(self._subject, list(rows)),
-                           t.c.node.in_(list(nodes)))).fetchall():
-                rows[subject][n] = status
-                if status == Status.SCHEDULED:
-                    due[subject][n] = started
-                if ended is not None:
-                    finished[subject][n] = ended
-            yield [Entry(f[0], int(f[2]), rows[f[0]], due[f[0]], finished[f[0]], f[3], f[4],
-                         f[5])
-                   for f in found]
+            entries = []
+            for f in found:
+                rows: dict[str, str] = {}
+                due: dict[str, str] = {}
+                finished: dict[str, str] = {}
+                for n, status, started, ended in f[6] or ():
+                    rows[n] = status
+                    if status == Status.SCHEDULED:
+                        due[n] = started
+                    if ended is not None:
+                        finished[n] = ended
+                entries.append(Entry(f[0], int(f[2]), rows, due, finished, f[3], f[4], f[5]))
+            yield Page(entries, now=found[0][7])
             if len(found) < page:
                 return
 
@@ -474,32 +491,54 @@ class PostgresDriver(PostgresCommon):
         """Where a layout adds its own pre-filter to a page; none here."""
         return query
 
+    def _unchanged(self, entries: list[tuple[Any, int]]) -> Any:
+        """THE SUBJECTS WHOSE REVISION IS STILL THE ONE READ, held until the
+        transaction ends — a CTE of the statement that writes, so the check
+        and the write are one round trip.
+
+        A subject with a revision row is held by locking that row `FOR
+        SHARE`, if it still carries the revision read. A subject without one
+        (revision 0, never registered) gets it inserted here, and the row
+        this statement inserted is held as surely: a `forget` raising its
+        revision waits for this transaction. The two branches never meet —
+        a row the statement can see is not inserted, and a row it inserts
+        was not there to see. A row inserted meanwhile by another
+        transaction is in neither: that subject is not written, which a
+        claim may always do."""
+        r = self.revisions
+        read = self._unnest(subject=([s for s, _ in entries], self._subject.type),
+                            revision=([v for _, v in entries], sa.Integer))
+        held = (sa.select(self._rev_subject.label("subject"))
+                .join(read, sa.and_(self._rev_subject == read.c.subject,
+                                    r.c.revision == read.c.revision))
+                .with_for_update(read=True, of=r))
+        fresh = [s for s, v in entries if v == 0]
+        if not fresh:
+            return held.cte("unchanged")
+        locked = held.cte("locked")
+        seeded = (self._insert_rows(r, {self._rev_subject.key: fresh}, revision=0)
+                  .on_conflict_do_nothing()
+                  .returning(self._rev_subject.label("subject"))
+                  .cte("seeded"))
+        return sa.union_all(sa.select(locked.c.subject),
+                            sa.select(seeded.c.subject)).cte("unchanged")
+
     def insert_if_unchanged(self, name: str, entries: list[tuple[Any, int]], *,
                             status: str, now: str, lease: str | None) -> list[Any]:
         if not entries:
             return []
-        t, r = self.table, self.revisions
+        t = self.table
         entries = sorted(entries, key=lambda e: e[0])
-        self._execute(
-            self._insert_rows(r, {self._rev_subject.key: [s for s, _ in entries]}, revision=0)
-            .on_conflict_do_nothing())
-        read = self._unnest(subject=([s for s, _ in entries], self._subject.type),
-                            revision=([v for _, v in entries], sa.Integer))
-        unchanged = (
-            sa.select(self._rev_subject)
-            .join(read, sa.and_(self._rev_subject == read.c.subject,
-                                r.c.revision == read.c.revision))
-            .with_for_update(read=True, of=r)
-            .cte("unchanged"))
+        unchanged = self._unchanged(entries)
         columns = [self._subject.key, "node", "status", "started_at", "lease"]
-        values = [unchanged.c[self._rev_subject.key], sa.literal(name),
+        values = [unchanged.c.subject, sa.literal(name),
                   sa.literal(status), sa.literal(now),
                   sa.cast(sa.literal(lease), t.c.lease.type)]
         if status != Status.RUNNING:
             columns.append("finished_at")
             values.append(sa.literal(now))
         insert = postgresql.insert(t).from_select(
-            columns, sa.select(*values).order_by(unchanged.c[self._rev_subject.key]))
+            columns, sa.select(*values).order_by(unchanged.c.subject))
         # A `scheduled` row due by now is replaced; any other row wins.
         rows = self._execute(
             insert.on_conflict_do_update(

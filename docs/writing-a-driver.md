@@ -108,14 +108,15 @@ never interpreted by the driver.
 
 ## Optional fast paths
 
-Three methods are optional. Leave them out and the journal does the same work
-through the required ones, with more round trips:
+Three methods and one flag are optional. Leave them out and the journal does
+the same work through the required ones, with more round trips:
 
 | method | replaces | condition |
 |---|---|---|
 | `skip_where(name, candidates, *, parents, now, version)` | `skip` reading every candidate page | writes exactly what the loop would; used only for a node joining its parents plainly |
 | `progress_many(subjects)` | `progress` per subject | in `arrive` and `migrate` |
 | `rewrite_many(subjects, *, rename, drop, version, now)` | `rewrite` per subject | in `migrate` |
+| `scan_reads_clock = True` | `now()` before each claim | `scan(now=None)` uses the storage's clock in the page query and yields `Page`s carrying it; used when the journal runs on the driver's clock |
 
 A fast path must give the same result as the loop it replaces. The PostgreSQL
 drivers test `skip_where` against the journal's own loop on every progress of

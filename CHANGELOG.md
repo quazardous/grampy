@@ -42,6 +42,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A guide to writing a driver: the capabilities, which methods may return a
   superset and which must be exact, transactions, grouping keys, the optional
   fast paths, and certification.
+- A claim on PostgreSQL costs two statements — one read, one write — on the
+  row and subject layouts, three with the ready list, down from five (seven on
+  a `Graph`) for a journal on the server's clock: the page
+  query brings the node rows and the server's clock with it, the write seeds
+  the revision rows it needs, and a subject already pinned to its graph is not
+  pinned again. A driver of your own may read the clock in its page too
+  (`scan_reads_clock`, and `scan(now=None)`).
 
 ## [0.4.0] - 2026-09-18
 

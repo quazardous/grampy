@@ -129,8 +129,9 @@ def subject_table(metadata, name, subject_type=str):
 class RowLayout:
     """One row per (subject, node): `PostgresDriver`."""
 
-    #: A page read, its rows, the revisions seeded, the write.
-    claim_statements = (4, 0)
+    #: The page read — its rows and the clock with it — then the write,
+    #: seeding the revisions it needs.
+    claim_statements = (2, 0)
 
     #: Whatever the number of subjects. Arrive: their progress read, the
     #: skipped noted, the rest written. Keeping every ref: the locks, the
@@ -199,8 +200,8 @@ class ReadyLayout(RowLayout):
     """Row per node plus the ready list: `PostgresReadyDriver`. Seeded rows
     are written behind the driver's back, so the list is refilled after."""
 
-    #: The row layout's four, and the pairs struck from the list.
-    claim_statements = (5, 0)
+    #: The row layout's two, and the pairs struck from the list.
+    claim_statements = (3, 0)
 
     #: The row layout's, and the renamed subjects listed again.
     batched_statements = {"arrive": (3, 0), "keep every ref": (7, 0), "migrate": (8, 0)}
@@ -582,3 +583,67 @@ def test_skip_in_one_write_equals_the_loop(engine, layout, versioned):
     assert fast == loop
     assert fast_count > 0, "the sweep must skip something, or it proves nothing"
     assert ("right" in fast[subjects[-1]]) is not versioned
+
+
+@pytest.mark.parametrize("layout", [RowLayout(), SubjectLayout(), ReadyLayout()],
+                         ids=["row", "subject", "ready"])
+def test_on_the_server_clock_a_claim_reads_the_time_with_its_page(engine, layout):
+    """THE CONTRACT INJECTS A CLOCK; a journal left on the driver's reads the
+    server's time in the page query (`scan_reads_clock`). That time must be
+    the one the claim judges by: a retry due long ago is taken, one due in a
+    far future is not — and no statement is spent reading the time apart."""
+    from quazardous.grampy.testing import DIAMOND
+    with engine.connect() as conn, conn.begin():
+        metadata = sa.MetaData()
+        tables = layout.tables(metadata, f"grampy_{next(_TABLES)}")
+        metadata.create_all(conn)
+        driver = layout.driver(conn.execute, tables, DIAMOND)
+        journal = NodeJournal(driver, DIAMOND)             # the server's clock
+        for subject in ("past", "future"):
+            layout.seed(conn, tables, subject, {"start": "scheduled"}, driver)
+        ahead = "2999-01-01T00:00:00+00:00"
+        if "subjects" in tables:
+            t = tables["subjects"]
+            conn.execute(sa.update(t).where(t.c.subject == "future").values(
+                nodes=sa.func.jsonb_set(
+                    t.c.nodes, sa.cast(["start", "started_at"], postgresql.ARRAY(sa.Text)),
+                    sa.func.to_jsonb(sa.cast(ahead, sa.Text)))))
+        else:
+            t = tables["table"]
+            conn.execute(sa.update(t).where(t.c.subject == "future").values(started_at=ahead))
+        journal.claim("start", 1, candidates=ordered_subjects(["warm"]))
+        sent = []
+        sa.event.listen(conn, "before_cursor_execute", lambda *_: sent.append(1))
+        taken = journal.claim("start", 10,
+                              candidates=ordered_subjects(["past", "future", "fresh"]))
+        assert sorted(taken) == ["fresh", "past"]
+        assert len(sent) <= layout.claim_statements[0], "the time was read apart"
+        started = journal.driver.now()
+        assert journal.progress("past") == {"start": "running"}
+        assert started >= "2026-01-01T00:00:00+00:00"
+        conn.rollback()
+
+
+@pytest.mark.parametrize("layout", [RowLayout(), SubjectLayout(), ReadyLayout()],
+                         ids=["row", "subject", "ready"])
+def test_a_subject_is_pinned_by_its_first_write_and_never_again(engine, layout):
+    """ON A GRAPH, the page says which subjects are pinned already: a claim
+    pins only the others, so a subject deep in its run costs no pin."""
+    from quazardous.grampy import Document, Graph
+    from quazardous.grampy.testing import DIAMOND
+    graph = Graph(Document("pins"), DIAMOND)
+    subjects = [f"s{i}" for i in range(5)]
+    with engine.connect() as conn, conn.begin():
+        metadata = sa.MetaData()
+        tables = layout.tables(metadata, f"grampy_{next(_TABLES)}")
+        metadata.create_all(conn)
+        journal = NodeJournal(layout.driver(conn.execute, tables, DIAMOND), graph,
+                              clock=lambda: SEEDED)
+        lease = journal.claim("start", 5, candidates=ordered_subjects(subjects))
+        journal.conclude("start", list(lease), token=lease.token)
+        assert {journal.pinned(s) for s in subjects} == {graph.document.identity}
+        sent = []
+        sa.event.listen(conn, "before_cursor_execute", lambda *_: sent.append(1))
+        assert len(journal.claim("left", 5, candidates=ordered_subjects(subjects))) == 5
+        assert len(sent) <= layout.claim_statements[0], "pinned again"
+        conn.rollback()

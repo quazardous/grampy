@@ -194,6 +194,16 @@ class Entry(NamedTuple):
     key: str | None = None
 
 
+class Page(list):
+    """WHAT `scan` YIELDS: a page of entries — a plain list does as well —
+    and, for a driver that reads its clock in the page query
+    (`scan_reads_clock`), the storage's time as that page was read."""
+
+    def __init__(self, entries: Iterable[Entry] = (), now: str | None = None) -> None:
+        super().__init__(entries)
+        self.now = now
+
+
 class _Ready(NamedTuple):
     """A candidate a grouping node could take: what it is, what groups it,
     and since when it has been waiting for its group to fill."""
@@ -241,7 +251,7 @@ class CoreDriver(Protocol):
     """
 
     def scan(self, candidates: Any, *, name: str | None, nodes: tuple[str, ...],
-             parents: tuple[str, ...], page: int, now: str,
+             parents: tuple[str, ...], page: int, now: str | None,
              after: tuple[str, ...] = ()) -> Iterator[list[Entry]]:
         """The candidates, IN THEIR ORDER, page by page — each with its
         revision, its rows on `nodes`, and when its `scheduled` rows are due.
@@ -444,6 +454,12 @@ class JournalDriver(CoreDriver, VersionDriver, LimitDriver, LaneDriver, ReadingD
     write, which the shared contract checks. Leave it out, and the journal
     reads the candidates and writes as for a claim.
 
+    OPTIONAL, `scan_reads_clock = True`: the driver's `scan` accepts
+    `now=None`, then uses the storage's own clock — the time `now()` would
+    return — in the page query, and yields `Page`s carrying it. A journal on
+    the driver's clock then reads the time with the first page instead of in
+    a statement of its own.
+
     OPTIONAL, `progress_many(subjects) -> {subject: progress}` and
     `rewrite_many(subjects, *, rename, drop, version, now)`: `progress` and
     `rewrite` for many subjects at once — a subject without rows may be left
@@ -534,6 +550,9 @@ class NodeJournal:
         # another zone or layout, its times would sort wrong as text. The
         # driver's own clock already writes that format.
         self._clock = (lambda: stamp(clock())) if clock is not None else driver.now
+        #: THE TIME COMES WITH THE FIRST PAGE when the journal runs on the
+        #: driver's clock and the driver can read it there.
+        self._clock_in_scan = clock is None and bool(getattr(driver, "scan_reads_clock", False))
         self._rng = rng or random.Random()
         #: THE MERGE FUNCTIONS A LANE MAY NAME. The graph stays data — it
         #: holds `fn:<name>`, never the code — and the name is resolved here,
@@ -572,9 +591,10 @@ class NodeJournal:
             return Lease([], token)
         after = tuple(sorted(descendants(name, self.dag)))
         parents = n.parents if require_parents and not n.custom_join else ()
-        now = self._clock()
+        now: str | None = None if self._clock_in_scan else self._clock()
         chosen: list[tuple[Any, int]] = []
         policy_of: dict[Any, str | None] = {}
+        pinned: set[Any] = set()
         seen: set[Any] = set()
         # A GROUP IS GATHERED BEFORE IT IS JUDGED: the claim must read enough
         # candidates to know whether one is complete, so `limit` alone is not
@@ -589,16 +609,21 @@ class NodeJournal:
         # lock, held over a read a grouping node makes rarely and in bulk.
         def gather() -> list[tuple[Any, int]]:
             """Read candidates until there is enough to decide."""
+            nonlocal now
             for page in self.driver.scan(candidates, name=name,
                                          nodes=(name, *n.parents, *after),
                                          parents=parents, page=max(enough, PAGE),
                                          now=now, after=after):
+                if now is None:
+                    now = getattr(page, "now", None) or self._clock()
                 for e in page:
                     # A SUBJECT LISTED TWICE COUNTS ONCE: it would otherwise
                     # take a place in the limit and be refused by the write.
                     if e.subject in seen or not self._mine(e):
                         continue
                     seen.add(e.subject)
+                    if e.version is not None:
+                        pinned.add(e.subject)
                     if not self._takable(n, after, _due_away(name, e, now),
                                          require_parents):
                         continue
@@ -614,12 +639,14 @@ class NodeJournal:
                     return chosen
             if n.group is None:
                 return chosen
+            if now is None:                 # no page at all: nothing to group
+                return []
             picked = self._group(n, ready, now)
             policy_of.update({m.subject: m.policy for m in picked})
             return [(m.subject, m.revision) for m in picked]
 
         def write(group: list[tuple[Any, int]]) -> list[Any]:
-            if not group:
+            if not group or now is None:    # no page read, nothing chosen
                 return []
             if self._limited(n):
                 return self._within_limits(
@@ -639,7 +666,9 @@ class NodeJournal:
         else:
             with self.driver.guard([f"group|{name}"]):
                 taken = write(gather())
-        self._pin(taken)
+        # PINNED ONCE: a subject the page showed pinned already is — to this
+        # graph, `_mine` saw to it — so only a first write pins.
+        self._pin([s for s in taken if s not in pinned])
         return Lease(taken, token)
 
     def _group(self, n: Node, ready: list[_Ready], now: str) -> list[_Ready]:
