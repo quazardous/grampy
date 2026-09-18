@@ -168,21 +168,29 @@ rank the layouts rather than predict a remote server.
 
 | 100,000 subjects | row per node | row per subject | ready list |
 |---|---:|---:|---:|
-| claim 30, half ready | 5 st · 516 ms | **3 st · 99 ms** | 6 st · 438 ms |
-| claim 30, 1 in 20 ready | 5 st · 308 ms | **3 st · 59 ms** | 6 st · 298 ms |
-| claim and conclude 30 | 7 st · 273 ms | **5 st · 58 ms** | 8 st · 277 ms |
-| claim 30, every candidate past the node | 169 st · 24.1 s | **85 st · 6.9 s** | 169 st · 26.3 s |
-| forget 30 | 3 st · 4.7 ms | 3 st · 4.3 ms | 4 st · 4.8 ms |
+| claim 30, half ready | 5 st · 466 ms | **3 st · 121 ms** | 6 st · 500 ms |
+| claim 30, 1 in 20 ready | 5 st · 281 ms | **3 st · 82 ms** | 6 st · 334 ms |
+| claim and conclude 30 | 7 st · 288 ms | **5 st · 73 ms** | 8 st · 366 ms |
+| claim 30, every candidate past the node | 2 st · 505 ms | **2 st · 43 ms** | 2 st · 609 ms |
+| forget 30 | 3 st · 2.4 ms | 3 st · 4.2 ms | 4 st · 4.9 ms |
+| skip an optional node for all 100,000 | **3 st · 1.3 s** | 253 st · 27.8 s | 5 st · 2.0 s |
 
-On this workload the subject layout wins every claim, and **the ready list
-gains nothing**: the claim still walks the candidates in their order, and the
-list adds a probe to each rather than removing one. It stays available, and
-proven, for a workload where few subjects are ever ready and the candidates
-are cheap to walk; measure yours before picking it.
+On this workload the subject layout wins every claim, the row layout wins
+the skip sweep, and **the ready list gains nothing**: the claim still walks
+the candidates in their order, and the list adds a probe to each rather than
+removing one. It stays available, and proven, for a workload where few
+subjects are ever ready and the candidates are cheap to walk; measure yours
+before picking it.
 
-The fourth line is the case to watch in any layout: when every candidate
-waiting at a node has a descendant started — a replay that left the later
-steps in place — the claim reads the whole candidate set to take nothing.
+The fourth line is a replay that left the later steps in place: every
+candidate waiting at the node has a descendant started. Each layout drops
+those in SQL, so the claim takes two statements to take nothing.
+
+The last line is `journal.skip` over every candidate. The row and ready
+layouts apply the rule in SQL and write in one statement (`skip_where`);
+the subject layout keeps a JSON document per subject, so it reads and writes
+page by page. A sweep that size is a migration or a janitor job, not the
+hot path — but it is the line to read if yours runs often.
 
 Run the bench on your own shape of data: its table sizes and progress are
 at the top of the file.
