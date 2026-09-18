@@ -142,3 +142,35 @@ def test_the_subject_column_may_carry_the_application_s_own_name():
     journal.conclude("a", ["x"], token=lease.token)
     assert journal.claim("b", 5, candidates=["x"]) == ["x"]
     assert [row[0] for row in conn.execute("SELECT record_id FROM grampy_nodes")] == ["x", "x"]
+
+
+def test_the_subject_column_may_be_typed_and_then_serves_a_join_by_its_index():
+    """Untyped, the column holds ints and strings alike, but SQLite cannot
+    search it from a typed column of the application's: it scans."""
+    def plan(statements):
+        conn = sqlite3.connect(":memory:")
+        for statement in statements:
+            conn.execute(statement)
+        conn.execute("CREATE TABLE docs (id INTEGER PRIMARY KEY)")
+        return " ".join(row[3] for row in conn.execute(
+            "EXPLAIN QUERY PLAN SELECT d.id FROM docs d WHERE NOT EXISTS "
+            "(SELECT 1 FROM grampy_nodes n WHERE n.subject = d.id AND n.node = 'a')"))
+
+    assert "SEARCH n" in plan(schema(subject_type="INTEGER"))
+    assert "SEARCH n" not in plan(schema()), "the trap the type avoids"
+
+
+def test_a_typed_table_works_like_the_untyped_one():
+    conn = sqlite3.connect(":memory:")
+    for statement in schema(subject_type="integer"):
+        conn.execute(statement)
+    from quazardous.grampy import Node
+    journal = NodeJournal(SqliteDriver(conn), (Node("a"), Node("b", parents=("a",))))
+    lease = journal.claim("a", 5, candidates=[3, 1, 2])
+    journal.conclude("a", list(lease), token=lease.token)
+    assert sorted(journal.claim("b", 5, candidates=[3, 1, 2])) == [1, 2, 3]
+
+
+def test_an_unknown_subject_type_is_refused():
+    with pytest.raises(ValueError, match="subject_type"):
+        schema(subject_type="REAL")

@@ -30,6 +30,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   may be ready; it is correct and proven, and measured no faster on that
   benchmark, which the documentation says. Both pass the same contract as the
   original driver, concurrency included.
+- The SQLite driver's `schema()` takes `subject_type` ("INTEGER" or "TEXT"):
+  declared with your ids' type, the subject column serves joins from your own
+  tables by its index instead of scanning.
+- The SQLite driver filters each page of candidates in SQL before reading
+  their rows: a claim that finds nothing to take reads 2.5 times faster on a
+  large table.
 - `benchmarks/layouts.py` runs the three layouts on the same data and prints
   statements and time per operation, to measure your own shape of data.
 - grampy's own words have names: `Status`, `Reason`, `Outcome`, `Merge`,

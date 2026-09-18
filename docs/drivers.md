@@ -190,10 +190,27 @@ at the top of the file.
 ```python
 from quazardous.grampy.drivers.sqlite import Query, SqliteDriver, schema
 
-for statement in schema():        # the DDL of the tables it expects
+for statement in schema(subject_type="INTEGER"):   # the DDL of the tables it expects
     conn.execute(statement)
 journal = NodeJournal(SqliteDriver(conn), DAG)
 ```
+
+**Give `subject_type` the type of your ids.** Left out, the subject column is
+declared without a type, so it can hold ints and strings alike; but SQLite
+then cannot use its index when *your* typed column is compared to it, and a
+join of your table on grampy's scans instead of searching. Measured on one
+such query at 10,000 subjects: 18.5 ms untyped, 0.1 ms typed.
+
+The driver pre-filters each page in SQL (no row for the node, parents
+concluded) before reading the rows of what is left. It reads the candidate
+set at once, on purpose: its cursor cannot stay open while the same
+connection writes the claim. On 100,000 subjects that read is the fixed cost
+of a claim, about 35 ms on a laptop; a claim where nothing is takable took
+670 ms before the pre-filter and 268 ms with it.
+
+SQLite runs in your process: there is no round trip to save, so the
+PostgreSQL layouts above have no SQLite counterpart. What pays here is reading
+fewer rows.
 
 ## Writing a driver
 

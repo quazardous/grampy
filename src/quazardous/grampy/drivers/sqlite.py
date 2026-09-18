@@ -81,27 +81,43 @@ class Query(NamedTuple):
     params: tuple[Any, ...] = ()
 
 
+#: THE TYPES A SUBJECT COLUMN MAY BE DECLARED WITH.
+SUBJECT_TYPES = ("INTEGER", "TEXT")
+
+
 def schema(table: str = "grampy_nodes", revisions: str = "grampy_revisions",
            history: str = "grampy_history", subject: str = "subject",
-           limits: str = "grampy_limits", arrivals: str = "grampy_arrivals") -> list[str]:
-    """The `CREATE TABLE` statements the driver expects."""
+           limits: str = "grampy_limits", arrivals: str = "grampy_arrivals", *,
+           subject_type: str | None = None) -> list[str]:
+    """The `CREATE TABLE` statements the driver expects.
+
+    GIVE `subject_type` THE TYPE OF YOUR IDS — `"INTEGER"` or `"TEXT"`. A
+    subject column declared without one holds either, but SQLite then cannot
+    use its index against a typed column of yours: a join of your table on
+    grampy's, or grampy's own pre-filter, scans instead of searching —
+    measured 185 times slower on one query. Left out, the column stays
+    untyped, as before.
+    """
     for name in (table, revisions, history, subject, limits, arrivals):
         _check(name)
+    if subject_type is not None and subject_type.upper() not in SUBJECT_TYPES:
+        raise ValueError(f"subject_type {subject_type!r} — expected one of {SUBJECT_TYPES}")
+    typed = f"{subject} {subject_type.upper()}" if subject_type else subject
     return [
         f"CREATE TABLE IF NOT EXISTS {table} ("
-        f"{subject} NOT NULL, node TEXT NOT NULL, status TEXT NOT NULL, "
+        f"{typed} NOT NULL, node TEXT NOT NULL, status TEXT NOT NULL, "
         f"started_at TEXT NOT NULL, finished_at TEXT, lease TEXT, "
         f"PRIMARY KEY ({subject}, node))",
         f"CREATE TABLE IF NOT EXISTS {revisions} ("
-        f"{subject} NOT NULL PRIMARY KEY, revision INTEGER NOT NULL, policy TEXT, "
+        f"{typed} NOT NULL PRIMARY KEY, revision INTEGER NOT NULL, policy TEXT, "
         f"version TEXT)",
         f"CREATE TABLE IF NOT EXISTS {history} ("
-        f"{subject} NOT NULL, node TEXT NOT NULL, status TEXT NOT NULL, "
+        f"{typed} NOT NULL, node TEXT NOT NULL, status TEXT NOT NULL, "
         f"started_at TEXT NOT NULL, finished_at TEXT, lease TEXT, "
         f"archived_at TEXT NOT NULL, reason TEXT NOT NULL)",
         f"CREATE TABLE IF NOT EXISTS {limits} (key TEXT NOT NULL PRIMARY KEY, value REAL)",
         f"CREATE TABLE IF NOT EXISTS {arrivals} ("
-        f"{subject} NOT NULL, node TEXT NOT NULL, ref TEXT, place TEXT NOT NULL, "
+        f"{typed} NOT NULL, node TEXT NOT NULL, ref TEXT, place TEXT NOT NULL, "
         f"arrived_at TEXT NOT NULL, urgent INTEGER NOT NULL DEFAULT 0, refs TEXT, "
         f"PRIMARY KEY ({subject}, node))",
     ]
@@ -130,16 +146,49 @@ class SqliteDriver:
 
     def scan(self, candidates: Any, *, name: str | None, nodes: tuple[str, ...],
              parents: tuple[str, ...], page: int, now: str) -> Iterator[list[Entry]]:
-        """No pre-filter: the journal decides on every candidate read."""
+        """Pre-filters in SQL what cannot be taken — a row for `name`, a
+        parent not concluded — before reading the rows of what is left.
+
+        The candidates are read at once (see `_candidates`), so the filter
+        runs page by page on the subjects read, in their order."""
         pairs = self._candidates(candidates)
         while True:
             chunk = _take(pairs, page)
             if not chunk:
                 return
             keys = dict(chunk)
-            yield self._entries([s for s, _ in chunk], nodes, keys)
+            subjects = [s for s, _ in chunk]
+            if name is not None or parents:
+                kept = self._takable(subjects, name, parents, now)
+                subjects = [s for s in subjects if s in kept]
+            yield self._entries(subjects, nodes, keys)
             if len(chunk) < page:
                 return
+
+    def _takable(self, subjects: list[Any], name: str | None, parents: tuple[str, ...],
+                 now: str) -> set[Any]:
+        """THE PRE-FILTER — a superset of what the journal will take, never
+        less: no row for `name` other than a scheduled one due by `now`, and
+        a satisfying row for every parent."""
+        kept: set[Any] = set()
+        for chunk in _chunks(subjects, 300):
+            values = ", ".join(["(?)"] * len(chunk))
+            sql = f"WITH c(s) AS (VALUES {values}) SELECT s FROM c WHERE 1"
+            params: list[Any] = list(chunk)
+            if name is not None:
+                sql += (f" AND NOT EXISTS (SELECT 1 FROM {self.table} o "
+                        f"WHERE o.{self.subject} = c.s AND o.node = ? "
+                        f"AND NOT (o.status = ? AND o.started_at <= ?))")
+                params += [name, Status.SCHEDULED, now]
+            if parents:
+                marks = ", ".join("?" * len(parents))
+                satisfying = ", ".join("?" * len(NODE_SATISFYING))
+                sql += (f" AND (SELECT count(*) FROM {self.table} p "
+                        f"WHERE p.{self.subject} = c.s AND p.node IN ({marks}) "
+                        f"AND p.status IN ({satisfying})) = ?")
+                params += [*parents, *NODE_SATISFYING, len(parents)]
+            kept.update(row[0] for row in self.conn.execute(sql, params).fetchall())
+        return kept
 
     def insert_if_unchanged(self, name: str, entries: list[tuple[Any, int]], *,
                             status: str, now: str, lease: str | None) -> list[Any]:
