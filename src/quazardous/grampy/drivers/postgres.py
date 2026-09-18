@@ -98,8 +98,8 @@ from sqlalchemy.sql.dml import UpdateBase
 from ..dag import (
     NODE_SATISFYING,
 )
-from ..journal import Arrival, Entry, Page
 from ..names import Merge, Outcome, Position, Reason, Status
+from ..protocol import Arrival, Entry, Page
 
 #: THE COLUMNS THE NODE TABLE MUST CARRY, besides the subject.
 REQUIRED_COLUMNS = ("node", "status", "started_at", "finished_at", "lease")

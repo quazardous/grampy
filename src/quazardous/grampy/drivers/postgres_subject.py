@@ -59,8 +59,8 @@ from sqlalchemy.dialects.postgresql import JSONB
 from ..dag import (
     NODE_SATISFYING,
 )
-from ..journal import Entry, Page
 from ..names import Outcome, Reason, Status
+from ..protocol import Entry, Page
 from .postgres import PostgresCommon, _clock, _epoch, _plain, _ranked
 
 #: THE COLUMNS THE SUBJECTS TABLE MUST CARRY, besides the subject.

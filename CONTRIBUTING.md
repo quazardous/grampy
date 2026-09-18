@@ -88,9 +88,14 @@ to say why.
 
 ## Adding a driver
 
-Implement the `quazardous.grampy.journal.JournalDriver` protocol, then subclass
+Implement the core of the driver protocol and the capabilities your graphs
+use (`quazardous.grampy.protocol`), then subclass
 `quazardous.grampy.testing.JournalContract` with a `harness` fixture, as
-`tests/test_memory_driver.py` does.
+`tests/test_memory_driver.py` does. [Writing a driver](docs/writing-a-driver.md)
+says what each method may return.
+
+The journal itself is `journal.py`, built on `_base.py` and its parts:
+`limits.py`, `lanes.py`, `migration.py`.
 
 ## How to release
 

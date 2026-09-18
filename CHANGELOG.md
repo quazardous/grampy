@@ -58,6 +58,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pinned again. A driver of your own may read the clock in its page too
   (`scan_reads_clock`, and `scan(now=None)`).
 
+### Changed
+
+- The driver protocol and the types a driver exchanges live in
+  `quazardous.grampy.protocol`; importing them from `quazardous.grampy` or
+  `quazardous.grampy.journal` works as before.
+
 ### Fixed
 
 - A skip on PostgreSQL could take seconds where one query takes a fraction:

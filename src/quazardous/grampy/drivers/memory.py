@@ -24,8 +24,8 @@ from typing import Any
 from ..dag import (
     NODE_SATISFYING,
 )
-from ..journal import Arrival, Entry, Keyed, utc_now
 from ..names import Merge, Outcome, Position, Reason, Status
+from ..protocol import Arrival, Entry, Keyed, utc_now
 
 
 @dataclass

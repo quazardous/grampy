@@ -67,8 +67,8 @@ from typing import Any, NamedTuple
 from ..dag import (
     NODE_SATISFYING,
 )
-from ..journal import Arrival, Entry, Keyed, utc_now
 from ..names import Merge, Outcome, Position, Reason, Status
+from ..protocol import Arrival, Entry, Keyed, utc_now
 
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
