@@ -36,7 +36,9 @@ THE CONNECTION IS INJECTED TOO, AS AN `execute`
 result with `fetchall()`, `fetchone()` and `rowcount`, rows indexable by
 position. A SQLAlchemy `Connection.execute` fits as is; an application
 executing through its own driver compiles first. The driver never
-commits.
+commits — and it REFUSES TO RUN OUTSIDE A TRANSACTION: under an
+autocommitting executor its locks and its two-statement writes would
+protect nothing, silently, so its first write checks, once.
 
 ────────────────────────────────────────────────────────────────────────
 HOW THIS DRIVER KEEPS `insert_if_unchanged` HONEST
@@ -87,6 +89,7 @@ from typing import Any
 
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.sql.dml import UpdateBase
 
 from ..dag import (
     NODE_SATISFYING,
@@ -102,6 +105,17 @@ REVISION_COLUMNS = ("revision", "policy", "version")
 HISTORY_COLUMNS = (*REQUIRED_COLUMNS, "archived_at", "reason")
 #: THE COLUMNS THE ARRIVALS TABLE MUST CARRY, besides the subject.
 ARRIVAL_COLUMNS = ("node", "ref", "place", "arrived_at", "urgent", "refs")
+
+
+_VIRTUAL_TRANSACTION = sa.text(
+    "SELECT virtualtransaction FROM pg_locks "
+    "WHERE pid = pg_backend_pid() AND locktype = 'virtualxid'")
+_ADVISORY_HELD = sa.text(
+    "SELECT count(*) FROM pg_locks WHERE pid = pg_backend_pid() AND locktype = 'advisory'")
+_OUTSIDE_A_TRANSACTION = (
+    "the journal runs outside a transaction: its executor autocommits, which "
+    "voids every lock and every two-statement write it relies on. Open a "
+    "transaction around the journal call and commit after it.")
 
 
 def _ranked(candidates: Any) -> Any:
@@ -143,7 +157,8 @@ class PostgresCommon:
             raise ValueError(
                 f"table {history.name!r} lacks the column(s) {missing} — it needs "
                 f"{subject!r} and {', '.join(HISTORY_COLUMNS)}")
-        self._execute = execute
+        self._raw_execute = execute
+        self._in_transaction = False
         self._key = subject
         self.history_table = history
         if limits is not None and any(c not in limits.c for c in ("key", "value")):
@@ -155,6 +170,27 @@ class PostgresCommon:
             if missing:
                 raise ValueError(f"table {arrivals.name!r} lacks the column(s) {missing}")
         self.arrivals_table = arrivals
+
+    # -- the transaction the caller owes ----------------------------------------
+
+    def _execute(self, statement: Any) -> Any:
+        """Run `statement`, having checked ONCE, before the first write, that
+        the caller's executor runs inside a transaction."""
+        if not self._in_transaction and isinstance(statement, UpdateBase):
+            self._require_transaction()
+        return self._raw_execute(statement)
+
+    def _require_transaction(self) -> None:
+        """NOT UNDER AUTOCOMMIT. Every guarantee here — the advisory locks of
+        `guard`, a revision raised then rows deleted — holds only because the
+        statements share one transaction. An autocommitting executor voids
+        them all without an error, so it is refused, by reading the
+        session's transaction twice: under autocommit each statement is a
+        transaction of its own. Two statements, once per driver."""
+        seen = [self._raw_execute(_VIRTUAL_TRANSACTION).fetchone()[0] for _ in range(2)]
+        if seen[0] != seen[1]:
+            raise RuntimeError(_OUTSIDE_A_TRANSACTION)
+        self._in_transaction = True
 
     def now(self) -> str:
         """The server's clock at this statement, in the journal's format."""
@@ -171,6 +207,10 @@ class PostgresCommon:
         for key in sorted(keys):
             self._execute(sa.select(sa.func.pg_advisory_xact_lock(
                 sa.func.hashtextextended(key, 0))))
+        # A transaction-scoped lock taken under autocommit is gone by the
+        # next statement: check it is still held, or the guard guards nothing.
+        if keys and not self._execute(_ADVISORY_HELD).fetchone()[0]:
+            raise RuntimeError(_OUTSIDE_A_TRANSACTION)
         yield
 
     def limits(self, keys: list[str]) -> dict[str, float]:

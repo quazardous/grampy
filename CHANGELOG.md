@@ -59,6 +59,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a lane's queue): an application executing through its own driver, honouring
   the documented `fetchall` / `fetchone` / `rowcount`, failed on its first
   claim. It now needs only those, and a test holds every layout to it.
+- The SQL drivers refuse to run outside a transaction. Under an autocommitting
+  executor every lock they take was released by the next statement, and the
+  writes made of two statements lost their guarantee, with no error at all;
+  they now raise on their first write, saying to open a transaction around
+  the journal call.
 - The documentation says how to settle rows left `running` without a lease by
   a version before leases: `conclude(…, token=None)` when the work is known
   done, `release` to hand them back.

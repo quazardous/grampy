@@ -192,3 +192,18 @@ def test_a_typed_table_works_like_the_untyped_one():
 def test_an_unknown_subject_type_is_refused():
     with pytest.raises(ValueError, match="subject_type"):
         schema(subject_type="REAL")
+
+
+def test_an_autocommitting_connection_is_refused_until_it_begins():
+    """Under autocommit the write lock and the writes of several statements
+    guard nothing: the driver refuses, rather than failing silently."""
+    from quazardous.grampy import Node
+    conn = sqlite3.connect(":memory:", isolation_level=None)
+    for statement in schema():
+        conn.execute(statement)
+    journal = NodeJournal(SqliteDriver(conn), (Node("a"),))
+    with pytest.raises(RuntimeError, match="outside a transaction"):
+        journal.claim("a", 1, candidates=["s1"])
+    conn.execute("BEGIN")
+    assert journal.claim("a", 1, candidates=["s1"]) == ["s1"]
+    conn.execute("COMMIT")

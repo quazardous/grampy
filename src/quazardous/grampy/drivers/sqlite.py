@@ -140,6 +140,23 @@ class SqliteDriver:
 
     # -- write -------------------------------------------------------------
 
+    def _require_transaction(self) -> None:
+        """NOT UNDER AUTOCOMMIT. The write lock `guard` relies on, and the
+        writes made of several statements, hold only inside one transaction.
+        A connection opened with `isolation_level=None` — or `autocommit=True`
+        — commits each statement on its own, so it must have been given a
+        transaction (`BEGIN`) by the caller; otherwise it is refused rather
+        than left to guard nothing, silently."""
+        autocommits = (self.conn.isolation_level is None
+                       or getattr(self.conn, "autocommit", None) is True)
+        if autocommits and not self.conn.in_transaction:
+            raise RuntimeError(
+                "the journal runs outside a transaction: this connection "
+                "autocommits, which voids the write lock and the writes of "
+                "several statements it relies on. Begin a transaction around "
+                "the journal call, or open the connection without "
+                "isolation_level=None.")
+
     def now(self) -> str:
         """SQLite has no server: every process shares the machine's clock."""
         return utc_now()
@@ -192,6 +209,7 @@ class SqliteDriver:
 
     def insert_if_unchanged(self, name: str, entries: list[tuple[Any, int]], *,
                             status: str, now: str, lease: str | None) -> list[Any]:
+        self._require_transaction()
         finished = None if status == Status.RUNNING else now
         taken: list[Any] = []
         for subject, revision in sorted(entries, key=lambda e: str(e[0])):
@@ -214,6 +232,7 @@ class SqliteDriver:
     def conclude(self, name: str, subjects: list[Any], *, status: str,
                  now: str, lease: str | None, omit: tuple[str, ...],
                  reset: tuple[str, ...], reschedule: str | None) -> int:
+        self._require_transaction()
         count = 0
         for subject in subjects:
             sql = (f"UPDATE {self.table} SET status = ?, finished_at = ? "
@@ -245,6 +264,7 @@ class SqliteDriver:
         return count
 
     def adopt(self, name: str, subjects: list[Any], *, now: str) -> int:
+        self._require_transaction()
         count = 0
         for subject in subjects:
             count += self.conn.execute(
@@ -256,6 +276,7 @@ class SqliteDriver:
 
     def forget(self, name: str, subjects: list[Any], *, now: str) -> int:
         """Revision first, deletion second, in the caller's transaction."""
+        self._require_transaction()
         count = 0
         for subject in subjects:
             self._raise_revision(subject)
@@ -266,6 +287,7 @@ class SqliteDriver:
     def release(self, name: str, *, older_than: str, now: str,
                 only: tuple[str, ...] | None = None, exclude: tuple[str, ...] = (),
                 version: str | None = None) -> int:
+        self._require_transaction()
         where = "node = ? AND status = ? AND started_at < ?"
         params: list[Any] = [name, Status.RUNNING, older_than]
         registry = f"SELECT {{s}} FROM {self.revisions} WHERE policy IN ({{marks}})"
@@ -286,6 +308,7 @@ class SqliteDriver:
     def guard(self, keys: list[str]) -> Iterator[None]:
         """A write takes SQLite's database lock, held to the commit: the
         claim that follows reads after every writer before it."""
+        self._require_transaction()
         for key in sorted(keys):
             self.conn.execute(
                 f"INSERT INTO {self.limits_table} (key, value) VALUES (?, NULL) "
@@ -302,6 +325,7 @@ class SqliteDriver:
         return out
 
     def set_limits(self, values: dict[str, float]) -> None:
+        self._require_transaction()
         for key, value in sorted(values.items()):
             self.conn.execute(
                 f"INSERT INTO {self.limits_table} (key, value) VALUES (?, ?) "
@@ -325,6 +349,7 @@ class SqliteDriver:
         return int(self.conn.execute(sql, params).fetchone()[0])
 
     def pin(self, subjects: list[Any], version: str) -> int:
+        self._require_transaction()
         count = 0
         for subject in subjects:
             self.conn.execute(
@@ -346,6 +371,7 @@ class SqliteDriver:
 
     def rewrite(self, subject: Any, *, rename: dict[str, str], drop: tuple[str, ...],
                 version: str, now: str) -> None:
+        self._require_transaction()
         self._raise_revision(subject)
         self.conn.execute(f"UPDATE {self.revisions} SET version = ? WHERE {self.subject} = ?",
                           (version, subject))
@@ -381,6 +407,7 @@ class SqliteDriver:
                               (row[0], rename[row[1]], *row[2:]))
 
     def enroll(self, subjects: list[Any], policy: str | None) -> int:
+        self._require_transaction()
         for subject in subjects:
             self.conn.execute(
                 f"INSERT INTO {self.revisions} ({self.subject}, revision, policy) "
@@ -432,6 +459,7 @@ class SqliteDriver:
 
     def note(self, subjects: list[Any], name: str, *, status: str, reason: str,
              now: str, ref: str | None) -> int:
+        self._require_transaction()
         for subject in subjects:
             self.conn.execute(
                 f"INSERT INTO {self.history_table} ({self.subject}, node, status, "
@@ -445,6 +473,7 @@ class SqliteDriver:
                refs: str | None = None) -> dict[Any, str]:
         """The insert takes the write lock; the merge that may follow sees
         every commit before it."""
+        self._require_transaction()
         out: dict[Any, str] = {}
         for subject in subjects:
             if self.conn.execute(
@@ -487,6 +516,7 @@ class SqliteDriver:
         """The first statement writes, so it takes the database's write lock:
         what the checks read after it, no other writer can change until the
         commit."""
+        self._require_transaction()
         entered: list[Any] = []
         marks = ", ".join("?" * len(archive))
         for subject, revision in sorted(entries, key=lambda e: str(e[0])):

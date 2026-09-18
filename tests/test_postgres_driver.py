@@ -416,3 +416,28 @@ def test_the_driver_needs_only_the_result_methods_it_documents(engine, layout):
         journal.arrive("in", ["s1"])
         assert driver.queued("in") == 1
         conn.rollback()
+
+
+@pytest.mark.parametrize("layout", [RowLayout(), SubjectLayout(), ReadyLayout()],
+                         ids=["row", "subject", "ready"])
+def test_an_autocommitting_executor_is_refused(engine, layout):
+    """Under autocommit every advisory lock is released by the next statement
+    and a revision raised is committed before the rows go: measured, and
+    silent. The driver refuses at its first write, and a guard checks its
+    locks are still held."""
+    from quazardous.grampy import Node
+    metadata = sa.MetaData()
+    tables = layout.tables(metadata, f"grampy_{next(_TABLES)}")
+    metadata.create_all(engine)
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            dag = (Node("a", concurrency=1),)
+            driver = layout.driver(conn.execute, tables, dag)
+            journal = NodeJournal(driver, dag)
+            with pytest.raises(RuntimeError, match="outside a transaction"):
+                journal.forget("a", ["s1"])
+            driver._in_transaction = True      # past the first check: the guard's own
+            with pytest.raises(RuntimeError, match="outside a transaction"):
+                journal.claim("a", 1, candidates=ordered_subjects(["s1"]))
+    finally:
+        metadata.drop_all(engine)

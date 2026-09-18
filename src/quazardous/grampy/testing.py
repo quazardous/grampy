@@ -236,6 +236,9 @@ class JournalContract:
         if not bounds:
             pytest.skip("this driver declares no bound on its statements")
         journal = harness.journal(DIAMOND, clock)
+        # The steady state: a driver may check something once, on its first
+        # write (a PostgreSQL driver checks it runs inside a transaction).
+        journal.claim("start", 1, candidates=harness.candidates(["warm"]))
         candidates = harness.candidates([f"s{i}" for i in range(30)])
         with harness.statements() as sent:
             taken = journal.claim("start", 30, candidates=candidates)

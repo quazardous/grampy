@@ -212,6 +212,14 @@ SQLite runs in your process: there is no round trip to save, so the
 PostgreSQL layouts above have no SQLite counterpart. What pays here is reading
 fewer rows.
 
+## A transaction around every call
+
+The journal never opens a transaction and never commits: **your code does,
+around each journal call.** Its guarantees live inside that transaction — the
+locks a claim takes, the writes made of two statements — so an executor that
+autocommits would void them all without an error. Both SQL drivers refuse it:
+their first write raises, and says so.
+
 ## Writing a driver
 
 Implement `quazardous.grampy.journal.JournalDriver` — a few storage operations,
