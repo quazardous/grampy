@@ -23,6 +23,9 @@ const KEPT_PER_BIN = 16;
 const BAG = { w: 22, h: 13, columns: 3, rows: 4, x: 9, y: 10, gapX: 24, gapY: 16 };
 const KEPT_IN_WASTE = 24;
 const TICK_MS = 500;
+//: How long the bricks of a bag are given to slide together
+//: before the packet seals over them.
+const GATHER_MS = 620;
 
 const $ = (id) => document.getElementById(id);
 const bench = $("bench");
@@ -165,10 +168,12 @@ function describe(spec) {
 
 // -- where a brick goes --------------------------------------------------------
 
-function bagSlot(bin, index) {
+function bagSlot(index) {
+  // INSIDE THE BIN'S OWN GROUP, which is already translated to it: adding the
+  // bin's position here would place the packet twice as far and off-screen.
   const i = index % (BAG.columns * BAG.rows);
-  return { x: bin.x + BAG.x + (i % BAG.columns) * BAG.gapX,
-           y: bin.y + BAG.y + Math.floor(i / BAG.columns) * BAG.gapY };
+  return { x: BAG.x + (i % BAG.columns) * BAG.gapX,
+           y: BAG.y + Math.floor(i / BAG.columns) * BAG.gapY };
 }
 
 function inBin(brick) {
@@ -177,8 +182,8 @@ function inBin(brick) {
   // slot, so they converge instead of scattering, and the packet takes their
   // place once they have met.
   if (brick.bag && bin.packets.has(brick.bag)) {
-    const at = bagSlot(bin, bin.packets.get(brick.bag).index);
-    return { x: at.x, y: at.y };
+    const at = bagSlot(bin.packets.get(brick.bag).index);   // bin-local
+    return { x: bin.x + at.x, y: bin.y + at.y };            // …on the floor
   }
   return {
     x: bin.x + 10 + scatter(brick.id, 1) * (BIN.w - 20 - BRICK.w),
@@ -187,7 +192,7 @@ function inBin(brick) {
   };
 }
 
-function drawBags(bags, effects) {
+function drawBags(bags, effects, layer) {
   const live = new Set();
   for (const bag of bags) {
     const bin = bins[bag.colour];
@@ -195,7 +200,7 @@ function drawBags(bags, effects) {
     live.add(bag.id);
     if (bin.packets.has(bag.id)) continue;
     const index = bin.packets.size;
-    const at = bagSlot(bin, index);
+    const at = bagSlot(index);
     const g = el("g", { class: `packet ${bag.colour}`, "data-bag": bag.id,
                         transform: `translate(${at.x},${at.y})` }, bin.layer);
     el("rect", { class: "wrap", width: BAG.w, height: BAG.h, rx: 3 }, g);
@@ -203,10 +208,19 @@ function drawBags(bags, effects) {
     text(g, { x: BAG.w / 2, y: BAG.h - 2.5, "text-anchor": "middle", class: "tally" },
          String(bag.size));
     bin.packets.set(bag.id, { index, g });
-    // THE MOMENT THEY MERGE: a puff where the bricks met.
-    Lab.puff(effects, at.x, at.y);
-    g.classList.add("sealing");
-    setTimeout(() => g.classList.remove("sealing"), 700);
+    // LET THEM ARRIVE FIRST. The slot is handed to the bricks on this very
+    // frame, so they are still sliding towards it: the puff belongs to the
+    // moment they meet, not to the moment the bag was named.
+    g.classList.add("waiting");
+    setTimeout(() => {
+      g.classList.remove("waiting");
+      g.classList.add("sealing");
+      Lab.puff(effects, bin.x + at.x, bin.y + at.y);
+      // THEY BECAME THE PACKET: leaving them on top of it would show five
+      // bricks and a bag where there is one bag.
+      for (const brick of layer.querySelectorAll(`[data-bag="${bag.id}"]`)) brick.remove();
+      setTimeout(() => g.classList.remove("sealing"), 700);
+    }, GATHER_MS);
   }
   for (const bin of Object.values(bins)) {
     for (const [id, packet] of bin.packets) {
@@ -290,7 +304,7 @@ function render(state) {
 
   const layer = $("bricks");
   const effects = $("effects");
-  drawBags(state.bags || [], effects);
+  drawBags(state.bags || [], effects, layer);
   const alive = new Set();
   const slots = new Map();
   const overflow = {};
@@ -328,6 +342,7 @@ function render(state) {
     g.classList.toggle("working", brick.place === "station");
     g.classList.toggle("selected", brick.id === selected);
     g.classList.remove("returnable");
+    if (brick.bag) g.dataset.bag = brick.bag;
 
     if (revealing) {
       Lab.paint(g, brick, true, colours, brick.crate === "salvage");

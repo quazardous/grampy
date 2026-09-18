@@ -184,6 +184,8 @@ class World:
         #: one group shares that token — grampy writes it on their rows and
         #: keeps it after they conclude — so it is the bag's own name.
         self.bags: dict[str, dict[str, Any]] = {}
+        #: Promised while the bricks are still at the packing bench.
+        self.bagging: dict[str, dict[str, Any]] = {}
         self.bag_of: dict[int, str] = {}
         self.shipped_at: dict[int, float] = {}
         self._returns: dict[int, float] = {}
@@ -328,8 +330,11 @@ class World:
             self._log(f'items.claim("{node}", {free}, candidates=…)'
                       f'  # {[b.id for b in lease]}')
             if node == "pack":
-                self.bags[lease.token] = {"colour": lease[0].colour,
-                                          "size": len(lease), "born": self.elapsed}
+                # THE BAG IS NAMED NOW, but it does not exist until its bricks
+                # arrive: the token is only a promise while they are still
+                # being packed.
+                self.bagging[lease.token] = {"colour": lease[0].colour,
+                                             "size": len(lease)}
                 for brick in lease:
                     self.bag_of[brick.id] = lease.token
             for brick in lease:
@@ -344,6 +349,17 @@ class World:
             progress = self.journal.progress(brick_id)
             if progress.get("pack") == NODE_DONE:
                 self.finished[brick_id] = ("shipped", self.elapsed)
+                # THE BAG EXISTS WHEN THE LAST OF ITS BRICKS HAS ARRIVED —
+                # not when the first one did, or it would seal over bricks
+                # still on their way to it.
+                token = self.bag_of.get(brick_id)
+                promised = self.bagging.get(token) if token is not None else None
+                if promised is not None:
+                    here = sum(1 for b, t in self.bag_of.items()
+                               if t == token and b in self.finished)
+                    if here >= promised["size"]:
+                        self.bags[token] = {**self.bagging.pop(token),
+                                            "born": self.elapsed}
                 self.shipped_at[brick_id] = self.elapsed
                 self.shipped += 1
                 self.sorted[self.bricks[brick_id].colour] += 1
