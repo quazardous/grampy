@@ -113,10 +113,47 @@ would. `skip(name, candidates=…, limit=…)` works the same way.
 
 ## What to watch
 
+`journal.snapshot(candidates)` gives, per node, what grampy alone can
+compute right — the rest (sampling, history, dashboards, thresholds, alerts)
+is yours, since it depends on your tools and your business:
+
+| key | what it says |
+|---|---|
+| `running`, `scheduled`, `done`, … | rows per status, as `journal.counts` |
+| `oldest_running` | seconds the longest-running row has run — a stuck worker, before `expire` |
+| `next_due` | seconds until the earliest retry is due; negative when overdue |
+| `waiting`, `oldest_waiting` | a lane's arrivals, and how long the oldest has waited |
+| `ready` | how many candidates a claim could take now, by the claim's own rule |
+| `oldest_ready` | seconds since the oldest of those became ready — starvation |
+
+Read between two samples: **a growing node** is `ready` rising; **a starving
+one** is `oldest_ready` rising while `ready` does not fall; **a stuck worker**
+is `oldest_running` past the node's lease. `ready` needs your candidates and
+counts before rate and concurrency limits; without candidates, the snapshot
+gives only what the journal knows.
+
+It reads, never writes. On the PostgreSQL layouts `ready` is one statement per
+node. On the bundled benchmark — 100,000 subjects, five nodes, without the
+indexes above — a whole snapshot takes 16 statements and about 1 s with your
+candidates, 11 statements and 0.4–0.6 s without: fine for a sample every
+minute, too much for every claim. `nodes=` narrows it to the ones you watch.
+
+As Prometheus metrics, with no dependency:
+
+```python
+def metrics(snapshot, prefix="grampy"):
+    lines = []
+    for node, values in snapshot.items():
+        for key, value in values.items():
+            if value is not None:
+                lines.append(f'{prefix}_{key}{{node="{node}"}} {value}')
+    return "\n".join(lines) + "\n"
+```
+
+Also worth a look:
+
 - **The history's size**, and how old its oldest row is: it tells whether
   pruning keeps up.
-- **`status_counts` per node** (`journal.counts`): a node whose `running`
-  count stays up while its workers are idle has leases to expire.
 - **The claim's page query**, the statement you will see most: it carries
   your candidates. Its cost is yours as much as grampy's; `EXPLAIN` it with
   your candidates to see whether your own filter is indexed.

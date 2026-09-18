@@ -359,6 +359,13 @@ class PostgresCommon:
                               a.c.refs)
                     .where(a.c.node == name, self._in(subject, list(subjects)))).fetchall()}
 
+    def _waiting_since(self, name: str) -> dict[str, str]:
+        """`{"waiting": first arrival}` of a lane, empty when none waits."""
+        a = self._need_arrivals()
+        first = self._execute(sa.select(sa.func.min(a.c.arrived_at))
+                              .where(a.c.node == name)).fetchone()[0]
+        return {} if first is None else {"waiting": first}
+
     def queued(self, name: str) -> int:
         a = self._need_arrivals()
         return int(self._execute(
@@ -582,6 +589,40 @@ class PostgresDriver(PostgresCommon):
                 where=sa.and_(t.c.status == Status.SCHEDULED, t.c.started_at <= now))
             .returning(self._subject)).fetchall()
         return [row[0] for row in rows]
+
+    def ready_count(self, name: str, candidates: Any, *, parents: tuple[str, ...],
+                    after: tuple[str, ...], now: str,
+                    version: str | None) -> tuple[int, str | None]:
+        """HOW MANY CANDIDATES A CLAIM OF `name` COULD TAKE NOW, and when the
+        oldest of them became ready — ONE statement, counted in SQL by the
+        rule the claim applies: no row for `name` (or only a retry due), every
+        parent satisfying, no row on a node of `after`, pinned to `version`
+        or to none. For a node joining its parents plainly."""
+        t, r = self.table, self.revisions
+        key = self._subject.key
+        c = _plain(candidates)
+        candidate = list(c.c)[0]
+        held, later, parent = t.alias("held"), t.alias("later"), t.alias("parent")
+        seen = r.alias("seen")
+        conditions = [~sa.exists().where(
+            held.c[key] == candidate, held.c.node == name,
+            ~sa.and_(held.c.status == Status.SCHEDULED, held.c.started_at <= now))]
+        if parents:
+            conditions.append(self.parents_concluded(parents, candidate))
+        if after:
+            conditions.append(~sa.exists().where(
+                later.c[key] == candidate, later.c.node.in_(list(after))))
+        if version is not None:
+            conditions.append(sa.or_(seen.c.version.is_(None), seen.c.version == version))
+        since = (sa.select(sa.func.max(parent.c.finished_at))
+                 .where(parent.c[key] == candidate, parent.c.node.in_(list(parents)))
+                 .scalar_subquery() if parents else sa.null())
+        ready = (sa.select(candidate.label("subject"), since.label("since"))
+                 .select_from(c.outerjoin(seen, seen.c[self._rev_subject.key] == candidate))
+                 .where(*conditions).distinct().subquery("ready"))
+        count, first = self._execute(
+            sa.select(sa.func.count(), sa.func.min(ready.c.since))).fetchone()
+        return int(count), first
 
     def skip_where(self, name: str, candidates: Any, *, parents: tuple[str, ...],
                    now: str, version: str | None, limit: int | None = None) -> list[Any]:
@@ -865,6 +906,15 @@ class PostgresDriver(PostgresCommon):
             t, {self._subject.key: entering, "started_at": [waiting[x][1] for x in entering]},
             node=name, status=Status.DONE, finished_at=now))
         return entering
+
+    def node_times(self, name: str, *, waiting: bool) -> dict[str, str]:
+        t = self.table
+        out = {r[0]: r[1] for r in self._execute(
+            sa.select(t.c.status, sa.func.min(t.c.started_at))
+            .where(t.c.node == name, t.c.status.in_([Status.RUNNING, Status.SCHEDULED]))
+            .group_by(t.c.status)).fetchall()}
+        out.update(self._waiting_since(name) if waiting else {})
+        return out
 
     def status_counts(self, name: str) -> dict[str, int]:
         t = self.table

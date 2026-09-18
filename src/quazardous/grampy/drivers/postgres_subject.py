@@ -231,6 +231,32 @@ class PostgresSubjectDriver(PostgresCommon):
             .returning(self._subject)).fetchall()
         return [r[0] for r in rows]
 
+    def ready_count(self, name: str, candidates: Any, *, parents: tuple[str, ...],
+                    after: tuple[str, ...], now: str,
+                    version: str | None) -> tuple[int, str | None]:
+        """`PostgresDriver.ready_count`, read in each subject's document."""
+        s = self.subjects
+        c = _plain(candidates)
+        candidate = list(c.c)[0]
+        mine = s.alias("mine")
+        own = mine.c.nodes.op("->", return_type=JSONB)(name)
+        conditions = [sa.or_(own.is_(None), sa.and_(
+            self._field(name, "status", mine.c.nodes) == Status.SCHEDULED,
+            self._field(name, "started_at", mine.c.nodes) <= now))]
+        conditions += [self._field(p, "status", mine.c.nodes).in_(NODE_SATISFYING)
+                       for p in parents]
+        conditions += [mine.c.nodes.op("->", return_type=JSONB)(d).is_(None) for d in after]
+        if version is not None:
+            conditions.append(sa.or_(mine.c.version.is_(None), mine.c.version == version))
+        ends = [self._field(p, "finished_at", mine.c.nodes) for p in parents]
+        since = (sa.func.greatest(*ends) if len(ends) > 1 else ends[0]) if ends else sa.null()
+        ready = (sa.select(candidate.label("subject"), since.label("since"))
+                 .select_from(c.outerjoin(mine, mine.c[self._key] == candidate))
+                 .where(*conditions).distinct().subquery("ready"))
+        count, first = self._execute(
+            sa.select(sa.func.count(), sa.func.min(ready.c.since))).fetchone()
+        return int(count), first
+
     def skip_where(self, name: str, candidates: Any, *, parents: tuple[str, ...],
                    now: str, version: str | None, limit: int | None = None) -> list[Any]:
         """`skip` IN ONE UPSERT, instead of reading every candidate page.
@@ -468,6 +494,15 @@ class PostgresSubjectDriver(PostgresCommon):
                 for subject, nodes in self._execute(
                     sa.select(self._subject, self.subjects.c.nodes)
                     .where(self._in(self._subject, list(subjects)))).fetchall()}
+
+    def node_times(self, name: str, *, waiting: bool) -> dict[str, str]:
+        status, started = self._field(name, "status"), self._field(name, "started_at")
+        out = {r[0]: r[1] for r in self._execute(
+            sa.select(status, sa.func.min(started)).select_from(self.subjects)
+            .where(status.in_([Status.RUNNING, Status.SCHEDULED]))
+            .group_by(status)).fetchall()}
+        out.update(self._waiting_since(name) if waiting else {})
+        return out
 
     def status_counts(self, name: str) -> dict[str, int]:
         status = self._field(name, "status")

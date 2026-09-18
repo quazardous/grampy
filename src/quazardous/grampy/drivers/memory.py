@@ -387,6 +387,19 @@ class MemoryDriver:
                     out[s] = max(out.get(s, ""), e["archived_at"])
         return out
 
+    def node_times(self, name: str, *, waiting: bool) -> dict[str, str]:
+        out: dict[str, str] = {}
+        with self._lock:
+            for (_, n), row in self.rows.items():
+                if n == name and row.status in (Status.RUNNING, Status.SCHEDULED):
+                    if row.status not in out or row.started_at < out[row.status]:
+                        out[row.status] = row.started_at
+            if waiting:
+                arrived = [a.arrived_at for (_, n), a in self.waiting.items() if n == name]
+                if arrived:
+                    out["waiting"] = min(arrived)
+        return out
+
     def status_counts(self, name: str) -> dict[str, int]:
         counts: dict[str, int] = {}
         with self._lock:

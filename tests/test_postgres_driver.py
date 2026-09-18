@@ -724,3 +724,46 @@ def test_a_claim_where_every_candidate_moved_past_reads_no_page_by_page(engine, 
         assert journal.claim("left", 30, candidates=ordered_subjects(subjects)) == []
         assert len(sent) <= 2, f"{len(sent)} statements to take nothing"
         conn.rollback()
+
+
+@pytest.mark.parametrize("layout", [RowLayout(), SubjectLayout(), ReadyLayout()],
+                         ids=["row", "subject", "ready"])
+@pytest.mark.parametrize("versioned", [False, True], ids=["tuple", "graph"])
+def test_ready_counted_in_one_read_equals_the_walk(engine, layout, versioned):
+    """A SNAPSHOT'S `ready`, counted in SQL (`ready_count`), must be what the
+    journal's own walk counts — on every progress of the contract's sweep,
+    a retry due and one not yet due, and a subject of another graph."""
+    from quazardous.grampy import Document, Graph, Status
+    from quazardous.grampy.testing import DIAMOND, _progresses
+
+    progresses = [*_progresses(),
+                  {"start": Status.DONE, "right": Status.SCHEDULED},
+                  {"start": Status.SCHEDULED}, {"start": Status.DONE}]
+    subjects = [f"s{i}" for i in range(len(progresses))]
+    dag = Graph(Document("sweep"), DIAMOND) if versioned else DIAMOND
+
+    def snapshot(fast):
+        with engine.connect() as conn, conn.begin():
+            metadata = sa.MetaData()
+            tables = layout.tables(metadata, f"grampy_{next(_TABLES)}")
+            metadata.create_all(conn)
+            driver = layout.driver(conn.execute, tables, DIAMOND)
+            if not fast:
+                driver.ready_count = None                 # the journal walks instead
+            for subject, progress in zip(subjects, progresses, strict=True):
+                layout.seed(conn, tables, subject, progress, driver)
+            if versioned:                                 # the last one is another graph's
+                t = tables.get("subjects", tables.get("revisions"))
+                conn.execute(postgresql.insert(t).values(
+                    subject=subjects[-1], revision=0, version="elsewhere",
+                    **({"nodes": {}} if "subjects" in tables else {}))
+                    .on_conflict_do_update(index_elements=["subject"],
+                                           set_={"version": "elsewhere"}))
+            journal = NodeJournal(driver, dag, clock=lambda: "2026-01-01T00:10:00+00:00")
+            snap = journal.snapshot(ordered_subjects(subjects))
+            conn.rollback()
+            return {n: (v.get("ready"), v.get("oldest_ready")) for n, v in snap.items()}
+
+    fast, walked = snapshot(True), snapshot(False)
+    assert fast == walked
+    assert any(ready for ready, _ in fast.values()), "the sweep must count something"

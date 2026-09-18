@@ -313,6 +313,13 @@ class JournalDriver(CoreDriver, VersionDriver, LimitDriver, LaneDriver, ReadingD
     the driver's clock then reads the time with the first page instead of in
     a statement of its own.
 
+    OPTIONAL, `node_times(name, *, waiting) -> {key: time}`: the earliest
+    `started_at` of `name`'s `running` rows and of its `scheduled` rows (its
+    next retry due), under those statuses as keys, and — when `waiting` —
+    the earliest `arrived_at` of its lane's arrivals, under `"waiting"`; a
+    key left out when nothing stands there. `journal.snapshot` reads it for
+    its ages; without it, the ages are None and the counts remain.
+
     OPTIONAL, `progress_many(subjects) -> {subject: progress}` and
     `rewrite_many(subjects, *, rename, drop, version, now)`: `progress` and
     `rewrite` for many subjects at once — a subject without rows may be left

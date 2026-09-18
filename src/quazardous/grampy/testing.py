@@ -1460,6 +1460,61 @@ class JournalContract:
         assert journal.skip("right", candidates=harness.candidates(["s1"])) == 0
         assert journal.progress("s1")["right"] == Status.FAILED
 
+    # -- monitoring ---------------------------------------------------------
+
+    SNAPSHOT_PROGRESS = {
+        "fresh": {}, "started": {"start": Status.RUNNING},
+        "forked": {"start": Status.DONE},
+        "half": {"start": Status.DONE, "left": Status.DONE},
+        "busy": {"start": Status.DONE, "left": Status.RUNNING},
+        "retry": {"start": Status.DONE, "right": Status.SCHEDULED},
+        "moved": {"start": Status.DONE, "end": Status.DONE},
+    }
+
+    def _seeded(self, harness, clock):
+        journal = harness.journal(DIAMOND, clock)
+        for subject, progress in self.SNAPSHOT_PROGRESS.items():
+            harness.seed(journal, subject, progress)
+        return journal
+
+    def test_a_snapshot_counts_ready_what_a_claim_takes(self, harness, clock):
+        """`ready` IS THE CLAIM'S RULE: for each node, the count a snapshot
+        gives is what an unbounded claim then takes — a subject past the
+        node, held, or with a parent unfinished left out alike."""
+        subjects = list(self.SNAPSHOT_PROGRESS)
+        clock.now = "2026-01-01T00:10:00+00:00"
+        snap = self._seeded(harness, clock).snapshot(harness.candidates(subjects))
+        for n in DIAMOND:
+            taken = self._claim(harness, self._seeded(harness, clock), n.name, subjects,
+                                limit=100)
+            assert snap[n.name]["ready"] == len(taken), (
+                f"{n.name}: snapshot says {snap[n.name]['ready']}, a claim took {taken}")
+
+    def test_a_snapshot_ages_what_stands_at_each_node(self, harness, clock):
+        """Seconds, from the rows' own times: the longest-running row, the
+        retry due first (negative when overdue), the oldest ready subject."""
+        subjects = list(self.SNAPSHOT_PROGRESS)
+        clock.now = "2026-01-01T00:10:00+00:00"            # the rows are from 00:00
+        journal = self._seeded(harness, clock)
+        snap = journal.snapshot(harness.candidates(subjects))
+        assert snap["start"]["running"] == 1 and snap["start"]["oldest_running"] == 600
+        assert snap["right"]["scheduled"] == 1 and snap["right"]["next_due"] == -600
+        assert snap["left"]["oldest_ready"] == 600, "ready since start concluded"
+        assert snap["start"]["oldest_ready"] is None, "no parent, no clock"
+        assert snap["end"]["oldest_running"] is None and snap["end"]["next_due"] is None
+        bare = journal.snapshot(nodes=["start"])
+        assert list(bare) == ["start"] and "ready" not in bare["start"], (
+            "without candidates, only what the journal knows")
+
+    def test_a_snapshot_ages_a_lane_s_oldest_arrival(self, harness, clock):
+        journal = harness.journal(LISTING, clock)
+        clock.now = T0
+        journal.arrive("arrive", ["s1", "s2"])
+        clock.now = _at(5)
+        snap = journal.snapshot(harness.candidates(["s1", "s2"]))
+        assert snap["arrive"]["waiting"] == 2 and snap["arrive"]["oldest_waiting"] == 300
+        assert "ready" not in snap["arrive"], "a lane is settled, never claimed"
+
     # -- adopt / forget / release -------------------------------------------
 
     def test_adopt_records_done_and_never_overwrites(self, harness, journal):

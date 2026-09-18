@@ -176,6 +176,8 @@ def operations(j: NodeJournal, items: sa.Table, n: int) -> dict[str, Callable[[]
         "claim + conclude 30 at publish": claim_and_conclude("publish"),
         "forget parse on 30 subjects": lambda: j.forget("parse", list(range(0, 90, 3))),
         f"skip sweep of enrich over all {n:,}": lambda: j.skip("enrich", candidates=everyone),
+        "snapshot of every node, with candidates": lambda: len(j.snapshot(everyone)),
+        "snapshot of every node, without candidates": lambda: len(j.snapshot()),
     }
 
 

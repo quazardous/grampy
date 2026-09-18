@@ -20,6 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `journal.snapshot(candidates)` and `Items.snapshot` give, per node, what to
+  monitor: rows per status, the oldest running row, the next retry due, a
+  lane's waiting arrivals and their age, and — with your candidates — how many
+  a claim could take now and how long the oldest has been ready. A growing, a
+  starving or a stuck node shows between two samples; collecting, charting
+  and alerting stay yours. On PostgreSQL the ready count is one statement per
+  node. A driver of your own may offer `node_times` and `ready_count`.
+
 ## [0.5.1] - 2026-09-18
 
 ### Fixed

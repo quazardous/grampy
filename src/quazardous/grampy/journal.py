@@ -722,6 +722,80 @@ class NodeJournal(_Lanes, _Migration):
             out[Outcome.WAITING] = int(self.driver.queued(name))
         return out
 
+    def snapshot(self, candidates: Any = None, *,
+                 nodes: Iterable[str] | None = None) -> dict[str, dict[str, Any]]:
+        """WHERE EACH NODE STANDS, for monitoring — `{node: {…}}`, plain
+        numbers an application samples, charts and alerts on:
+
+            <status>            how many rows, as `counts` gives them
+            waiting             a lane's arrivals waiting (lanes only)
+            oldest_running      seconds the longest-running row has run
+            next_due            seconds until the earliest retry is due
+                                (negative: overdue, not yet claimed)
+            oldest_waiting      seconds the oldest arrival has waited (lanes)
+            ready               with `candidates`, for a node a claim takes:
+                                how many the rule would let a claim take now
+            oldest_ready        seconds since the oldest of those became
+                                ready — its last parent concluded; None for
+                                a node without parents
+
+        A time is None when nothing stands there, or when the driver keeps
+        no times (`node_times`, optional). `ready` is the claim's own rule
+        — parents, joins, choices, versions — before rate and concurrency
+        limits; reading it walks the candidates, so give only the nodes you
+        watch (`nodes`) when they are many. Nothing is written.
+
+        A GROWING NODE shows as `ready` rising between samples; A STARVING
+        ONE as `oldest_ready` rising while `ready` does not fall; A STUCK
+        WORKER as `oldest_running` past the node's lease."""
+        _require(self.driver, "reading", "journal.snapshot")
+        now = self._clock()
+        times = getattr(self.driver, "node_times", None)
+        wanted = [node(x, self.dag).name for x in nodes] if nodes is not None else None
+        out: dict[str, dict[str, Any]] = {}
+        for n in self.dag:
+            if wanted is not None and n.name not in wanted:
+                continue
+            entry: dict[str, Any] = dict(self.counts(n.name))
+            seen = times(n.name, waiting=n.lane is not None) if times is not None else {}
+            entry["oldest_running"] = _age(now, seen.get(Status.RUNNING))
+            since_due = _age(now, seen.get(Status.SCHEDULED))
+            entry["next_due"] = None if since_due is None else -since_due
+            if n.lane is not None:
+                entry["oldest_waiting"] = _age(now, seen.get("waiting"))
+            if candidates is not None and n.lane is None and n.wait is None:
+                entry["ready"], entry["oldest_ready"] = self._ready(n, candidates, now)
+            out[n.name] = entry
+        return out
+
+    def _ready(self, n: Node, candidates: Any, now: str) -> tuple[int, float | None]:
+        """How many candidates the rule lets a claim of `n` take now, and
+        the age of the oldest of them — read, never written."""
+        after = tuple(sorted(descendants(n.name, self.dag)))
+        # A DRIVER MAY COUNT IN ONE READ (`ready_count`, optional) for a node
+        # joining its parents plainly; a custom join takes the walk below.
+        fast = getattr(self.driver, "ready_count", None)
+        if fast is not None and not n.custom_join:
+            count, oldest = fast(n.name, candidates, parents=n.parents, after=after, now=now,
+                                 version=self.version)
+            return count, _age(now, oldest)
+        parents = n.parents if not n.custom_join else ()
+        ready, first, seen = 0, None, set()
+        for page in self.driver.scan(candidates, name=n.name,
+                                     nodes=(n.name, *n.parents, *after), parents=parents,
+                                     page=SNAPSHOT_PAGE, now=now, after=after):
+            for e in page:
+                if e.subject in seen or not self._mine(e):
+                    continue
+                seen.add(e.subject)
+                if not self._takable(n, after, _due_away(n.name, e, now), True):
+                    continue
+                ready += 1
+                since = _ready_at(n, e)
+                if since is not None and (first is None or since < first):
+                    first = since
+        return ready, _age(now, first)
+
     def node_for_state(self, state: str) -> str | None:
         """The node whose WORKING state this is, if any.
 
@@ -748,3 +822,15 @@ def _due_away(name: str, entry: Entry, now: str) -> dict[str, str]:
     if entry.rows.get(name) == Status.SCHEDULED and entry.due.get(name, now) <= now:
         return {k: v for k, v in entry.rows.items() if k != name}
     return entry.rows
+
+
+#: HOW MANY CANDIDATES A SNAPSHOT READS AT ONCE: it reads them all, so in
+#: large pages — one statement for thousands, not for two hundred.
+SNAPSHOT_PAGE = 5000
+
+
+def _age(now: str, then: str | None) -> float | None:
+    """Seconds from `then` to `now`, both in the journal's format."""
+    if then is None:
+        return None
+    return (datetime.fromisoformat(now) - datetime.fromisoformat(then)).total_seconds()

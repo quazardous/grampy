@@ -295,6 +295,16 @@ class Items:
         read = self.journal.progress_many([self.adapter.id_of(i) for i in items])
         return [(i, read.get(self.adapter.id_of(i), {})) for i in items]
 
+    def snapshot(self, candidates: Any = None, *,
+                 nodes: Iterable[str] | None = None) -> dict[str, dict[str, Any]]:
+        """Where each node stands, for monitoring (`NodeJournal.snapshot`):
+        the candidates may be your objects. `ready` counts what the graph's
+        rule allows; items your adapter turns away (`applies`) are among
+        them, since the journal cannot know."""
+        if candidates is not None:
+            _, candidates = self._subjects(candidates)
+        return self.journal.snapshot(candidates, nodes=nodes)
+
     def history(self, item: Any) -> list[dict[str, Any]]:
         """Every row forget, release or a loop took away from this item."""
         return self.journal.history(self.adapter.id_of(item))

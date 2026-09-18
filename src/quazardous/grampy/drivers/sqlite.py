@@ -595,6 +595,19 @@ class SqliteDriver:
                 f"GROUP BY {self.subject}", (name, reason, *chunk)).fetchall())
         return counts
 
+    def node_times(self, name: str, *, waiting: bool) -> dict[str, str]:
+        out = dict(self.conn.execute(
+            f"SELECT status, MIN(started_at) FROM {self.table} "
+            f"WHERE node = ? AND status IN (?, ?) GROUP BY status",
+            (name, Status.RUNNING, Status.SCHEDULED)).fetchall())
+        if waiting:
+            first = self.conn.execute(
+                f"SELECT MIN(arrived_at) FROM {self.arrivals_table} WHERE node = ?",
+                (name,)).fetchone()[0]
+            if first is not None:
+                out["waiting"] = first
+        return out
+
     def status_counts(self, name: str) -> dict[str, int]:
         return dict(self.conn.execute(
             f"SELECT status, COUNT(*) FROM {self.table} WHERE node = ? GROUP BY status",

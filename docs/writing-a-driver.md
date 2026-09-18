@@ -113,7 +113,7 @@ never interpreted by the driver.
 
 ## Optional fast paths
 
-Three methods and one flag are optional. Leave them out and the journal does
+Five methods and one flag are optional. Leave them out and the journal does
 the same work through the required ones, with more round trips:
 
 | method | replaces | condition |
@@ -121,6 +121,8 @@ the same work through the required ones, with more round trips:
 | `skip_where(name, candidates, *, parents, now, version, limit=None)` | `skip` reading every candidate page | writes exactly what the loop would — with `limit`, for the first `limit` eligible candidates; used only for a node joining its parents plainly. `limit` is passed only when the caller sets one |
 | `progress_many(subjects)` | `progress` per subject | in `arrive` and `migrate` |
 | `rewrite_many(subjects, *, rename, drop, version, now)` | `rewrite` per subject | in `migrate` |
+| `ready_count(name, candidates, *, parents, after, now, version)` | walking the candidates for a snapshot's `ready` | counts exactly what a claim could take, and returns the oldest ready time; for a node joining its parents plainly |
+| `node_times(name, *, waiting)` | nothing: without it, a snapshot's ages are None | the earliest `running` and `scheduled` start, and a lane's first arrival |
 | `scan_reads_clock = True` | `now()` before each claim | `scan(now=None)` uses the storage's clock in the page query and yields `Page`s carrying it; used when the journal runs on the driver's clock |
 
 A fast path must give the same result as the loop it replaces. The PostgreSQL
