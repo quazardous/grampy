@@ -160,7 +160,7 @@ class PostgresCommon:
         """The server's clock at this statement, in the journal's format."""
         return self._execute(sa.select(sa.func.to_char(
             sa.func.timezone("UTC", sa.func.statement_timestamp()),
-            'YYYY-MM-DD"T"HH24:MI:SS"+00:00"'))).scalar()
+            'YYYY-MM-DD"T"HH24:MI:SS"+00:00"'))).fetchone()[0]
 
     @contextmanager
     def guard(self, keys: list[str]) -> Iterator[None]:
@@ -247,7 +247,7 @@ class PostgresCommon:
     def queued(self, name: str) -> int:
         a = self._need_arrivals()
         return int(self._execute(
-            sa.select(sa.func.count()).select_from(a).where(a.c.node == name)).scalar())
+            sa.select(sa.func.count()).select_from(a).where(a.c.node == name)).fetchone()[0])
 
     def _need_arrivals(self) -> sa.Table:
         if self.arrivals_table is None:
@@ -495,7 +495,7 @@ class PostgresDriver(PostgresCommon):
                 test = sa.or_(test, self._subject.not_in(
                     sa.select(self._rev_subject).where(r.c.policy.is_not(None))))
             query = query.where(test)
-        return int(self._execute(query).scalar())
+        return int(self._execute(query).fetchone()[0])
 
     def pin(self, subjects: list[Any], version: str) -> int:
         r = self.revisions

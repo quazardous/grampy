@@ -52,6 +52,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still compares equal. `Merge.fn("name")` names a merge function without
   typing its prefix.
 
+### Fixed
+
+- The PostgreSQL driver asked of an `execute` result more than its
+  documentation promises (`.scalar()`, on the clock, the concurrency count and
+  a lane's queue): an application executing through its own driver, honouring
+  the documented `fetchall` / `fetchone` / `rowcount`, failed on its first
+  claim. It now needs only those, and a test holds every layout to it.
+- The documentation says how to settle rows left `running` without a lease by
+  a version before leases: `conclude(…, token=None)` when the work is known
+  done, `release` to hand them back.
+
 ## [0.3.1] - 2026-09-18
 
 ### Fixed

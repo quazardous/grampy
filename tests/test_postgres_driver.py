@@ -381,3 +381,38 @@ def test_a_lane_without_an_arrivals_table_says_so():
     journal = NodeJournal(driver, (Node("in", lane=Lane()),), clock=lambda: "2026-01-01")
     with pytest.raises(ValueError, match="arrivals"):
         journal.driver.arrivals(["s1"], "in")
+
+
+class _DocumentedResult:
+    """What the driver's docstring promises of a result, and nothing more."""
+
+    def __init__(self, result):
+        self._result = result
+        self.rowcount = result.rowcount
+
+    def fetchall(self):
+        return self._result.fetchall()
+
+    def fetchone(self):
+        return self._result.fetchone()
+
+
+@pytest.mark.parametrize("layout", [RowLayout(), SubjectLayout(), ReadyLayout()],
+                         ids=["row", "subject", "ready"])
+def test_the_driver_needs_only_the_result_methods_it_documents(engine, layout):
+    """An application executing through its own driver returns what the
+    docstring lists — `fetchall`, `fetchone`, `rowcount` — and no more."""
+    from quazardous.grampy import Lane, Node
+    with engine.connect() as conn, conn.begin():
+        metadata = sa.MetaData()
+        tables = layout.tables(metadata, f"grampy_{next(_TABLES)}")
+        metadata.create_all(conn)
+        dag = (Node("in", lane=Lane()), Node("a", parents=("in",), concurrency=1))
+        driver = layout.driver(lambda statement: _DocumentedResult(conn.execute(statement)),
+                               tables, dag)
+        journal = NodeJournal(driver, dag)
+        assert driver.now()
+        assert driver.running("a", None) == 0
+        journal.arrive("in", ["s1"])
+        assert driver.queued("in") == 1
+        conn.rollback()

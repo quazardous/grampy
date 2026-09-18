@@ -130,6 +130,27 @@ Everything you might reach for SQL to do has a call:
 Each of them archives what it takes away, with a reason, so the history stays
 true. A hand-written `DELETE` loses that silently.
 
+## Rows written before leases
+
+A table that already held `running` rows before its application moved to a
+grampy with leases has them with `lease` empty. A worker's `conclude` carries
+its lease token, and a token never matches an empty lease: that is the
+fencing working, not a fault. Those rows are settled once, at the cutover,
+by an operator's call, **`token=None`**, which concludes or fails whoever
+holds the rows:
+
+```python
+# the work those rows stand for is known to be done
+journal.conclude("fetch", subjects, token=None)
+
+# or it is not known: hand the rows back, to be claimed again with a token
+journal.release("fetch", older_than=cutover_time)
+```
+
+`release` archives the rows it takes away (reason `Reason.RELEASE`), so the
+history keeps them. From then on every claim hands out a token, and only its
+holder concludes.
+
 ## Where to put the tables
 
 **In the same database as your own.** The journal never commits: it writes
