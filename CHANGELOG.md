@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-18
+
 ### Fixed
 
 - The adapter examples in the README and the items page crashed as written:
@@ -169,6 +171,7 @@ The first release. Installed as `grampy-q`, imported as
   claimers, claims racing a requeue) and random sequences of operations on
   random graphs checked step by step against the rule.
 
-[Unreleased]: https://github.com/quazardous/grampy/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/quazardous/grampy/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/quazardous/grampy/releases/tag/v0.3.1
 [0.3.0]: https://github.com/quazardous/grampy/releases/tag/v0.3.0
 [0.2.0]: https://github.com/quazardous/grampy/releases/tag/v0.2.0
