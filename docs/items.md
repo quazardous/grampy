@@ -149,12 +149,14 @@ right choice when you already hold ids and no objects.
 | | |
 |---|---|
 | `admit(items)` | record each item's policy, once |
-| `skip(node, candidates=…)` · `settle(candidates)` | the janitor, in items' terms |
+| `skip(node, candidates=…, limit=…)` · `settle(candidates, limit=…)` | the janitor, in items' terms |
 | `arrive(node, items, urgent=False)` | a lane, each item bringing its `ref_of` |
 | `claim(node, limit, candidates=…)` | items in (reused) or a driver query; an `ItemLease` out |
 | `conclude(node, items, token=None, status=…)` | asks `branch` for a choice |
 | `fail(node, items, token=None)` | |
 | `signal(items, event)` · `progress(item)` · `history(item)` | in items' terms |
+| `progress_many(items)` | each item back with its progress, one read for all |
+| `snapshot(candidates=…, nodes=…)` | where each node stands, for monitoring — see [operating](operating.md#what-to-watch) |
 | `group_of(item)` on the adapter | what makes two subjects belong in one group |
 
 Everything else — `settle`, `expire`, `migrate`, the counts — stays on the

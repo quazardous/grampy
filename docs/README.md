@@ -8,6 +8,11 @@
   you must not write, and what the columns mean.
 - [Drivers and candidates](drivers.md) — the tables you declare, how
   eligibility is passed, and how ids become your own objects.
+- [Writing a driver](writing-a-driver.md) — the capabilities a driver offers,
+  what each method may return, and certifying it with the shared contract.
+- [Operating in production](operating.md) — the indexes worth adding, measured;
+  what grows; the janitor; and monitoring with `journal.snapshot`: a growing,
+  a starving or a stuck node, read between two samples.
 - [Drawings](drawings.md) — Mermaid flowchart, Mermaid state diagram, Graphviz,
   with live counts.
 - [The same notions in other tools](concepts.md) — Graphile Worker, BullMQ,

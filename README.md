@@ -141,6 +141,7 @@ Each line links to [the rules](https://github.com/quazardous/grampy/blob/main/do
 | [rate and concurrency](https://github.com/quazardous/grampy/blob/main/docs/rules.md#rate-limits-and-concurrency) | several bands at once (GCRA, with bursts), a cap per node, per policy |
 | [versions](https://github.com/quazardous/grampy/blob/main/docs/rules.md#versions-and-migration) | subjects pinned to the graph they started on, migrated all or nothing |
 | [items](https://github.com/quazardous/grampy/blob/main/docs/items.md) | speak your objects: handlers name a branch, or give up a step one kind skips |
+| [monitoring](https://github.com/quazardous/grampy/blob/main/docs/operating.md#what-to-watch) | per node: what a claim could take now, since when the oldest waits, the longest-running work, retries due — a growing, starving or stuck node shows between two samples |
 | [drawings](https://github.com/quazardous/grampy/blob/main/docs/drawings.md) | Mermaid flowchart, Mermaid state diagram, Graphviz, with live counts |
 
 ## Storage
@@ -184,7 +185,7 @@ How each notion maps, tool by tool: [the same notions in other tools](https://gi
 - [Writing a driver](https://github.com/quazardous/grampy/blob/main/docs/writing-a-driver.md) — the capabilities, what each method
   may return, certifying with the contract.
 - [Operating in production](https://github.com/quazardous/grampy/blob/main/docs/operating.md) — the indexes worth adding,
-  measured; what grows; the janitor.
+  measured; what grows; the janitor; monitoring.
 - [grampy's tables next to yours](https://github.com/quazardous/grampy/blob/main/docs/your-data.md) — what to read, what never to write.
 - [Drawings](https://github.com/quazardous/grampy/blob/main/docs/drawings.md) — diagrams from a graph.
 - [The same notions in other tools](https://github.com/quazardous/grampy/blob/main/docs/concepts.md) — Graphile Worker,
