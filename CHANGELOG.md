@@ -20,6 +20,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Two more PostgreSQL layouts, picked by the class you instantiate — nothing
+  switches on its own. `PostgresSubjectDriver` keeps one row per subject, its
+  progress in JSONB: a claim reads its page and the progress at once and
+  writes in one statement, 4 to 5 times faster than the row-per-node layout
+  on the bundled benchmark. `PostgresReadyDriver` adds a list of subjects that
+  may be ready; it is correct and proven, and measured no faster on that
+  benchmark, which the documentation says. Both pass the same contract as the
+  original driver, concurrency included.
+- `benchmarks/layouts.py` runs the three layouts on the same data and prints
+  statements and time per operation, to measure your own shape of data.
+
 ## [0.3.1] - 2026-09-18
 
 ### Fixed

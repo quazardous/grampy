@@ -7,6 +7,7 @@ ids and rows per `(subject, node)`; everything else stays yours.
 - [From ids to your objects](#from-ids-to-your-objects)
 - [The drivers that ship](#the-drivers-that-ship)
 - [PostgreSQL: the tables you declare](#postgresql-the-tables-you-declare)
+- [PostgreSQL: three layouts, your choice](#postgresql-three-layouts-your-choice)
 - [SQLite](#sqlite)
 - [Writing a driver](#writing-a-driver)
 
@@ -74,7 +75,7 @@ as they are, and stay the right choice when you already hold ids.
 |---|---|---|
 | `drivers.memory` | nothing | tests, prototypes, one process; the reference the others are confronted with |
 | `drivers.sqlite` | `sqlite3` (standard library) | small deployments, a file shared by several processes |
-| `drivers.postgres` | SQLAlchemy Core (`grampy-q[postgres]`) | production, several machines |
+| `drivers.postgres`, `postgres_subject`, `postgres_ready` | SQLAlchemy Core (`grampy-q[postgres]`) | production, several machines; three layouts, [your choice](#postgresql-three-layouts-your-choice) |
 
 ## PostgreSQL: the tables you declare
 
@@ -116,6 +117,73 @@ journal = NodeJournal(
 eligible = sa.select(jobs.c.job_id).where(jobs.c.state != "done").order_by(jobs.c.priority)
 journal.claim("fetch", 50, candidates=eligible)
 ```
+
+## PostgreSQL: three layouts, your choice
+
+There is more than one right way to lay a journal out in tables, and grampy
+does not pick for you: **each layout is a driver class**, and you instantiate
+the one whose costs suit your workload. Nothing switches on its own. All three
+pass the same contract, concurrency included, and give the same answers.
+
+| driver | tables | a claim | what it costs |
+|---|---|---|---|
+| `postgres.PostgresDriver` | a row per (subject, node), a revision per subject | a page read, a read of its rows, then a seeding insert and the write | the most round trips; a plain index serves "no row for this node" |
+| `postgres_subject.PostgresSubjectDriver` | **one row per subject**: revision, policy, version and every node as JSONB | the page brings the progress; the write is **one** upsert | every write rewrites the subject's row, and two claims on two nodes of one subject wait for each other; "no row for node X" at scale wants an expression index |
+| `postgres_ready.PostgresReadyDriver` | `PostgresDriver`'s, plus a `ready` list | the page reads only the candidates listed as possibly ready for the node | every conclusion lists the children it may unblock, every claim strikes its pair; needs the graph's shape (`graph=`) |
+
+```python
+from quazardous.grampy.drivers.postgres_subject import PostgresSubjectDriver
+
+subjects = sa.Table("job_subjects", metadata,
+    sa.Column("job_id", sa.Text, primary_key=True),
+    sa.Column("revision", sa.Integer, nullable=False),
+    sa.Column("policy", sa.Text),
+    sa.Column("version", sa.Text),
+    sa.Column("nodes", JSONB, nullable=False, server_default="{}"))
+
+journal = NodeJournal(PostgresSubjectDriver(conn.execute, subjects, history,
+                                            subject="job_id"), DAG)
+```
+
+`history`, `limits` and `arrivals` are the same tables in every layout. The
+ready list is `(subject, node)` as primary key and nothing else; a table this
+driver did not write (a migration, rows written by hand) is listed once with
+`driver.refill()`.
+
+**The ready list is a hint, never a decision.** A pair listed means "may have
+become claimable"; the claim still applies every pre-filter and the journal
+still judges every candidate. It is read only where the journal asks for the
+parents' pre-filter, so a node without parents, a node with a custom join and
+a claim waiving its parents read every candidate, as in `PostgresDriver`.
+
+### Measured
+
+`benchmarks/layouts.py`, on a local PostgreSQL 16: a chain fetch → parse →
+(enrich) → match → publish, half the subjects enriched, a third of those
+replayed at `parse`. Statements are counted at the cursor, which is what a
+round trip costs on a real network; times are the median of five runs, and
+rank the layouts rather than predict a remote server.
+
+| 100,000 subjects | row per node | row per subject | ready list |
+|---|---:|---:|---:|
+| claim 30, half ready | 5 st · 516 ms | **3 st · 99 ms** | 6 st · 438 ms |
+| claim 30, 1 in 20 ready | 5 st · 308 ms | **3 st · 59 ms** | 6 st · 298 ms |
+| claim and conclude 30 | 7 st · 273 ms | **5 st · 58 ms** | 8 st · 277 ms |
+| claim 30, every candidate past the node | 169 st · 24.1 s | **85 st · 6.9 s** | 169 st · 26.3 s |
+| forget 30 | 3 st · 4.7 ms | 3 st · 4.3 ms | 4 st · 4.8 ms |
+
+On this workload the subject layout wins every claim, and **the ready list
+gains nothing**: the claim still walks the candidates in their order, and the
+list adds a probe to each rather than removing one. It stays available, and
+proven, for a workload where few subjects are ever ready and the candidates
+are cheap to walk; measure yours before picking it.
+
+The fourth line is the case to watch in any layout: when every candidate
+waiting at a node has a descendant started — a replay that left the later
+steps in place — the claim reads the whole candidate set to take nothing.
+
+Run the bench on your own shape of data: its table sizes and progress are
+at the top of the file.
 
 ## SQLite
 

@@ -17,8 +17,13 @@ pytestmark = pytest.mark.skipif(not DSN, reason="GRAMPY_TEST_PG_DSN is not set")
 
 sa = pytest.importorskip("sqlalchemy")
 
+from sqlalchemy.dialects import postgresql  # noqa: E402
+from sqlalchemy.dialects.postgresql import JSONB  # noqa: E402
+
 from quazardous.grampy import NodeJournal  # noqa: E402
 from quazardous.grampy.drivers.postgres import PostgresDriver  # noqa: E402
+from quazardous.grampy.drivers.postgres_ready import PostgresReadyDriver  # noqa: E402
+from quazardous.grampy.drivers.postgres_subject import PostgresSubjectDriver  # noqa: E402
 from quazardous.grampy.testing import JournalContract  # noqa: E402
 
 _TABLES = itertools.count()
@@ -105,31 +110,114 @@ def keyed_subjects(pairs, subject_type=str):
     return sa.select(values.c.subject, values.c.grampy_key).order_by(values.c.rank)
 
 
+def subject_table(metadata, name, subject_type=str):
+    """The one table of the row-per-subject layout."""
+    return sa.Table(
+        name, metadata,
+        sa.Column("subject", _type(subject_type), primary_key=True),
+        sa.Column("revision", sa.Integer, nullable=False),
+        sa.Column("policy", sa.Text),
+        sa.Column("version", sa.Text),
+        sa.Column("nodes", JSONB, nullable=False, server_default="{}"))
+
+
+class RowLayout:
+    """One row per (subject, node): `PostgresDriver`."""
+
+    def tables(self, metadata, prefix, subject_type=str):
+        return {"table": node_table(metadata, f"{prefix}_nodes", subject_type),
+                "revisions": revision_table(metadata, f"{prefix}_revisions", subject_type),
+                "history": history_table(metadata, f"{prefix}_history", subject_type),
+                "limits": limits_table(metadata, f"{prefix}_limits"),
+                "arrivals": arrivals_table(metadata, f"{prefix}_arrivals", subject_type)}
+
+    def driver(self, execute, tables, dag):
+        return PostgresDriver(execute, tables["table"], tables["revisions"],
+                              tables["history"], subject="subject",
+                              limits=tables["limits"], arrivals=tables["arrivals"])
+
+    def seed(self, conn, tables, subject, progress, driver=None):
+        for name, status in progress.items():
+            conn.execute(sa.insert(tables["table"]).values(
+                subject=subject, node=name, status=status, started_at=SEEDED,
+                finished_at=None if status == "running" else SEEDED))
+
+
+class SubjectLayout:
+    """One row per subject, progress in JSONB: `PostgresSubjectDriver`."""
+
+    def tables(self, metadata, prefix, subject_type=str):
+        return {"subjects": subject_table(metadata, f"{prefix}_subjects", subject_type),
+                "history": history_table(metadata, f"{prefix}_history", subject_type),
+                "limits": limits_table(metadata, f"{prefix}_limits"),
+                "arrivals": arrivals_table(metadata, f"{prefix}_arrivals", subject_type)}
+
+    def driver(self, execute, tables, dag):
+        return PostgresSubjectDriver(execute, tables["subjects"], tables["history"],
+                                     subject="subject", limits=tables["limits"],
+                                     arrivals=tables["arrivals"])
+
+    def seed(self, conn, tables, subject, progress, driver=None):
+        rows = {name: {"status": status, "started_at": SEEDED,
+                       "finished_at": None if status == "running" else SEEDED,
+                       "lease": None}
+                for name, status in progress.items()}
+        t = tables["subjects"]
+        insert = postgresql.insert(t).values(subject=subject, revision=0, nodes=rows)
+        conn.execute(insert.on_conflict_do_update(
+            index_elements=["subject"],
+            set_={"nodes": t.c.nodes.op("||", return_type=JSONB)(insert.excluded.nodes)}))
+
+
+SEEDED = "2026-01-01T00:00:00+00:00"
+
+
+class ReadyLayout(RowLayout):
+    """Row per node plus the ready list: `PostgresReadyDriver`. Seeded rows
+    are written behind the driver's back, so the list is refilled after."""
+
+    def tables(self, metadata, prefix, subject_type=str):
+        tables = super().tables(metadata, prefix, subject_type)
+        tables["ready"] = sa.Table(
+            f"{prefix}_ready", metadata,
+            sa.Column("subject", _type(subject_type), primary_key=True),
+            sa.Column("node", sa.Text, primary_key=True))
+        return tables
+
+    def driver(self, execute, tables, dag):
+        return PostgresReadyDriver(execute, tables["table"], tables["revisions"],
+                                   tables["history"], tables["ready"], graph=dag,
+                                   subject="subject", limits=tables["limits"],
+                                   arrivals=tables["arrivals"])
+
+    def seed(self, conn, tables, subject, progress, driver):
+        super().seed(conn, tables, subject, progress, driver)
+        driver.refill()
+
+
+
+
 class PostgresHarness:
-    def __init__(self, conn):
+    def __init__(self, conn, layout):
         self.conn = conn
+        self.layout = layout
         self.subject_type = str
+        self._tables = {}
 
     def journal(self, dag, clock, subject_type=str, mergers=None):
         self.subject_type = subject_type
-        metadata, n = sa.MetaData(), next(_TABLES)
-        table = node_table(metadata, f"grampy_nodes_{n}", subject_type)
-        revisions = revision_table(metadata, f"grampy_revisions_{n}", subject_type)
-        history = history_table(metadata, f"grampy_history_{n}", subject_type)
-        limits = limits_table(metadata, f"grampy_limits_{n}")
-        arrivals = arrivals_table(metadata, f"grampy_arrivals_{n}", subject_type)
+        metadata = sa.MetaData()
+        tables = self.layout.tables(metadata, f"grampy_{next(_TABLES)}", subject_type)
         metadata.create_all(self.conn)
-        return NodeJournal(
-            PostgresDriver(self.conn.execute, table, revisions, history, subject="subject",
-                           limits=limits, arrivals=arrivals),
-            dag, clock=clock, mergers=mergers)
+        driver = self.layout.driver(self.conn.execute, tables, dag)
+        self._tables[id(driver)] = tables
+        return NodeJournal(driver, dag, clock=clock, mergers=mergers)
 
     def journal_on(self, journal, dag, clock):
-        d = journal.driver
-        return NodeJournal(PostgresDriver(self.conn.execute, d.table, d.revisions,
-                                          d.history_table, subject="subject",
-                                          limits=d.limits_table, arrivals=d.arrivals_table),
-                           dag, clock=clock)
+        tables = self._tables[id(journal.driver)]
+        driver = self.layout.driver(self.conn.execute, tables, dag)
+        self._tables[id(driver)] = tables
+        return NodeJournal(driver, dag, clock=clock)
 
     def candidates(self, subjects):
         return ordered_subjects(subjects, self.subject_type)
@@ -138,32 +226,25 @@ class PostgresHarness:
         return keyed_subjects(pairs, self.subject_type)
 
     def seed(self, journal, subject, progress):
-        for name, status in progress.items():
-            self.conn.execute(sa.insert(journal.driver.table).values(
-                subject=subject, node=name, status=status,
-                started_at="2026-01-01T00:00:00+00:00",
-                finished_at=None if status == "running" else "2026-01-01T00:00:00+00:00"))
+        self.layout.seed(self.conn, self._tables[id(journal.driver)], subject, progress,
+                         journal.driver)
 
     def parents_concluded(self, journal, name, subject):
         return bool(self.conn.execute(
-            sa.select(journal.parents_concluded(name, subject))).scalar())
+            sa.select(journal.parents_concluded(name, subject))).fetchone()[0])
 
     def store(self, dag, clock):
-        return PostgresStore(self.conn.engine, dag, clock)
+        return PostgresStore(self.conn.engine, self.layout, dag, clock)
 
 
 class PostgresStore:
     """Tables COMMITTED on their own connection, so that sessions on other
     connections see them; dropped at `close`."""
 
-    def __init__(self, engine, dag, clock):
-        self.engine, self.dag, self.clock = engine, dag, clock
-        self.metadata, n = sa.MetaData(), next(_TABLES)
-        self.table = node_table(self.metadata, f"grampy_shared_{n}")
-        self.revisions = revision_table(self.metadata, f"grampy_shared_revisions_{n}")
-        self.history = history_table(self.metadata, f"grampy_shared_history_{n}")
-        self.limits = limits_table(self.metadata, f"grampy_shared_limits_{n}")
-        self.arrivals = arrivals_table(self.metadata, f"grampy_shared_arrivals_{n}")
+    def __init__(self, engine, layout, dag, clock):
+        self.engine, self.layout, self.dag, self.clock = engine, layout, dag, clock
+        self.metadata = sa.MetaData()
+        self.tables = layout.tables(self.metadata, f"grampy_shared_{next(_TABLES)}")
         self.metadata.create_all(engine)
 
     def session(self):
@@ -178,9 +259,7 @@ class PostgresSession:
         self.conn = store.engine.connect()
         self.transaction = self.conn.begin()
         self.journal = NodeJournal(
-            PostgresDriver(self.conn.execute, store.table, store.revisions,
-                           store.history, subject="subject", limits=store.limits,
-                           arrivals=store.arrivals),
+            store.layout.driver(self.conn.execute, store.tables, store.dag),
             store.dag, clock=store.clock)
 
     def candidates(self, subjects):
@@ -205,15 +284,29 @@ def engine():
     engine.dispose()
 
 
-class TestPostgresDriver(JournalContract):
+class _OnPostgres(JournalContract):
+    layout: object
+
     @pytest.fixture
     def harness(self, engine):
         with engine.connect() as conn:
             transaction = conn.begin()
             try:
-                yield PostgresHarness(conn)
+                yield PostgresHarness(conn, self.layout)
             finally:
                 transaction.rollback()
+
+
+class TestPostgresDriver(_OnPostgres):
+    layout = RowLayout()
+
+
+class TestPostgresSubjectDriver(_OnPostgres):
+    layout = SubjectLayout()
+
+
+class TestPostgresReadyDriver(_OnPostgres):
+    layout = ReadyLayout()
 
 
 def test_a_table_without_the_node_columns_is_refused():

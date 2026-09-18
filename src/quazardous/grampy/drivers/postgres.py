@@ -131,24 +131,24 @@ def _epoch(moment: Any) -> Any:
     return sa.extract("epoch", sa.cast(moment, sa.TIMESTAMP(timezone=True)))
 
 
-class PostgresDriver:
-    """Node rows in `table`, revisions in `revisions`, written with
-    SQLAlchemy Core."""
+class PostgresCommon:
+    """WHAT EVERY POSTGRESQL LAYOUT SHARES — the history, the limits, the
+    lanes' arrivals, the clock and the guard. None of it depends on how the
+    node rows are laid out, so a layout is a subclass that adds only that.
 
-    def __init__(self, execute: Callable[[Any], Any], table: sa.Table,
-                 revisions: sa.Table, history: sa.Table, *,
-                 subject: str = "subject", limits: sa.Table | None = None,
-                 arrivals: sa.Table | None = None) -> None:
-        for t, needed in ((table, REQUIRED_COLUMNS), (revisions, REVISION_COLUMNS),
-                          (history, HISTORY_COLUMNS)):
-            missing = [c for c in (subject, *needed) if c not in t.c]
-            if missing:
-                raise ValueError(
-                    f"table {t.name!r} lacks the column(s) {missing} — it needs "
-                    f"{subject!r} and {', '.join(needed)}")
+    `subject` names the subject column, the same in every table.
+    """
+
+    def __init__(self, execute: Callable[[Any], Any], history: sa.Table, *,
+                 subject: str, limits: sa.Table | None,
+                 arrivals: sa.Table | None) -> None:
+        missing = [c for c in (subject, *HISTORY_COLUMNS) if c not in history.c]
+        if missing:
+            raise ValueError(
+                f"table {history.name!r} lacks the column(s) {missing} — it needs "
+                f"{subject!r} and {', '.join(HISTORY_COLUMNS)}")
         self._execute = execute
-        self.table = table
-        self.revisions = revisions
+        self._key = subject
         self.history_table = history
         if limits is not None and any(c not in limits.c for c in ("key", "value")):
             raise ValueError(f"table {limits.name!r} lacks key or value — a limits table "
@@ -159,16 +159,169 @@ class PostgresDriver:
             if missing:
                 raise ValueError(f"table {arrivals.name!r} lacks the column(s) {missing}")
         self.arrivals_table = arrivals
-        self._subject = table.c[subject]
-        self._rev_subject = revisions.c[subject]
-
-    # -- write -------------------------------------------------------------
 
     def now(self) -> str:
         """The server's clock at this statement, in the journal's format."""
         return self._execute(sa.select(sa.func.to_char(
             sa.func.timezone("UTC", sa.func.statement_timestamp()),
             'YYYY-MM-DD"T"HH24:MI:SS"+00:00"'))).scalar()
+
+    @contextmanager
+    def guard(self, keys: list[str]) -> Iterator[None]:
+        """Transaction-scoped advisory locks, taken in a statement of their
+        own before the claim reads anything: that claim's statements then
+        see every commit of the claimer they waited for."""
+        self._need_limits()
+        for key in sorted(keys):
+            self._execute(sa.select(sa.func.pg_advisory_xact_lock(
+                sa.func.hashtextextended(key, 0))))
+        yield
+
+    def limits(self, keys: list[str]) -> dict[str, float]:
+        table = self._need_limits()
+        return {row[0]: float(row[1]) for row in self._execute(
+            sa.select(table.c.key, table.c.value).where(table.c.key.in_(list(keys)))
+        ).fetchall() if row[1] is not None}
+
+    def set_limits(self, values: dict[str, float]) -> None:
+        table = self._need_limits()
+        if not values:
+            return
+        insert = postgresql.insert(table).values(
+            [{"key": k, "value": v} for k, v in sorted(values.items())])
+        self._execute(insert.on_conflict_do_update(
+            index_elements=["key"], set_={"value": insert.excluded.value}))
+
+    def _need_limits(self) -> sa.Table:
+        if self.limits_table is None:
+            raise ValueError("this graph limits rate or concurrency: give the "
+                             "driver a `limits` table")
+        return self.limits_table
+
+    def history(self, subject: Any) -> list[dict[str, Any]]:
+        h = self.history_table
+        keys = [*REQUIRED_COLUMNS, "archived_at", "reason"]
+        return [dict(zip(keys, row, strict=True)) for row in self._execute(
+            sa.select(*[h.c[k] for k in keys])
+            .where(h.c[self._key] == subject)
+            .order_by(h.c.archived_at, h.c.node)).fetchall()]
+
+    def note(self, subjects: list[Any], name: str, *, status: str, reason: str,
+             now: str, ref: str | None) -> int:
+        h = self.history_table
+        rows = self._execute(
+            sa.insert(h).values([{self._key: s, "node": name, "status": status,
+                                  "started_at": now, "finished_at": now, "lease": ref,
+                                  "archived_at": now, "reason": reason}
+                                 for s in subjects])
+            .returning(h.c[self._key])).fetchall()
+        return len(rows)
+
+    def arrive(self, name: str, subjects: list[Any], *, ref: str | None, now: str,
+               merge: str, position: str, urgent: bool,
+               refs: str | None = None) -> dict[Any, str]:
+        """One upsert; `xmax = 0` tells a row inserted from a row updated."""
+        a = self._need_arrivals()
+        subject = a.c[self._key]
+        insert = postgresql.insert(a).values(
+            [{self._key: s, "node": name, "ref": ref, "place": now,
+              "arrived_at": now, "urgent": urgent, "refs": refs} for s in sorted(subjects)])
+        merged: dict[str, Any] = {"urgent": sa.or_(a.c.urgent, insert.excluded.urgent)}
+        if merge in ("last", "set"):
+            merged["ref"] = insert.excluded.ref
+        if merge == "set":
+            merged["refs"] = insert.excluded.refs
+        if position == "last":
+            merged["place"] = insert.excluded.place
+        rows = self._execute(
+            insert.on_conflict_do_update(index_elements=[self._key, "node"],
+                                         set_=merged)
+            .returning(subject, sa.literal_column("xmax") == 0)).fetchall()
+        return {row[0]: "queued" if row[1] else "merged" for row in rows}
+
+    def arrivals(self, subjects: list[Any], name: str) -> dict[Any, Arrival]:
+        a = self._need_arrivals()
+        subject = a.c[self._key]
+        return {row[0]: Arrival(row[1], row[2], row[3], bool(row[4]), row[5])
+                for row in self._execute(
+                    sa.select(subject, a.c.ref, a.c.place, a.c.arrived_at, a.c.urgent,
+                              a.c.refs)
+                    .where(a.c.node == name, subject.in_(list(subjects)))).fetchall()}
+
+    def queued(self, name: str) -> int:
+        a = self._need_arrivals()
+        return int(self._execute(
+            sa.select(sa.func.count()).select_from(a).where(a.c.node == name)).scalar())
+
+    def _need_arrivals(self) -> sa.Table:
+        if self.arrivals_table is None:
+            raise ValueError("this graph has a lane: give the driver an "
+                             "`arrivals` table")
+        return self.arrivals_table
+
+    def _rewrite_arrivals(self, subject: Any, *, rename: dict[str, str],
+                          drop: tuple[str, ...]) -> None:
+        """The arrivals waiting in dropped nodes go; those in renamed nodes
+        follow their node."""
+        a = self.arrivals_table
+        if a is None or not (drop or rename):
+            return
+        a_subject = a.c[self._key]
+        if drop:
+            self._execute(sa.delete(a).where(a_subject == subject,
+                                             a.c.node.in_(list(drop))))
+        if rename:
+            columns = [self._key, *ARRIVAL_COLUMNS]
+            waiting = [dict(zip(columns, row, strict=True)) for row in self._execute(
+                sa.delete(a).where(a_subject == subject, a.c.node.in_(list(rename)))
+                .returning(*[a.c[c] for c in columns])).fetchall()]
+            for row in waiting:
+                row["node"] = rename[row["node"]]
+            if waiting:
+                self._execute(sa.insert(a).values(waiting))
+
+    def latest(self, subjects: list[Any], name: str,
+               reason: str | None) -> dict[Any, str]:
+        h = self.history_table
+        subject = h.c[self._key]
+        query = (sa.select(subject, sa.func.max(h.c.archived_at))
+                 .where(subject.in_(list(subjects)), h.c.node == name)
+                 .group_by(subject))
+        if reason is not None:
+            query = query.where(h.c.reason == reason)
+        return {row[0]: row[1] for row in self._execute(query).fetchall()}
+
+    def archived(self, subjects: list[Any], name: str, reason: str) -> dict[Any, int]:
+        h = self.history_table
+        subject = h.c[self._key]
+        return {row[0]: int(row[1]) for row in self._execute(
+            sa.select(subject, sa.func.count())
+            .where(subject.in_(list(subjects)), h.c.node == name, h.c.reason == reason)
+            .group_by(subject)).fetchall()}
+
+
+class PostgresDriver(PostgresCommon):
+    """Node rows in `table`, revisions in `revisions`, written with
+    SQLAlchemy Core."""
+
+    def __init__(self, execute: Callable[[Any], Any], table: sa.Table,
+                 revisions: sa.Table, history: sa.Table, *,
+                 subject: str = "subject", limits: sa.Table | None = None,
+                 arrivals: sa.Table | None = None) -> None:
+        for t, needed in ((table, REQUIRED_COLUMNS), (revisions, REVISION_COLUMNS)):
+            missing = [c for c in (subject, *needed) if c not in t.c]
+            if missing:
+                raise ValueError(
+                    f"table {t.name!r} lacks the column(s) {missing} — it needs "
+                    f"{subject!r} and {', '.join(needed)}")
+        super().__init__(execute, history, subject=subject, limits=limits,
+                         arrivals=arrivals)
+        self.table = table
+        self.revisions = revisions
+        self._subject = table.c[subject]
+        self._rev_subject = revisions.c[subject]
+
+    # -- write -------------------------------------------------------------
 
     def scan(self, candidates: Any, *, name: str | None, nodes: tuple[str, ...],
              parents: tuple[str, ...], page: int, now: str) -> Iterator[list[Entry]]:
@@ -196,6 +349,7 @@ class PostgresDriver:
                 ~sa.and_(held.c.status == NODE_SCHEDULED, held.c.started_at <= now)))
         if parents:
             query = query.where(self.parents_concluded(parents, candidate))
+        query = self._narrow(query, candidate, name, parents)
         last = None
         while True:
             paged = query if last is None else query.where(c.c.grampy_rank > last)
@@ -221,6 +375,11 @@ class PostgresDriver:
                    for f in found]
             if len(found) < page:
                 return
+
+    def _narrow(self, query: Any, candidate: Any, name: str | None,
+                parents: tuple[str, ...]) -> Any:
+        """Where a layout adds its own pre-filter to a page; none here."""
+        return query
 
     def insert_if_unchanged(self, name: str, entries: list[tuple[Any, int]], *,
                             status: str, now: str, lease: str | None) -> list[Any]:
@@ -328,32 +487,6 @@ class PostgresDriver:
                                                    r.c.version != version)))
         return self._take_away(where, now=now, reason="release")
 
-    @contextmanager
-    def guard(self, keys: list[str]) -> Iterator[None]:
-        """Transaction-scoped advisory locks, taken in a statement of their
-        own before the claim reads anything: that claim's statements then
-        see every commit of the claimer they waited for."""
-        self._need_limits()
-        for key in sorted(keys):
-            self._execute(sa.select(sa.func.pg_advisory_xact_lock(
-                sa.func.hashtextextended(key, 0))))
-        yield
-
-    def limits(self, keys: list[str]) -> dict[str, float]:
-        table = self._need_limits()
-        return {row[0]: float(row[1]) for row in self._execute(
-            sa.select(table.c.key, table.c.value).where(table.c.key.in_(list(keys)))
-        ).fetchall() if row[1] is not None}
-
-    def set_limits(self, values: dict[str, float]) -> None:
-        table = self._need_limits()
-        if not values:
-            return
-        insert = postgresql.insert(table).values(
-            [{"key": k, "value": v} for k, v in sorted(values.items())])
-        self._execute(insert.on_conflict_do_update(
-            index_elements=["key"], set_={"value": insert.excluded.value}))
-
     def running(self, name: str, policies: tuple[str | None, ...] | None) -> int:
         t, r = self.table, self.revisions
         query = sa.select(sa.func.count()).select_from(t).where(
@@ -367,12 +500,6 @@ class PostgresDriver:
                     sa.select(self._rev_subject).where(r.c.policy.is_not(None))))
             query = query.where(test)
         return int(self._execute(query).scalar())
-
-    def _need_limits(self) -> sa.Table:
-        if self.limits_table is None:
-            raise ValueError("this graph limits rate or concurrency: give the "
-                             "PostgresDriver a `limits` table")
-        return self.limits_table
 
     def pin(self, subjects: list[Any], version: str) -> int:
         r = self.revisions
@@ -401,21 +528,7 @@ class PostgresDriver:
         if drop:
             self._take_away(sa.and_(self._subject == subject, t.c.node.in_(list(drop))),
                             now=now, reason="migrate")
-        a = self.arrivals_table
-        if a is not None and (drop or rename):
-            a_subject = a.c[self._subject.key]
-            if drop:
-                self._execute(sa.delete(a).where(a_subject == subject,
-                                                 a.c.node.in_(list(drop))))
-            if rename:
-                columns = [self._subject.key, *ARRIVAL_COLUMNS]
-                waiting = [dict(zip(columns, row, strict=True)) for row in self._execute(
-                    sa.delete(a).where(a_subject == subject, a.c.node.in_(list(rename)))
-                    .returning(*[a.c[c] for c in columns])).fetchall()]
-                for row in waiting:
-                    row["node"] = rename[row["node"]]
-                if waiting:
-                    self._execute(sa.insert(a).values(waiting))
+        self._rewrite_arrivals(subject, rename=rename, drop=drop)
         if not rename:
             return
         columns = [self._subject.key, *REQUIRED_COLUMNS]
@@ -473,56 +586,6 @@ class PostgresDriver:
             sa.select(t.c.node, t.c.status).where(self._subject == subject)
         ).fetchall()}
 
-    def history(self, subject: Any) -> list[dict[str, Any]]:
-        h = self.history_table
-        keys = [*REQUIRED_COLUMNS, "archived_at", "reason"]
-        return [dict(zip(keys, row, strict=True)) for row in self._execute(
-            sa.select(*[h.c[k] for k in keys])
-            .where(h.c[self._subject.key] == subject)
-            .order_by(h.c.archived_at, h.c.node)).fetchall()]
-
-    def note(self, subjects: list[Any], name: str, *, status: str, reason: str,
-             now: str, ref: str | None) -> int:
-        h = self.history_table
-        rows = self._execute(
-            sa.insert(h).values([{self._subject.key: s, "node": name, "status": status,
-                                  "started_at": now, "finished_at": now, "lease": ref,
-                                  "archived_at": now, "reason": reason}
-                                 for s in subjects])
-            .returning(h.c[self._subject.key])).fetchall()
-        return len(rows)
-
-    def arrive(self, name: str, subjects: list[Any], *, ref: str | None, now: str,
-               merge: str, position: str, urgent: bool,
-               refs: str | None = None) -> dict[Any, str]:
-        """One upsert; `xmax = 0` tells a row inserted from a row updated."""
-        a = self._need_arrivals()
-        subject = a.c[self._subject.key]
-        insert = postgresql.insert(a).values(
-            [{self._subject.key: s, "node": name, "ref": ref, "place": now,
-              "arrived_at": now, "urgent": urgent, "refs": refs} for s in sorted(subjects)])
-        merged: dict[str, Any] = {"urgent": sa.or_(a.c.urgent, insert.excluded.urgent)}
-        if merge in ("last", "set"):
-            merged["ref"] = insert.excluded.ref
-        if merge == "set":
-            merged["refs"] = insert.excluded.refs
-        if position == "last":
-            merged["place"] = insert.excluded.place
-        rows = self._execute(
-            insert.on_conflict_do_update(index_elements=[self._subject.key, "node"],
-                                         set_=merged)
-            .returning(subject, sa.literal_column("xmax") == 0)).fetchall()
-        return {row[0]: "queued" if row[1] else "merged" for row in rows}
-
-    def arrivals(self, subjects: list[Any], name: str) -> dict[Any, Arrival]:
-        a = self._need_arrivals()
-        subject = a.c[self._subject.key]
-        return {row[0]: Arrival(row[1], row[2], row[3], bool(row[4]), row[5])
-                for row in self._execute(
-                    sa.select(subject, a.c.ref, a.c.place, a.c.arrived_at, a.c.urgent,
-                              a.c.refs)
-                    .where(a.c.node == name, subject.in_(list(subjects)))).fetchall()}
-
     def enter(self, name: str, entries: list[tuple[Any, int]], *,
               archive: tuple[str, ...], now: str) -> list[Any]:
         """LOCK FIRST, CHECK AFTER. The revision rows are locked `FOR UPDATE`
@@ -568,36 +631,6 @@ class PostgresDriver:
             [{self._subject.key: s, "node": name, "status": NODE_DONE,
               "started_at": waiting[s][1], "finished_at": now} for s in entering]))
         return entering
-
-    def queued(self, name: str) -> int:
-        a = self._need_arrivals()
-        return int(self._execute(
-            sa.select(sa.func.count()).select_from(a).where(a.c.node == name)).scalar())
-
-    def _need_arrivals(self) -> sa.Table:
-        if self.arrivals_table is None:
-            raise ValueError("this graph has a lane: give the PostgresDriver an "
-                             "`arrivals` table")
-        return self.arrivals_table
-
-    def latest(self, subjects: list[Any], name: str,
-               reason: str | None) -> dict[Any, str]:
-        h = self.history_table
-        subject = h.c[self._subject.key]
-        query = (sa.select(subject, sa.func.max(h.c.archived_at))
-                 .where(subject.in_(list(subjects)), h.c.node == name)
-                 .group_by(subject))
-        if reason is not None:
-            query = query.where(h.c.reason == reason)
-        return {row[0]: row[1] for row in self._execute(query).fetchall()}
-
-    def archived(self, subjects: list[Any], name: str, reason: str) -> dict[Any, int]:
-        h = self.history_table
-        subject = h.c[self._subject.key]
-        return {row[0]: int(row[1]) for row in self._execute(
-            sa.select(subject, sa.func.count())
-            .where(subject.in_(list(subjects)), h.c.node == name, h.c.reason == reason)
-            .group_by(subject)).fetchall()}
 
     def status_counts(self, name: str) -> dict[str, int]:
         t = self.table

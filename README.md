@@ -83,7 +83,7 @@ ids, and you load your own objects. See [drivers](https://github.com/quazardous/
 |---|---|
 | `drivers.memory` | nothing — the reference the others are confronted with |
 | `drivers.sqlite` | the standard library |
-| `drivers.postgres` | SQLAlchemy Core |
+| `drivers.postgres` | SQLAlchemy Core — three table layouts, [your choice](https://github.com/quazardous/grampy/blob/main/docs/drivers.md#postgresql-three-layouts-your-choice) |
 
 Any other storage: implement the driver protocol and pass the shared contract
 (`quazardous.grampy.testing.JournalContract`), concurrency tests included.

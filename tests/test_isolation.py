@@ -1,7 +1,7 @@
 """The package imports what it says it imports — read from the source.
 
     the core                   the standard library and itself
-    quazardous.grampy.drivers.postgres    + sqlalchemy
+    quazardous.grampy.drivers.postgres*   + sqlalchemy (the three layouts)
     quazardous.grampy.testing             + pytest, hypothesis
 """
 from __future__ import annotations
@@ -14,6 +14,8 @@ PACKAGE = Path(__file__).resolve().parents[1] / "src" / "quazardous" / "grampy"
 
 EXTRA = {
     "drivers/postgres.py": {"sqlalchemy"},
+    "drivers/postgres_ready.py": {"sqlalchemy"},
+    "drivers/postgres_subject.py": {"sqlalchemy"},
     "testing.py": {"pytest", "hypothesis"},
 }
 
