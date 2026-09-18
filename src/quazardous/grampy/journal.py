@@ -445,14 +445,16 @@ class JournalDriver(CoreDriver, VersionDriver, LimitDriver, LaneDriver, ReadingD
     offers the core and the capabilities its graphs use; the journal says,
     when it is built, which one is missing (`MissingCapability`).
 
-    OPTIONAL, `skip_where(name, candidates, *, parents, now, version) ->
-    subjects`: `skip` in one write, for a node joining its parents plainly.
-    It writes a `skipped` row, started and finished at `now`, for every
-    candidate with no row for `name`, a satisfying row for every parent,
-    pinned to `version` or to none (any, when `version` is None), and whose
-    revision has not moved — exactly what the journal's own loop would
-    write, which the shared contract checks. Leave it out, and the journal
-    reads the candidates and writes as for a claim.
+    OPTIONAL, `skip_where(name, candidates, *, parents, now, version,
+    limit=None) -> subjects`: `skip` in one write, for a node joining its
+    parents plainly. It writes a `skipped` row, started and finished at
+    `now`, for every candidate with no row for `name`, a satisfying row for
+    every parent, pinned to `version` or to none (any, when `version` is
+    None), and whose revision has not moved — with `limit`, for the first
+    `limit` such candidates in their order. Exactly what the journal's own
+    loop would write, which the shared contract checks. `limit` is passed
+    only when the caller sets one. Leave it out, and the journal reads the
+    candidates and writes as for a claim.
 
     OPTIONAL, `scan_reads_clock = True`: the driver's `scan` accepts
     `now=None`, then uses the storage's own clock — the time `now()` would
@@ -870,18 +872,24 @@ class NodeJournal:
         return self.conclude(name, subjects, token=token, status=Status.FAILED,
                              branch=branch)
 
-    def skip(self, name: str, *, candidates: Any) -> int:
+    def skip(self, name: str, *, candidates: Any, limit: int | None = None) -> int:
         """Mark this OPTIONAL node as given up, on the candidates.
 
         ONLY A CLAIMABLE NODE IS SKIPPED — parents concluded. Without that
         invariant, skipping a node on a subject not there yet would let its
         children start early, since they only name their DIRECT parents.
+
+        `limit` BOUNDS A PASS: at most that many subjects, the first the
+        candidates offer, and no more candidates read than needed to find
+        them. A janitor calls again while a pass returns `limit`.
         """
         n = node(name, self.dag)
         if not n.optional:
             raise ValueError(
                 f"node {name!r} is not optional — skipping it would move "
                 f"the graph forward without its work")
+        if limit is not None and int(limit) <= 0:
+            return 0
         now = self._clock()
         # A DRIVER MAY SKIP IN ONE WRITE (`skip_where`, optional): the rule
         # for a plain join is SQL-shaped — no row, every parent satisfying —
@@ -889,17 +897,25 @@ class NodeJournal:
         # custom join (`on`, `need`) always takes the loop.
         fast = getattr(self.driver, "skip_where", None)
         if fast is not None and not n.custom_join:
-            written = fast(name, candidates, parents=n.parents, now=now, version=self.version)
+            # The limit is passed only when there is one: a `skip_where`
+            # written before it existed keeps working unbounded.
+            bound = {} if limit is None else {"limit": int(limit)}
+            written = fast(name, candidates, parents=n.parents, now=now,
+                           version=self.version, **bound)
         else:
             chosen: dict[tuple[Any, int], None] = {}
             for page in self.driver.scan(candidates, name=name,
                                          nodes=(name, *n.parents),
                                          parents=() if n.custom_join else n.parents,
                                          page=PAGE, now=now):
-                chosen.update(dict.fromkeys(
-                    (e.subject, e.revision) for e in page
-                    if self._mine(e) and name not in e.rows
-                    and joined(name, self.dag, e.rows)))
+                for e in page:
+                    if (self._mine(e) and name not in e.rows
+                            and joined(name, self.dag, e.rows)):
+                        chosen[(e.subject, e.revision)] = None
+                        if limit is not None and len(chosen) >= limit:
+                            break
+                if limit is not None and len(chosen) >= limit:
+                    break
             # One write, as for a claim.
             written = self.driver.insert_if_unchanged(
                 name, list(chosen), status=Status.SKIPPED, now=now,
@@ -1271,7 +1287,7 @@ class NodeJournal:
         kept = _decode_refs(arrival.refs)
         return kept if kept else ((arrival.ref,) if arrival.ref is not None else ())
 
-    def settle(self, candidates: Any) -> dict[str, dict[str, int]]:
+    def settle(self, candidates: Any, *, limit: int | None = None) -> dict[str, dict[str, int]]:
         """CONCLUDE WHAT NO WORKER DOES, on the candidates, for every node:
 
             wait      `done` when a signal was received since the node last
@@ -1285,12 +1301,19 @@ class NodeJournal:
         Time runs from the LATEST accepted parent's conclusion; a node
         without parents has no clock and never times out. Return
         `{node: {status: count}}` for what was written. Meant for the
-        application's janitor, like `expire`."""
+        application's janitor, like `expire`.
+
+        `limit` BOUNDS A PASS: at most that many subjects written per node,
+        the first in the order they would be taken — the candidates' order,
+        a lane's places. A janitor calls again while a node's counts add up
+        to `limit`."""
+        if limit is not None and int(limit) <= 0:
+            return {}
         now = self._clock()
         out: dict[str, dict[str, int]] = {}
         for n in self.dag:
             if n.lane is not None:
-                entered = self._let_in(n, candidates, now)
+                entered = self._let_in(n, candidates, now, limit)
                 if entered:
                     out.setdefault(n.name, {})[Outcome.ENTERED] = entered
                 continue
@@ -1316,6 +1339,8 @@ class NodeJournal:
                 heard = self.driver.latest(subjects, n.wait, Reason.SIGNAL)
                 went_back = self.driver.latest(subjects, n.name, None)
             for e in ready:
+                if limit is not None and sum(map(len, decided.values())) >= limit:
+                    break
                 since = _joined_since(n, e)
                 seen_by = self.settings(n.name, e.policy)
                 if n.wait is not None:
@@ -1337,7 +1362,7 @@ class NodeJournal:
                     out.setdefault(n.name, {})[status] = len(written)
         return out
 
-    def _let_in(self, n: Node, candidates: Any, now: str) -> int:
+    def _let_in(self, n: Node, candidates: Any, now: str, limit: int | None = None) -> int:
         """THE LANE'S DOOR. An arrival enters when the subject's parents are
         joined, nothing of its previous pass runs, and it is due: urgent, or
         past both its `delay` (from its place) and its `cooldown` (from the
@@ -1380,6 +1405,8 @@ class NodeJournal:
                     continue
             due.append((arrival.place, order[subject], subject))
         chosen = [(subject, entries[subject].revision) for _, _, subject in sorted(due)]
+        if limit is not None:
+            chosen = chosen[:limit]
         if not chosen:
             return 0
 

@@ -1361,6 +1361,79 @@ class JournalContract:
         assert "right" not in journal.progress("s1")
         assert self._claim(harness, journal, "end", ["s2"]) == ["s2"]
 
+    # -- bounded passes --------------------------------------------------------
+
+    def _bounded(self, work, limit):
+        """Passes of at most `limit` until one writes nothing."""
+        passes = []
+        while not passes or passes[-1]:
+            passes.append(work())
+            assert passes[-1] <= limit, f"a pass wrote {passes[-1]}, over its limit {limit}"
+            assert len(passes) < 50, "the passes never end"
+        return passes
+
+    def test_bounded_skips_end_where_one_skip_ends(self, harness, clock):
+        """A JANITOR WORKING IN PASSES reaches the state one call reaches —
+        each pass taking the first candidates left, in their order."""
+        subjects = [f"s{i}" for i in range(7)]
+
+        def build():
+            journal = harness.journal(DIAMOND, clock)
+            for i, subject in enumerate(subjects):
+                harness.seed(journal, subject, {"start": Status.RUNNING if i % 3 == 0
+                                                else Status.DONE})
+            return journal
+
+        whole = build()
+        assert whole.skip("right", candidates=harness.candidates(subjects)) == 4
+        passes = build()
+        first = passes.skip("right", candidates=harness.candidates(subjects), limit=2)
+        assert first == 2
+        assert [s for s in subjects if "right" in passes.progress(s)] == ["s1", "s2"], (
+            "a pass takes the first candidates the rule allows, in their order")
+        assert self._bounded(lambda: passes.skip(
+            "right", candidates=harness.candidates(subjects), limit=2), 2) == [2, 0]
+        assert {s: passes.progress(s) for s in subjects} == {
+            s: whole.progress(s) for s in subjects}
+
+    def test_bounded_settles_end_where_one_settle_ends(self, harness, clock):
+        subjects = [f"s{i}" for i in range(5)]
+
+        def build():
+            journal = harness.journal(ONBOARDING, clock)
+            clock.now = "2026-01-01T00:00:00+00:00"
+            self._run(harness, journal, "send", subjects)
+            clock.now = "2026-01-02T00:00:00+00:00"   # past the survey's grace
+            return journal
+
+        whole = build()
+        assert whole.settle(harness.candidates(subjects)) == {"survey": {Status.SKIPPED: 5}}
+        passes = build()
+        assert self._bounded(lambda: sum(
+            sum(c.values()) for c in passes.settle(harness.candidates(subjects),
+                                                   limit=2).values()), 2) == [2, 2, 1, 0]
+        assert {s: passes.progress(s) for s in subjects} == {
+            s: whole.progress(s) for s in subjects}
+
+    def test_bounded_settles_let_a_lane_in_by_parts(self, harness, clock):
+        subjects = [f"s{i}" for i in range(5)]
+
+        def build():
+            journal = harness.journal(_listing(), clock)
+            clock.now = T0
+            journal.arrive("arrive", subjects)
+            return journal
+
+        whole = build()
+        assert self._settle(harness, whole, subjects) == 5
+        passes = build()
+        assert self._bounded(lambda: passes.settle(
+            harness.candidates(subjects), limit=2).get("arrive", {}).get(
+                Outcome.ENTERED, 0), 2) == [2, 2, 1, 0]
+        assert {s: passes.progress(s) for s in subjects} == {
+            s: whole.progress(s) for s in subjects}
+        assert passes.counts("arrive")["waiting"] == 0
+
     def test_a_skip_never_overwrites(self, harness, journal):
         harness.seed(journal, "s1", {"start": Status.DONE, "right": Status.FAILED})
         assert journal.skip("right", candidates=harness.candidates(["s1"])) == 0

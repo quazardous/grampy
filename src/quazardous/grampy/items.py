@@ -292,17 +292,19 @@ class Items:
         """Every row forget, release or a loop took away from this item."""
         return self.journal.history(self.adapter.id_of(item))
 
-    def skip(self, name: str, *, candidates: Any) -> int:
+    def skip(self, name: str, *, candidates: Any, limit: int | None = None) -> int:
         """Give up this OPTIONAL node on the candidates that are at it — for
-        items you already know refuse it, without claiming them first."""
+        items you already know refuse it, without claiming them first. At
+        most `limit` of them, when given (`NodeJournal.skip`)."""
         _, candidates = self._subjects(candidates)
-        return self.journal.skip(name, candidates=candidates)
+        return self.journal.skip(name, candidates=candidates, limit=limit)
 
-    def settle(self, candidates: Any) -> dict[str, dict[str, int]]:
+    def settle(self, candidates: Any, *, limit: int | None = None) -> dict[str, dict[str, int]]:
         """The janitor's pass, in items' terms: waits concluded, due arrivals
-        let through their lane, optional nodes past their grace skipped."""
+        let through their lane, optional nodes past their grace skipped — at
+        most `limit` per node, when given (`NodeJournal.settle`)."""
         _, candidates = self._subjects(candidates)
-        return self.journal.settle(candidates)
+        return self.journal.settle(candidates, limit=limit)
 
     def _subjects(self, candidates: Any, *,
                   grouping: bool = False) -> tuple[dict[Any, Any], Any]:

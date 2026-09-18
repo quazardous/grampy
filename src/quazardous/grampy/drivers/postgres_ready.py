@@ -153,9 +153,9 @@ class PostgresReadyDriver(PostgresDriver):
         return written
 
     def skip_where(self, name: str, candidates: Any, *, parents: tuple[str, ...],
-                   now: str, version: str | None) -> list[Any]:
+                   now: str, version: str | None, limit: int | None = None) -> list[Any]:
         written = super().skip_where(name, candidates, parents=parents, now=now,
-                                     version=version)
+                                     version=version, limit=limit)
         self._strike(written, name)
         self._list(written, self._children_of([name]))
         return written

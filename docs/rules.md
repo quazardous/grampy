@@ -109,7 +109,9 @@ wait="email.clicked", timeout="7d")` is not worked but settled:
 before the wait begins — and `journal.settle(candidates)` concludes the wait
 `done`, or `failed` once the timeout has passed since its parents concluded.
 `Node(optional=True, grace="1d")` is skipped by `settle` when nobody took it in
-time.
+time. A janitor facing a large backlog works in passes: `settle(candidates,
+limit=1000)` writes at most that many subjects per node — `skip` takes the same
+`limit` — and is called again while a pass writes its limit.
 
 **One clock.** The journal takes its time from the driver — the database server
 for PostgreSQL — so workers on several machines agree on what is due.

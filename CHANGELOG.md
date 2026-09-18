@@ -42,6 +42,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A guide to writing a driver: the capabilities, which methods may return a
   superset and which must be exact, transactions, grouping keys, the optional
   fast paths, and certification.
+- `skip(..., limit=)` and `settle(..., limit=)`, on the journal and on `Items`, bound a
+  janitor's pass: at most `limit` subjects written — per node for `settle` —
+  the first in the order they would be taken. Call again while a pass writes
+  `limit`; repeated passes end where one unbounded call does, which the shared
+  contract checks on every driver.
 - A claim on PostgreSQL costs two statements — one read, one write — on the
   row and subject layouts, three with the ready list, down from five (seven on
   a `Graph`) for a journal on the server's clock: the page

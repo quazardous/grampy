@@ -550,7 +550,7 @@ class PostgresDriver(PostgresCommon):
         return [row[0] for row in rows]
 
     def skip_where(self, name: str, candidates: Any, *, parents: tuple[str, ...],
-                   now: str, version: str | None) -> list[Any]:
+                   now: str, version: str | None, limit: int | None = None) -> list[Any]:
         """`skip` IN ONE WRITE, instead of reading every candidate page.
 
         The rule, in SQL: no row for `name` at all, every parent satisfying,
@@ -558,7 +558,9 @@ class PostgresDriver(PostgresCommon):
         then holds it: the revisions read are locked `FOR SHARE` in the
         statement that writes, and a subject whose revision moved meanwhile
         — a parent forgotten — is not skipped. Two statements whatever the
-        number of candidates: the revisions seeded, then the write."""
+        number of candidates: the revisions seeded, then the write. With
+        `limit`, both take the first `limit` eligible candidates by rank:
+        once seeded, those are the ones the write reads."""
         t, r = self.table, self.revisions
         key = self._subject.key
 
@@ -574,21 +576,30 @@ class PostgresDriver(PostgresCommon):
                     other.c.version.is_not(None), other.c.version != version))
             return conditions
 
+        def first(query: Any, rank: Any) -> Any:
+            """The query's rows once each — the first `limit` by rank."""
+            if limit is None:
+                return query.distinct()
+            return query.order_by(sa.func.min(rank)).limit(int(limit))
+
         c = _ranked(candidates)
         candidate = list(c.c)[0]
+        seeds = sa.select(candidate, sa.literal(0)).where(*eligible(candidate))
+        if limit is not None:
+            seeds = seeds.group_by(candidate)
         self._execute(
             postgresql.insert(r).from_select(
-                [self._rev_subject.key, "revision"],
-                sa.select(candidate, sa.literal(0)).distinct().where(*eligible(candidate)))
+                [self._rev_subject.key, "revision"], first(seeds, c.c.grampy_rank))
             .on_conflict_do_nothing())
         c = _ranked(candidates)
         candidate = list(c.c)[0]
         seen = r.alias("seen")
         read = (sa.select(candidate.label("subject"), seen.c.revision.label("revision"))
-                .distinct()
                 .select_from(c.join(seen, seen.c[self._rev_subject.key] == candidate))
-                .where(*eligible(candidate))
-                .cte("read"))
+                .where(*eligible(candidate)))
+        if limit is not None:
+            read = read.group_by(candidate, seen.c.revision)
+        read = first(read, c.c.grampy_rank).cte("read")
         unchanged = (
             sa.select(self._rev_subject)
             .join(read, sa.and_(self._rev_subject == read.c.subject,
