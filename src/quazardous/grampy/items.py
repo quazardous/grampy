@@ -2,7 +2,6 @@
 
     class Bricks(Adapter):
         def id_of(self, brick):      return brick.id
-        def inflate(self, ids):         return [BRICKS[i] for i in ids]
         def policy_of(self, brick): return brick.crate
         def applies(self, brick, node):
             return node != "polish" or brick.crate == "factory"
@@ -72,8 +71,9 @@ def _are_items(candidates: Any) -> bool:
 class Adapter:
     """HOW GRAMPY HOOKS ONTO ONE OF YOUR OBJECTS.
 
-    Two methods are yours to write; the rest have answers that suit an
-    application with nothing special to say.
+    One method is yours to write — `id_of`. The rest have answers that suit
+    an application with nothing special to say, `inflate` included: it lets
+    your objects straight through, so it only needs writing when ids come in.
     """
 
     # -- required ----------------------------------------------------------
@@ -121,8 +121,10 @@ class Adapter:
     # -- optional ----------------------------------------------------------
 
     def policy_of(self, item: Any) -> str | None:
-        """Which source this item came from, as a label. The graph's settings
-        for that policy then apply to it. `None` means no policy."""
+        """The named set of operating settings this item runs under — how hard
+        to push it, how long to wait, how often to retry. Your business word
+        (a crate, a partner, a plan) becomes that name here; grampy never
+        learns what it meant. `None` means the defaults."""
         return None
 
     def ref_of(self, item: Any) -> str | None:

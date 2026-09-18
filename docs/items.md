@@ -36,8 +36,11 @@ application with nothing special to say.
 from quazardous.grampy.items import Adapter, Items
 
 class Bricks(Adapter):
-    def id_of(self, brick):      return brick.id
-    def inflate(self, ids):         return Brick.objects.filter(id__in=list(ids))
+    def id_of(self, brick):      return getattr(brick, "id", brick)
+    def inflate(self, candidates):                            # ids in, bricks out
+        thin = [c for c in candidates if not isinstance(c, Brick)]
+        fat = {b.id: b for b in Brick.objects.filter(id__in=thin)}
+        return [fat.get(c, c) for c in candidates]
 
     def policy_of(self, brick): return brick.crate          # its operating policy
     def ref_of(self, brick):     return brick.content_hash   # its version, in a lane
@@ -83,7 +86,7 @@ the library makes on your behalf.
 A **driver's query** is handed to the journal untouched. That is the one
 place ids are unavoidable: the storage produces the candidate set, and it
 has no Python objects to give. The layer then loads the lease in **one**
-call to `load`, and ids nothing loaded for — a row deleted meanwhile — come
+call to `inflate`, and ids nothing loaded for — a row deleted meanwhile — come
 back as `lease.missing` rather than disappearing quietly, the rest of the
 lease still concluding.
 

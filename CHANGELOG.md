@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The adapter examples in the README and the items page crashed as written:
+  they still defined `inflate` with the signature of the method it replaced,
+  and failed on the very objects they passed in as candidates. The README's
+  example is now run by the test suite, so it cannot quietly break again.
+
 ## [0.3.0] - 2026-09-18
 
 ### Added
