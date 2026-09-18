@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-18
+
 ### Added
 
 - `journal.skip` on `PostgresDriver` and `PostgresReadyDriver` writes in two
@@ -48,8 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The shared driver contract checks one call on 70,000 subjects — past the
   number of values a statement may bind, where a driver sending one per
   subject fails outright — and holds a driver to the number of statements a
-  claim may send, when its harness declares one. The three PostgreSQL layouts
-  fail the first today, and are marked so until they bind arrays.
+  claim may send, when its harness declares one. The first is a performance
+  test, run only with `GRAMPY_PERF=1`; every bundled driver passes it.
 - `benchmarks/layouts.py` runs the three layouts on the same data and prints
   statements and time per operation, to measure your own shape of data.
 - grampy's own words have names: `Status`, `Reason`, `Outcome`, `Merge`,
@@ -273,7 +275,8 @@ The first release. Installed as `grampy-q`, imported as
   claimers, claims racing a requeue) and random sequences of operations on
   random graphs checked step by step against the rule.
 
-[Unreleased]: https://github.com/quazardous/grampy/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/quazardous/grampy/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/quazardous/grampy/releases/tag/v0.4.0
 [0.3.1]: https://github.com/quazardous/grampy/releases/tag/v0.3.1
 [0.3.0]: https://github.com/quazardous/grampy/releases/tag/v0.3.0
 [0.2.0]: https://github.com/quazardous/grampy/releases/tag/v0.2.0
