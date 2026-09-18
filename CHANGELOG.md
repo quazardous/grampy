@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- On a large node table, a claim on the row-per-node and ready-list layouts
+  could take twice as long as before: the filter leaving out subjects past
+  the node was planned as a scan of every node row, on every page. The claim
+  now applies it only once a page shows those subjects crowd the candidates —
+  on a host table, 311–553 ms became 156–228 ms — and a claim where every
+  candidate has moved past the node still stops in two statements.
 - On PostgreSQL, a claim failed when the executor returned JSON as text —
   asyncpg's default, a text loader, a host's own shim: the rows the claim's
   page brings back were walked as a string. JSON is now read decoded or as

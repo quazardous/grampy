@@ -699,3 +699,28 @@ def test_a_subject_is_pinned_by_its_first_write_and_never_again(engine, layout):
         assert len(journal.claim("left", 5, candidates=ordered_subjects(subjects))) == 5
         assert len(sent) <= layout.claim_statements[0], "pinned again"
         conn.rollback()
+
+
+@pytest.mark.parametrize("layout", [RowLayout(), SubjectLayout(), ReadyLayout()],
+                         ids=["row", "subject", "ready"])
+def test_a_claim_where_every_candidate_moved_past_reads_no_page_by_page(engine, layout):
+    """THE WORST CASE OF THE DESCENDANT FILTER: every candidate waiting at
+    the node has a row after it and none for it — a replay that left the
+    later steps in place. Taken page by page, the claim read them all to
+    take nothing; it must stop within two statements, however many."""
+    from quazardous.grampy.testing import DIAMOND
+    subjects = [f"s{i}" for i in range(600)]          # three pages' worth
+    with engine.connect() as conn, conn.begin():
+        metadata = sa.MetaData()
+        tables = layout.tables(metadata, f"grampy_{next(_TABLES)}")
+        metadata.create_all(conn)
+        driver = layout.driver(conn.execute, tables, DIAMOND)
+        journal = NodeJournal(driver, DIAMOND, clock=lambda: SEEDED)
+        for subject in subjects:
+            layout.seed(conn, tables, subject, {"start": "done", "end": "done"}, driver)
+        journal.claim("left", 1, candidates=ordered_subjects(["warm"]))
+        sent = []
+        sa.event.listen(conn, "before_cursor_execute", lambda *_: sent.append(1))
+        assert journal.claim("left", 30, candidates=ordered_subjects(subjects)) == []
+        assert len(sent) <= 2, f"{len(sent)} statements to take nothing"
+        conn.rollback()

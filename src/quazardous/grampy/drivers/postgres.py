@@ -477,15 +477,26 @@ class PostgresDriver(PostgresCommon):
                 ~sa.and_(held.c.status == Status.SCHEDULED, held.c.started_at <= clock)))
         if parents:
             query = query.where(self.parents_concluded(parents, candidate))
-        if after:
-            # THE SUBJECT HAS MOVED PAST `name`: a row, any, on a node after it.
-            later = t.alias("later")
-            query = query.where(~sa.exists().where(
-                later.c[self._subject.key] == candidate, later.c.node.in_(list(after))))
         query = self._narrow(query, candidate, name, parents)
+        # THE SUBJECTS THAT HAVE MOVED PAST `name` — a row, any, on a node
+        # after it — are left out in SQL only once a page shows they crowd
+        # the candidates. On a large table that filter costs a scan of the
+        # node rows on every page; where few candidates have moved past, the
+        # first page is enough without it, and the journal leaves those few
+        # out as it judges. Where most have (a replay that left the later
+        # steps in place), the pages after the first carry the filter, and
+        # the rest is read in one.
+        filtered = query
+        if after:
+            later = t.alias("later")
+            filtered = query.where(~sa.exists().where(
+                later.c[self._subject.key] == candidate, later.c.node.in_(list(after))))
+        later_nodes = set(after)
+        crowded = False
         last = None
         while True:
-            paged = query if last is None else query.where(c.c.grampy_rank > last)
+            current = filtered if crowded else query
+            paged = current if last is None else current.where(c.c.grampy_rank > last)
             found = self._execute(paged).fetchall()
             if not found:
                 return
@@ -505,6 +516,9 @@ class PostgresDriver(PostgresCommon):
             yield Page(entries, now=found[0][7])
             if len(found) < page:
                 return
+            if later_nodes and not crowded:
+                past = sum(1 for e in entries if later_nodes & e.rows.keys())
+                crowded = 2 * past >= len(entries)
 
     def _narrow(self, query: Any, candidate: Any, name: str | None,
                 parents: tuple[str, ...]) -> Any:
