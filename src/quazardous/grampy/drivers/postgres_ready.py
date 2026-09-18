@@ -200,10 +200,10 @@ class PostgresReadyDriver(PostgresDriver):
             self._list(maybe, [name])
         return count
 
-    def rewrite(self, subject: Any, *, rename: dict[str, str], drop: tuple[str, ...],
-                version: str, now: str) -> None:
-        super().rewrite(subject, rename=rename, drop=drop, version=version, now=now)
-        self._list([subject], self._parents)
+    def rewrite_many(self, subjects: list[Any], *, rename: dict[str, str],
+                     drop: tuple[str, ...], version: str, now: str) -> None:
+        super().rewrite_many(subjects, rename=rename, drop=drop, version=version, now=now)
+        self._list(subjects, self._parents)
 
     def enter(self, name: str, entries: list[tuple[Any, int]], *,
               archive: tuple[str, ...], now: str) -> list[Any]:

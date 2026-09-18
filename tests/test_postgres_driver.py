@@ -132,6 +132,14 @@ class RowLayout:
     #: A page read, its rows, the revisions seeded, the write.
     claim_statements = (4, 0)
 
+    #: Whatever the number of subjects. Arrive: their progress read, the
+    #: skipped noted, the rest written. Keeping every ref: the locks, the
+    #: check they are held, what waits read, one write per set of refs (two
+    #: here), the ref let go and the merges noted. Migrate: versions,
+    #: progress, revisions raised, repinned, the rows and the arrivals of the
+    #: renamed node moved (delete, insert).
+    batched_statements = {"arrive": (3, 0), "keep every ref": (7, 0), "migrate": (7, 0)}
+
     def tables(self, metadata, prefix, subject_type=str):
         return {"table": node_table(metadata, f"{prefix}_nodes", subject_type),
                 "revisions": revision_table(metadata, f"{prefix}_revisions", subject_type),
@@ -156,6 +164,10 @@ class SubjectLayout:
 
     #: A page read with its progress, then one upsert.
     claim_statements = (2, 0)
+
+    #: As the row layout, but a migration renames inside each subject's
+    #: document, in the same UPDATE as the new pin.
+    batched_statements = {"arrive": (3, 0), "keep every ref": (7, 0), "migrate": (5, 0)}
 
     def tables(self, metadata, prefix, subject_type=str):
         return {"subjects": subject_table(metadata, f"{prefix}_subjects", subject_type),
@@ -189,6 +201,9 @@ class ReadyLayout(RowLayout):
 
     #: The row layout's four, and the pairs struck from the list.
     claim_statements = (5, 0)
+
+    #: The row layout's, and the renamed subjects listed again.
+    batched_statements = {"arrive": (3, 0), "keep every ref": (7, 0), "migrate": (8, 0)}
 
     def tables(self, metadata, prefix, subject_type=str):
         tables = super().tables(metadata, prefix, subject_type)
@@ -249,7 +264,7 @@ class PostgresHarness:
 
     @property
     def statement_bounds(self):
-        return {"claim": self.layout.claim_statements}
+        return {"claim": self.layout.claim_statements, **self.layout.batched_statements}
 
     @contextmanager
     def statements(self):

@@ -242,9 +242,17 @@ class PostgresCommon:
         own before the claim reads anything: that claim's statements then
         see every commit of the claimer they waited for. No table: a lock
         is the server's, not a row's."""
-        for key in sorted(keys):
-            self._execute(sa.select(sa.func.pg_advisory_xact_lock(
-                sa.func.hashtextextended(key, 0))))
+        # ONE STATEMENT, THE LOCKS IN ONE ORDER: every caller takes them by
+        # ascending hash, so two callers wanting the same keys queue instead
+        # of each holding one the other waits for. The ordered subquery is
+        # fenced (`OFFSET 0`) so the locks are taken in its order.
+        if keys:
+            key = sa.func.unnest(self._array(sorted(set(keys)), sa.Text)
+                                 ).table_valued("key").render_derived(name="k")
+            hashed = sa.func.hashtextextended(key.c.key, 0)
+            ordered = (sa.select(hashed.label("h")).select_from(key).distinct()
+                       .order_by(hashed).offset(0).subquery("ordered"))
+            self._execute(sa.select(sa.func.pg_advisory_xact_lock(ordered.c.h)))
         # A transaction-scoped lock taken under autocommit is gone by the
         # next statement: check it is still held, or the guard guards nothing.
         if keys and not self._execute(_ADVISORY_HELD).fetchone()[0]:
@@ -333,7 +341,7 @@ class PostgresCommon:
                              "`arrivals` table")
         return self.arrivals_table
 
-    def _rewrite_arrivals(self, subject: Any, *, rename: dict[str, str],
+    def _rewrite_arrivals(self, subjects: list[Any], *, rename: dict[str, str],
                           drop: tuple[str, ...]) -> None:
         """The arrivals waiting in dropped nodes go; those in renamed nodes
         follow their node."""
@@ -342,17 +350,17 @@ class PostgresCommon:
             return
         a_subject = a.c[self._key]
         if drop:
-            self._execute(sa.delete(a).where(a_subject == subject,
+            self._execute(sa.delete(a).where(self._in(a_subject, subjects),
                                              a.c.node.in_(list(drop))))
         if rename:
             columns = [self._key, *ARRIVAL_COLUMNS]
-            waiting = [dict(zip(columns, row, strict=True)) for row in self._execute(
-                sa.delete(a).where(a_subject == subject, a.c.node.in_(list(rename)))
-                .returning(*[a.c[c] for c in columns])).fetchall()]
-            for row in waiting:
-                row["node"] = rename[row["node"]]
+            waiting = self._execute(
+                sa.delete(a).where(self._in(a_subject, subjects), a.c.node.in_(list(rename)))
+                .returning(*[a.c[c] for c in columns])).fetchall()
             if waiting:
-                self._execute(sa.insert(a).values(waiting))
+                rows = {c: [row[i] for row in waiting] for i, c in enumerate(columns)}
+                rows["node"] = [rename[n] for n in rows["node"]]
+                self._execute(self._insert_rows(a, rows))
 
     def latest(self, subjects: list[Any], name: str,
                reason: str | None) -> dict[Any, str]:
@@ -658,25 +666,35 @@ class PostgresDriver(PostgresCommon):
 
     def rewrite(self, subject: Any, *, rename: dict[str, str], drop: tuple[str, ...],
                 version: str, now: str) -> None:
+        self.rewrite_many([subject], rename=rename, drop=drop, version=version, now=now)
+
+    def rewrite_many(self, subjects: list[Any], *, rename: dict[str, str],
+                     drop: tuple[str, ...], version: str, now: str) -> None:
         """Rows renamed by delete and re-insert: an in-place rename could
-        collide with the primary key halfway through a chain of renames."""
+        collide with the primary key halfway through a chain of renames. The
+        same statements whatever the number of subjects."""
         t, r = self.table, self.revisions
-        self._raise_revisions([subject])
-        self._execute(sa.update(r).where(self._rev_subject == subject).values(version=version))
+        subjects = sorted(set(subjects))
+        if not subjects:
+            return
+        self._raise_revisions(subjects)
+        self._execute(sa.update(r).where(self._in(self._rev_subject, subjects))
+                      .values(version=version))
         if drop:
-            self._take_away(sa.and_(self._subject == subject, t.c.node.in_(list(drop))),
+            self._take_away(sa.and_(self._in(self._subject, subjects),
+                                    t.c.node.in_(list(drop))),
                             now=now, reason=Reason.MIGRATE)
-        self._rewrite_arrivals(subject, rename=rename, drop=drop)
+        self._rewrite_arrivals(subjects, rename=rename, drop=drop)
         if not rename:
             return
         columns = [self._subject.key, *REQUIRED_COLUMNS]
-        moved = [dict(zip(columns, row, strict=True)) for row in self._execute(
-            sa.delete(t).where(self._subject == subject, t.c.node.in_(list(rename)))
-            .returning(*[t.c[c] for c in columns])).fetchall()]
-        for row in moved:
-            row["node"] = rename[row["node"]]
+        moved = self._execute(
+            sa.delete(t).where(self._in(self._subject, subjects), t.c.node.in_(list(rename)))
+            .returning(*[t.c[c] for c in columns])).fetchall()
         if moved:
-            self._execute(sa.insert(t).values(moved))
+            rows = {c: [row[i] for row in moved] for i, c in enumerate(columns)}
+            rows["node"] = [rename[n] for n in rows["node"]]
+            self._execute(self._insert_rows(t, rows))
 
     def enroll(self, subjects: list[Any], policy: str | None) -> int:
         r = self.revisions
@@ -718,10 +736,16 @@ class PostgresDriver(PostgresCommon):
     # -- read --------------------------------------------------------------
 
     def progress(self, subject: Any) -> dict[str, str]:
+        return self.progress_many([subject]).get(subject, {})
+
+    def progress_many(self, subjects: list[Any]) -> dict[Any, dict[str, str]]:
         t = self.table
-        return {r[0]: r[1] for r in self._execute(
-            sa.select(t.c.node, t.c.status).where(self._subject == subject)
-        ).fetchall()}
+        out: dict[Any, dict[str, str]] = {}
+        for subject, name, status in self._execute(
+                sa.select(self._subject, t.c.node, t.c.status)
+                .where(self._in(self._subject, list(subjects)))).fetchall():
+            out.setdefault(subject, {})[name] = status
+        return out
 
     def enter(self, name: str, entries: list[tuple[Any, int]], *,
               archive: tuple[str, ...], now: str) -> list[Any]:

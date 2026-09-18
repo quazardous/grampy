@@ -35,10 +35,12 @@ A harness provides:
 
 and, optionally, for the cost tests (skipped without them):
 
-    statement_bounds             {"claim": (base, per_subject)}: the most
-                                 statements a claim of one page may send —
-                                 the driver's own word, which the contract
-                                 holds it to
+    statement_bounds             {operation: (base, per_subject)}: the most
+                                 statements the operation may send — the
+                                 driver's own word, which the contract holds
+                                 it to. Operations: "claim" (one page),
+                                 "arrive", "keep every ref", "migrate";
+                                 each one left out is not checked
     statements()                 a context manager yielding a function that
                                  returns the statements sent inside it
 """
@@ -316,6 +318,56 @@ class JournalContract:
         assert sent() <= base + per_subject * len(taken), (
             f"{sent()} statements for a claim of one page; the driver declares "
             f"{base} + {per_subject} per subject")
+
+    MANY = 30
+
+    def _arrive_skipping(self, harness, clock):
+        journal = harness.journal(_listing(while_running=WhileRunning.SKIP), clock)
+        subjects = [f"s{i}" for i in range(self.MANY)]
+        running = subjects[::3]                  # a third arrive while their pass runs
+        clock.now = _at(0)
+        journal.arrive("arrive", running)
+        self._settle(harness, journal, running)
+        self._claim(harness, journal, "scrape", running, limit=len(running))
+        journal.arrive("arrive", ["warm"])
+
+        def work():
+            assert journal.arrive("arrive", subjects)[Outcome.SKIPPED] == len(running)
+        return work
+
+    def _keep_every_ref(self, harness, clock):
+        journal = harness.journal(_listing(merge=Merge.ALL, max_size=2), clock)
+        subjects = [f"s{i}" for i in range(self.MANY)]
+        journal.arrive("arrive", subjects, ref="r1")
+        journal.arrive("arrive", subjects[::2], ref="r2")   # two sets of refs waiting
+        return lambda: journal.arrive("arrive", subjects, ref="r3")
+
+    def _migrate(self, harness, clock):
+        v1 = harness.journal(self.V1, clock)
+        v2 = harness.journal_on(v1, self.V2, clock)
+        subjects = [f"s{i}" for i in range(self.MANY)]
+        self._run(harness, v1, "fetch", ["warm", *subjects])
+        self._run(harness, v1, "crop", subjects[::2])
+        v2.migrate(["warm"], self.V1, {"crop": "trim"})
+        return lambda: v2.migrate(subjects, self.V1, {"crop": "trim"})
+
+    @pytest.mark.parametrize("operation", ["arrive", "keep every ref", "migrate"])
+    def test_a_call_over_many_subjects_stays_within_the_statements_its_driver_declares(
+            self, harness, clock, operation):
+        """A DRIVER THAT DECLARES A BOUND IS HELD TO IT — the round trips an
+        application pays on a network. Each call warms up first: a driver may
+        check something once, on its first write."""
+        bound = (getattr(harness, "statement_bounds", None) or {}).get(operation)
+        if bound is None:
+            pytest.skip(f"this driver declares no bound on {operation!r}")
+        work = {"arrive": self._arrive_skipping, "keep every ref": self._keep_every_ref,
+                "migrate": self._migrate}[operation](harness, clock)
+        with harness.statements() as sent:
+            work()
+        base, per_subject = bound
+        assert sent() <= base + per_subject * self.MANY, (
+            f"{sent()} statements for {operation!r} over {self.MANY} subjects; the "
+            f"driver declares {base} + {per_subject} per subject")
 
     # -- claim ---------------------------------------------------------------
 
@@ -781,6 +833,25 @@ class JournalContract:
                                      "thumb": Status.DONE}
         assert self._claim(harness, v2, "watermark", ["s1"]) == ["s1"], (
             "the new node is next, as if the subject had started on v2")
+
+    def test_a_migration_swapping_two_nodes_moves_every_row_once(self, harness, clock):
+        """A RENAME CHAIN — `a` becomes `b` while `b` becomes `a` — over
+        several subjects at once: a driver renaming in place, or one subject
+        after another in the wrong order, would collide or overwrite."""
+        nodes = (Node("start"), Node("a", parents=("start",)), Node("b", parents=("start",)))
+        before = Graph(Document("pair", version="1"), nodes)
+        after = Graph(Document("pair", version="2"), nodes)
+        v1 = harness.journal(before, clock)
+        v2 = harness.journal_on(v1, after, clock)
+        self._run(harness, v1, "start", ["s1", "s2", "s3"])
+        self._run(harness, v1, "a", ["s1", "s2", "s3"])
+        lease = self._claim(harness, v1, "b", ["s2", "s3"])
+        v1.fail("b", list(lease), token=lease.token)
+        assert v2.migrate(["s1", "s2", "s3"], before, {"a": "b", "b": "a"}) == 3
+        done = {"start": Status.DONE, "b": Status.DONE}
+        assert v2.progress("s1") == done
+        assert v2.progress("s2") == {**done, "a": Status.FAILED}
+        assert v2.progress("s3") == {**done, "a": Status.FAILED}
 
     def test_migration_is_all_or_nothing(self, harness, clock):
         v1 = harness.journal(self.V1, clock)

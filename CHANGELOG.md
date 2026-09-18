@@ -20,6 +20,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- On the PostgreSQL drivers, `arrive`, a lane keeping every version, and
+  `migrate` send the same few statements whatever the number of subjects,
+  instead of a few per subject: a migration of 30 subjects went from 156
+  statements to 7, an arrival from 32 to 3. A driver of your own may offer
+  the same through the optional `progress_many` and `rewrite_many`; without
+  them the journal goes subject by subject, as before.
+- The shared driver contract checks a migration that swaps two nodes over
+  several subjects, and holds a driver that declares it to its number of
+  statements for `arrive`, keeping every ref and `migrate`.
+
 ## [0.4.0] - 2026-09-18
 
 ### Added

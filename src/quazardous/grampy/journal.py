@@ -242,6 +242,12 @@ class JournalDriver(Protocol):
     revision has not moved — exactly what the journal's own loop would
     write, which the shared contract checks. Leave it out, and the journal
     reads the candidates and writes as for a claim.
+
+    OPTIONAL, `progress_many(subjects) -> {subject: progress}` and
+    `rewrite_many(subjects, *, rename, drop, version, now)`: `progress` and
+    `rewrite` for many subjects at once — a subject without rows may be left
+    out of the first. Leave them out, and the journal calls the single ones
+    subject by subject: the same result, a round trip each.
     """
 
     def scan(self, candidates: Any, *, name: str | None, nodes: tuple[str, ...],
@@ -918,13 +924,16 @@ class NodeJournal:
 
         subjects = _unique(subjects)
         pinned = self.driver.versions(subjects)
+        progresses = self._progress_many(
+            [s for s in subjects
+             if pinned.get(s, source.document.identity) == source.document.identity])
         problems: dict[Any, str] = {}
         plans: dict[Any, tuple[dict[str, str], tuple[str, ...]]] = {}
         for subject in subjects:
             if pinned.get(subject, source.document.identity) != source.document.identity:
                 problems[subject] = f"pinned to {pinned[subject]!r}"
                 continue
-            progress = self.driver.progress(subject)
+            progress = progresses.get(subject, {})
             drop = tuple(sorted(name for name in progress if full.get(name, name) is None))
             held = [name for name in drop if progress[name] in (Status.RUNNING, Status.SCHEDULED)]
             if held:
@@ -957,10 +966,22 @@ class NodeJournal:
         every_drop = tuple(sorted(name for name, target in full.items() if target is None))
         now = self._clock()
         target_version: str = self.version
-        for subject in plans:
-            self.driver.rewrite(subject, rename=every_rename, drop=every_drop,
-                                version=target_version, now=now)
+        many = getattr(self.driver, "rewrite_many", None)
+        if many is not None:
+            many(list(plans), rename=every_rename, drop=every_drop,
+                 version=target_version, now=now)
+        else:
+            for subject in plans:
+                self.driver.rewrite(subject, rename=every_rename, drop=every_drop,
+                                    version=target_version, now=now)
         return len(plans)
+
+    def _progress_many(self, subjects: list[Any]) -> dict[Any, dict[str, str]]:
+        """`{subject: progress}` in one read when the driver offers it."""
+        many = getattr(self.driver, "progress_many", None)
+        if many is not None:
+            return dict(many(subjects)) if subjects else {}
+        return {s: self.driver.progress(s) for s in subjects}
 
     def policy(self, subject: Any) -> str | None:
         """The subject's policy, None when it has none."""
@@ -1023,21 +1044,23 @@ class NodeJournal:
         now = self._clock()
         lane_of = self._per_policy(name, "lane", subjects)
         after = (name, *sorted(descendants(name, self.dag)))
+        progresses = self._progress_many(
+            [s for s in subjects if lane_of[s].while_running == WhileRunning.SKIP])
         groups: dict[Lane, list[Any]] = {}
+        skipped: list[Any] = []
         for subject in subjects:
-            lane = lane_of[subject]
-            if lane.while_running == WhileRunning.SKIP and any(
-                    self.driver.progress(subject).get(x) in (Status.RUNNING, Status.SCHEDULED)
-                    for x in after):
-                self.driver.note([subject], name, status=Outcome.SKIPPED, reason=Reason.LANE,
-                                 now=now, ref=ref)
-                out[Outcome.SKIPPED] += 1
+            if any(progresses.get(subject, {}).get(x) in (Status.RUNNING, Status.SCHEDULED)
+                   for x in after):
+                skipped.append(subject)
                 continue
-            groups.setdefault(lane, []).append(subject)
+            groups.setdefault(lane_of[subject], []).append(subject)
+        if skipped:
+            self.driver.note(skipped, name, status=Outcome.SKIPPED, reason=Reason.LANE,
+                             now=now, ref=ref)
+            out[Outcome.SKIPPED] += len(skipped)
         for lane, group in groups.items():
             if lane.keeps_every_ref:
-                for subject in group:
-                    self._keep_every_ref(name, subject, lane, ref, now, urgent, out)
+                self._keep_every_ref(name, group, lane, ref, now, urgent, out)
                 continue
             outcome = self.driver.arrive(name, group, ref=ref, now=now, merge=lane.merge,
                                          position=lane.position, urgent=urgent)
@@ -1050,39 +1073,49 @@ class NodeJournal:
         self._pin(subjects)
         return out
 
-    def _keep_every_ref(self, name: str, subject: Any, lane: Lane, ref: str | None,
+    def _keep_every_ref(self, name: str, subjects: list[Any], lane: Lane, ref: str | None,
                         now: str, urgent: bool, out: dict[str, int]) -> None:
         """MERGE BY READING WHAT WAITS, THEN WRITING — under the driver's
-        guard, on this subject's place in this lane.
+        guard, on each subject's place in this lane.
 
         `first`, `last` and `dedupe` decide without looking, so one atomic
         write does them. Keeping every ref, or asking a function, cannot:
         two workers arriving at once would each start from the state before
         the other, and one would overwrite the other's version. The guard is
         the same one rate and concurrency take (`arrival|<node>|<subject>`).
-        """
+
+        Many subjects, few writes: subjects that end up with the same refs
+        are written together, and so are the notes of a same ref."""
         merger = self._merger(lane)
-        with self.driver.guard([f"arrival|{name}|{subject}"]):
-            current = self.driver.arrivals([subject], name).get(subject)
-            kept = _decode_refs(current.refs) if current is not None else ()
-            wanted = tuple(merger(kept, ref))
-            dropped = [r for r in kept if r not in wanted]
-            outcome = self.driver.arrive(
-                name, [subject], ref=wanted[-1] if wanted else None, now=now,
-                merge=Merge.SET, position=lane.position, urgent=urgent,
-                refs=_encode_refs(wanted))
-        if dropped:
-            # A REF LET GO IS STILL SAID: past `max_size`, or refused by the
-            # function, it leaves a trace rather than vanishing.
-            for gone in dropped:
-                self.driver.note([subject], name, status=Outcome.DROPPED, reason=Reason.LANE,
-                                 now=now, ref=gone)
-        if outcome.get(subject) == Outcome.MERGED:
-            self.driver.note([subject], name, status=Outcome.MERGED, reason=Reason.LANE,
+        dropped: dict[str, list[Any]] = {}
+        merged: list[Any] = []
+        with self.driver.guard([f"arrival|{name}|{s}" for s in subjects]):
+            current = self.driver.arrivals(subjects, name)
+            same: dict[tuple[str, ...], list[Any]] = {}
+            for subject in subjects:
+                waiting = current.get(subject)
+                kept = _decode_refs(waiting.refs) if waiting is not None else ()
+                wanted = tuple(merger(kept, ref))
+                same.setdefault(wanted, []).append(subject)
+                for gone in kept:
+                    if gone not in wanted:
+                        dropped.setdefault(gone, []).append(subject)
+            for wanted, group in same.items():
+                outcome = self.driver.arrive(
+                    name, group, ref=wanted[-1] if wanted else None, now=now,
+                    merge=Merge.SET, position=lane.position, urgent=urgent,
+                    refs=_encode_refs(wanted))
+                merged += [s for s in group if outcome.get(s) == Outcome.MERGED]
+        # A REF LET GO IS STILL SAID: past `max_size`, or refused by the
+        # function, it leaves a trace rather than vanishing.
+        for gone, group in dropped.items():
+            self.driver.note(group, name, status=Outcome.DROPPED, reason=Reason.LANE,
+                             now=now, ref=gone)
+        if merged:
+            self.driver.note(merged, name, status=Outcome.MERGED, reason=Reason.LANE,
                              now=now, ref=ref)
-            out[Outcome.MERGED] += 1
-        else:
-            out[Outcome.QUEUED] += 1
+        out[Outcome.MERGED] += len(merged)
+        out[Outcome.QUEUED] += len(subjects) - len(merged)
 
     def _merger(self, lane: Lane) -> Callable[[tuple[str, ...], str | None], Any]:
         """The function this lane merges with: `all`'s, or the application's

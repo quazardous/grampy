@@ -322,21 +322,37 @@ class PostgresSubjectDriver(PostgresCommon):
 
     def rewrite(self, subject: Any, *, rename: dict[str, str], drop: tuple[str, ...],
                 version: str, now: str) -> None:
+        self.rewrite_many([subject], rename=rename, drop=drop, version=version, now=now)
+
+    def rewrite_many(self, subjects: list[Any], *, rename: dict[str, str],
+                     drop: tuple[str, ...], version: str, now: str) -> None:
         s = self.subjects
-        self._raise_revisions([subject])
-        self._execute(sa.update(s).where(self._subject == subject).values(version=version))
-        if drop:
-            self._take_away(self._subject == subject, list(drop), now=now, reason=Reason.MIGRATE)
-        self._rewrite_arrivals(subject, rename=rename, drop=drop)
-        if not rename:
+        subjects = sorted(set(subjects))
+        if not subjects:
             return
-        # The row is locked since the revision rose: read, rename, write back.
-        nodes = self._execute(
-            sa.select(s.c.nodes).where(self._subject == subject)).fetchone()[0] or {}
-        moved = {rename.get(n, n): r for n, r in nodes.items() if n in rename}
-        kept = {n: r for n, r in nodes.items() if n not in rename}
-        self._execute(sa.update(s).where(self._subject == subject)
-                      .values(nodes={**kept, **moved}))
+        self._raise_revisions(subjects)
+        mine = self._in(self._subject, subjects)
+        if drop:
+            self._take_away(mine, list(drop), now=now, reason=Reason.MIGRATE)
+        self._rewrite_arrivals(subjects, rename=rename, drop=drop)
+        nodes = s.c.nodes
+        if rename:
+            # Each renamed key taken out and put back under its new name, in
+            # the same UPDATE: the rows are locked since the revisions rose.
+            # `-` of every old name first, so a chain of renames never
+            # overwrites a key it still has to move.
+            each = sa.func.jsonb_each(s.c.nodes).table_valued("key", "value").alias("e")
+            moved = sa.func.coalesce(
+                sa.select(sa.func.jsonb_object_agg(
+                    sa.case(rename, value=each.c.key), each.c.value))
+                .select_from(each).where(each.c.key.in_(sorted(rename)))
+                .scalar_subquery(),
+                sa.cast(sa.literal("{}"), JSONB))
+            kept = nodes
+            for old in sorted(rename):
+                kept = kept.op("-", return_type=JSONB)(sa.literal(old))
+            nodes = kept.op("||", return_type=JSONB)(moved)
+        self._execute(sa.update(s).where(mine).values(version=version, nodes=nodes))
 
     def enroll(self, subjects: list[Any], policy: str | None) -> int:
         s = self.subjects
@@ -398,9 +414,13 @@ class PostgresSubjectDriver(PostgresCommon):
     # -- read ----------------------------------------------------------------
 
     def progress(self, subject: Any) -> dict[str, str]:
-        row = self._execute(sa.select(self.subjects.c.nodes)
-                            .where(self._subject == subject)).fetchone()
-        return {n: r["status"] for n, r in ((row[0] if row else None) or {}).items()}
+        return self.progress_many([subject]).get(subject, {})
+
+    def progress_many(self, subjects: list[Any]) -> dict[Any, dict[str, str]]:
+        return {subject: {n: r["status"] for n, r in (nodes or {}).items()}
+                for subject, nodes in self._execute(
+                    sa.select(self._subject, self.subjects.c.nodes)
+                    .where(self._in(self._subject, list(subjects)))).fetchall()}
 
     def status_counts(self, name: str) -> dict[str, int]:
         status = self._field(name, "status")
