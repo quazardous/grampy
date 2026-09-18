@@ -60,6 +60,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A skip on PostgreSQL could take seconds where one query takes a fraction:
+  the parents' check, written as a count per candidate, was misestimated
+  enough that PostgreSQL compiled the plan (JIT) at a cost higher than running
+  it, and the candidates were read twice. The check is now one `EXISTS` per
+  parent — which speeds up every claim's page too, and `parents_concluded` in
+  your own queries — and a skip is one statement on every layout, the subject
+  layout included (it went page by page). On the bundled benchmark, a skip
+  of 50,000 subjects: 1.3 s → 0.6 s (row per node), 28 s → 0.8 s (row per
+  subject); a claim deep in the graph: 0.47 s → 0.21 s.
 - The memory driver read one subject's progress by scanning every row of
   every subject: a journal slowed down as it grew. Rows are now indexed by
   subject; the demo's simulation runs in less than half the time.

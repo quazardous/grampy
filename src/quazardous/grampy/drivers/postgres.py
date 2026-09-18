@@ -143,6 +143,14 @@ def _ranked(candidates: Any) -> Any:
     return candidates.order_by(None).add_columns(rank.label("grampy_rank")).subquery("c")
 
 
+def _plain(candidates: Any) -> Any:
+    """The candidates as subquery `c`, unranked — for a read whose result
+    does not depend on their order. A LIMIT or an OFFSET keeps its ORDER BY."""
+    if candidates._limit_clause is not None or candidates._offset_clause is not None:
+        return candidates.subquery("c")
+    return candidates.order_by(None).subquery("c")
+
+
 def _epoch(moment: Any) -> Any:
     """The seconds of an ISO timestamp stored as text — a `numeric`, which
     `round(x, 1)` accepts."""
@@ -551,67 +559,56 @@ class PostgresDriver(PostgresCommon):
 
     def skip_where(self, name: str, candidates: Any, *, parents: tuple[str, ...],
                    now: str, version: str | None, limit: int | None = None) -> list[Any]:
-        """`skip` IN ONE WRITE, instead of reading every candidate page.
+        """`skip` IN ONE STATEMENT, instead of reading every candidate page.
 
         The rule, in SQL: no row for `name` at all, every parent satisfying,
-        a subject pinned to `version` or to none. The same guard as a claim
-        then holds it: the revisions read are locked `FOR SHARE` in the
-        statement that writes, and a subject whose revision moved meanwhile
-        — a parent forgotten — is not skipped. Two statements whatever the
-        number of candidates: the revisions seeded, then the write. With
-        `limit`, both take the first `limit` eligible candidates by rank:
-        once seeded, those are the ones the write reads."""
+        a subject pinned to `version` or to none. The candidates and the rule
+        are evaluated ONCE, in the CTE `read`; the claim's guard then holds
+        each subject read — its revision row locked `FOR SHARE` if it still
+        carries the revision read, or inserted by this same statement if it
+        had none — and a subject whose revision moved meanwhile (a parent
+        forgotten) is not skipped. Unranked unless `limit` asks for the first
+        candidates by rank: a whole skip does not depend on their order."""
         t, r = self.table, self.revisions
-        key = self._subject.key
-
-        def eligible(candidate: Any) -> list[Any]:
-            held = t.alias("held")
-            conditions = [~sa.exists().where(held.c[key] == candidate, held.c.node == name)]
-            if parents:
-                conditions.append(self.parents_concluded(parents, candidate))
-            if version is not None:
-                other = r.alias("other")
-                conditions.append(~sa.exists().where(
-                    other.c[self._rev_subject.key] == candidate,
-                    other.c.version.is_not(None), other.c.version != version))
-            return conditions
-
-        def first(query: Any, rank: Any) -> Any:
-            """The query's rows once each — the first `limit` by rank."""
-            if limit is None:
-                return query.distinct()
-            return query.order_by(sa.func.min(rank)).limit(int(limit))
-
-        c = _ranked(candidates)
+        key, rev_key = self._subject.key, self._rev_subject.key
+        c = _plain(candidates) if limit is None else _ranked(candidates)
         candidate = list(c.c)[0]
-        seeds = sa.select(candidate, sa.literal(0)).where(*eligible(candidate))
-        if limit is not None:
-            seeds = seeds.group_by(candidate)
-        self._execute(
-            postgresql.insert(r).from_select(
-                [self._rev_subject.key, "revision"], first(seeds, c.c.grampy_rank))
-            .on_conflict_do_nothing())
-        c = _ranked(candidates)
-        candidate = list(c.c)[0]
+        held = t.alias("held")
+        eligible = [~sa.exists().where(held.c[key] == candidate, held.c.node == name)]
+        if parents:
+            eligible.append(self.parents_concluded(parents, candidate))
         seen = r.alias("seen")
+        if version is not None:
+            eligible.append(sa.or_(seen.c.version.is_(None), seen.c.version == version))
         read = (sa.select(candidate.label("subject"), seen.c.revision.label("revision"))
-                .select_from(c.join(seen, seen.c[self._rev_subject.key] == candidate))
-                .where(*eligible(candidate)))
-        if limit is not None:
-            read = read.group_by(candidate, seen.c.revision)
-        read = first(read, c.c.grampy_rank).cte("read")
-        unchanged = (
-            sa.select(self._rev_subject)
-            .join(read, sa.and_(self._rev_subject == read.c.subject,
-                                r.c.revision == read.c.revision))
-            .with_for_update(read=True, of=r)
-            .cte("unchanged"))
+                .select_from(c.outerjoin(seen, seen.c[rev_key] == candidate))
+                .where(*eligible))
+        if limit is None:
+            read = read.distinct()
+        else:
+            read = (read.group_by(candidate, seen.c.revision)
+                    .order_by(sa.func.min(c.c.grampy_rank)).limit(int(limit)))
+        read = read.cte("read")
+        locked = (sa.select(self._rev_subject.label("subject"))
+                  .join(read, sa.and_(self._rev_subject == read.c.subject,
+                                      r.c.revision == read.c.revision))
+                  .with_for_update(read=True, of=r)
+                  .cte("locked"))
+        seeded = (postgresql.insert(r).from_select(
+                      [rev_key, "revision"],
+                      sa.select(read.c.subject, sa.literal(0))
+                      .where(read.c.revision.is_(None)))
+                  .on_conflict_do_nothing()
+                  .returning(self._rev_subject.label("subject"))
+                  .cte("seeded"))
+        unchanged = sa.union_all(sa.select(locked.c.subject),
+                                 sa.select(seeded.c.subject)).cte("unchanged")
         rows = self._execute(
             postgresql.insert(t).from_select(
                 [key, "node", "status", "started_at", "finished_at"],
-                sa.select(unchanged.c[self._rev_subject.key], sa.literal(name),
+                sa.select(unchanged.c.subject, sa.literal(name),
                           sa.literal(Status.SKIPPED), sa.literal(now), sa.literal(now))
-                .order_by(unchanged.c[self._rev_subject.key]))
+                .order_by(unchanged.c.subject))
             .on_conflict_do_nothing()
             .returning(self._subject)).fetchall()
         return [row[0] for row in rows]
@@ -870,14 +867,19 @@ class PostgresDriver(PostgresCommon):
         return out
 
     def parents_concluded(self, parents: tuple[str, ...], subject: Any) -> Any:
-        """A SQL expression: the count of satisfying parent rows equals the
-        number of parents — zero parents, zero rows required.
+        """A SQL expression: every parent has a satisfying row — true for no
+        parent at all. `subject` is a column or a value; the expression
+        correlates with it.
 
-        `subject` is a column or a value; the expression correlates with it.
-        """
-        concluded = self.table.alias("p")
-        return sa.select(sa.func.count()).select_from(concluded).where(
-            concluded.c[self._subject.key] == subject,
-            concluded.c.node.in_(list(parents)),
-            concluded.c.status.in_(NODE_SATISFYING),
-        ).scalar_subquery() == len(parents)
+        ONE `EXISTS` PER PARENT, not a count compared to their number: the
+        planner turns each into a semi-join and estimates it, where a count
+        per candidate was estimated at a fraction of the rows it kept — and
+        costed high enough to be compiled, which cost more than it ran."""
+        conditions: list[Any] = []
+        for parent in parents:
+            concluded = self.table.alias(f"p_{len(conditions)}")
+            conditions.append(sa.exists().where(
+                concluded.c[self._subject.key] == subject,
+                concluded.c.node == parent,
+                concluded.c.status.in_(NODE_SATISFYING)))
+        return sa.and_(sa.true(), *conditions)

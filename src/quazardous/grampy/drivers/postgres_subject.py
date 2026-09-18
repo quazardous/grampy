@@ -53,6 +53,7 @@ from collections.abc import Callable, Iterator
 from typing import Any
 
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import JSONB
 
 from ..dag import (
@@ -60,7 +61,7 @@ from ..dag import (
 )
 from ..journal import Entry, Page
 from ..names import Outcome, Reason, Status
-from .postgres import PostgresCommon, _clock, _epoch, _ranked
+from .postgres import PostgresCommon, _clock, _epoch, _plain, _ranked
 
 #: THE COLUMNS THE SUBJECTS TABLE MUST CARRY, besides the subject.
 SUBJECT_COLUMNS = ("revision", "policy", "version", "nodes")
@@ -227,6 +228,49 @@ class PostgresSubjectDriver(PostgresCommon):
                 sa.or_(s.c.nodes.op("->", return_type=JSONB)(name).is_(None),
                        sa.and_(self._field(name, "status") == Status.SCHEDULED,
                                self._field(name, "started_at") <= now))))
+            .returning(self._subject)).fetchall()
+        return [r[0] for r in rows]
+
+    def skip_where(self, name: str, candidates: Any, *, parents: tuple[str, ...],
+                   now: str, version: str | None, limit: int | None = None) -> list[Any]:
+        """`skip` IN ONE UPSERT, instead of reading every candidate page.
+
+        The candidates are joined to their documents once, and the rule read
+        there: no row for `name`, every parent satisfying, pinned to
+        `version` or to none. The upsert's own condition — the revision
+        still the one read, still no row for `name` — is checked by
+        PostgreSQL on each document's latest version, as for a claim: a
+        subject whose revision moved meanwhile is not skipped. Unranked
+        unless `limit` asks for the first candidates by rank."""
+        s = self.subjects
+        c = _plain(candidates) if limit is None else _ranked(candidates)
+        candidate = list(c.c)[0]
+        mine = s.alias("mine")
+        eligible = [mine.c.nodes.op("->", return_type=JSONB)(name).is_(None)]
+        eligible += [self._field(p, "status", mine.c.nodes).in_(NODE_SATISFYING)
+                     for p in parents]
+        if version is not None:
+            eligible.append(sa.or_(mine.c.version.is_(None), mine.c.version == version))
+        read = (sa.select(candidate.label("subject"),
+                          sa.func.coalesce(mine.c.revision, 0).label("revision"))
+                .select_from(c.outerjoin(mine, mine.c[self._key] == candidate))
+                .where(*eligible))
+        if limit is None:
+            read = read.distinct()
+        else:
+            read = (read.group_by(candidate, mine.c.revision)
+                    .order_by(sa.func.min(c.c.grampy_rank)).limit(int(limit)))
+        read = read.subquery("read")
+        insert = postgresql.insert(s).from_select(
+            [self._key, "revision", "nodes"],
+            sa.select(read.c.subject, read.c.revision,
+                      self._json({name: _row(Status.SKIPPED, now, now, None)}))
+            .order_by(read.c.subject))
+        rows = self._execute(insert.on_conflict_do_update(
+            index_elements=[self._key],
+            set_={"nodes": self._merged(s.c.nodes, insert.excluded.nodes)},
+            where=sa.and_(s.c.revision == insert.excluded.revision,
+                          s.c.nodes.op("->", return_type=JSONB)(name).is_(None)))
             .returning(self._subject)).fetchall()
         return [r[0] for r in rows]
 

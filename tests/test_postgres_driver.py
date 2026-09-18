@@ -536,7 +536,8 @@ def test_a_column_that_is_not_named_grampy_key_is_never_a_key(engine):
         conn.rollback()
 
 
-@pytest.mark.parametrize("layout", [RowLayout(), ReadyLayout()], ids=["row", "ready"])
+@pytest.mark.parametrize("layout", [RowLayout(), SubjectLayout(), ReadyLayout()],
+                         ids=["row", "subject", "ready"])
 @pytest.mark.parametrize("versioned", [False, True], ids=["tuple", "graph"])
 def test_skip_in_one_write_equals_the_loop(engine, layout, versioned):
     """`skip` WRITES: a fast path slightly wrong would let children start
@@ -564,7 +565,11 @@ def test_skip_in_one_write_equals_the_loop(engine, layout, versioned):
             for subject, progress in zip(subjects, progresses, strict=True):
                 layout.seed(conn, tables, subject, progress, driver)
             pinned = subjects[-1]
-            if versioned:                           # one subject belongs to another graph
+            if versioned and "subjects" in tables:  # one subject belongs to another graph
+                conn.execute(sa.update(tables["subjects"])
+                             .where(tables["subjects"].c.subject == pinned)
+                             .values(version="elsewhere"))
+            elif versioned:
                 conn.execute(sa.update(tables["revisions"])
                              .where(tables["revisions"].c.subject == pinned)
                              .values(version="elsewhere"))
