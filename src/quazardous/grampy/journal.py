@@ -188,9 +188,9 @@ class Entry(NamedTuple):
     policy: str | None = None
     #: The graph the subject is pinned to, None before its first write.
     version: str | None = None
-    #: WHAT THE CANDIDATES SAID TO GROUP THIS SUBJECT BY — a second column of
-    #: the query, or the second half of a `(subject, key)` pair. Compared,
-    #: never read; None when the candidates named none.
+    #: WHAT THE CANDIDATES SAID TO GROUP THIS SUBJECT BY — their column named
+    #: `grampy_key`, or the key of a `Keyed`. Compared, never read; None when
+    #: the candidates named none.
     key: str | None = None
 
 
@@ -223,8 +223,9 @@ class Arrival(NamedTuple):
     refs: str | None = None
 
 
-class JournalDriver(Protocol):
-    """The storage a journal needs. Every method works on node rows:
+class CoreDriver(Protocol):
+    """WHAT EVERY JOURNAL NEEDS: node rows, revisions, the history, the
+    clock and the guard. Every method works on node rows:
     `(subject, node) → status, started_at, finished_at`, one row per pair,
     and on one REVISION per subject — 0 for a subject never forgotten.
 
@@ -234,20 +235,9 @@ class JournalDriver(Protocol):
     A driver NEVER validates against the graph, never decides what is
     claimable — the journal does both — and never commits.
 
-    OPTIONAL, `skip_where(name, candidates, *, parents, now, version) ->
-    subjects`: `skip` in one write, for a node joining its parents plainly.
-    It writes a `skipped` row, started and finished at `now`, for every
-    candidate with no row for `name`, a satisfying row for every parent,
-    pinned to `version` or to none (any, when `version` is None), and whose
-    revision has not moved — exactly what the journal's own loop would
-    write, which the shared contract checks. Leave it out, and the journal
-    reads the candidates and writes as for a claim.
-
-    OPTIONAL, `progress_many(subjects) -> {subject: progress}` and
-    `rewrite_many(subjects, *, rename, drop, version, now)`: `progress` and
-    `rewrite` for many subjects at once — a subject without rows may be left
-    out of the first. Leave them out, and the journal calls the single ones
-    subject by subject: the same result, a round trip each.
+    The history is core, not an extra: retry limits and loop bounds count
+    its rows (`archived`, `latest`). So is `guard`: groups and lanes
+    serialise on it, not only limits.
     """
 
     def scan(self, candidates: Any, *, name: str | None, nodes: tuple[str, ...],
@@ -309,6 +299,54 @@ class JournalDriver(Protocol):
         """Record each subject's policy in the registry (the revisions),
         creating its entry when needed. Return the count written."""
 
+    def policies(self, subjects: list[Any]) -> dict[Any, str]:
+        """`{subject: policy}` for the subjects that have one."""
+
+    def history(self, subject: Any) -> list[dict[str, Any]]:
+        """The archived rows of one subject, oldest archive first (ties by
+        node): `node, status, started_at, finished_at, lease, archived_at,
+        reason`."""
+
+    def archived(self, subjects: list[Any], name: str, reason: str) -> dict[Any, int]:
+        """`{subject: rows of `name` archived with `reason`}`, subjects
+        without any left out."""
+
+    def latest(self, subjects: list[Any], name: str,
+               reason: str | None) -> dict[Any, str]:
+        """`{subject: latest archived_at}` of the history rows of `name` —
+        with `reason` when given, any reason otherwise; subjects without any
+        left out."""
+
+    def note(self, subjects: list[Any], name: str, *, status: str, reason: str,
+             now: str, ref: str | None) -> int:
+        """Append to each subject's history a row `node=name`, `status`,
+        `reason`, started, finished and archived at `now`, `ref` in `lease`.
+        Return the count written."""
+
+    def prune_history(self, before: str, keep: tuple[str, ...]) -> int:
+        """Delete the history rows archived before `before` whose reason is
+        not in `keep`. Return the count deleted."""
+
+    def now(self) -> str:
+        """The storage's clock, in the journal's format (`utc_now`): ONE
+        source of time for every process writing to the same storage."""
+
+    def guard(self, keys: list[str]) -> AbstractContextManager[None]:
+        """SERIALISE writers on `keys` — sorted — from entering the block
+        until the caller's transaction ends (for a storage without
+        transactions, until the block ends). What a claim under a rate or
+        concurrency limit reads and writes inside it, no other claim on the
+        same keys can interleave."""
+
+    def progress(self, subject: Any) -> dict[str, str]:
+        """`{node: status}` for one subject."""
+
+
+class VersionDriver(Protocol):
+    """NEEDED AS SOON AS THE JOURNAL IS BUILT ON A `Graph`: every write
+    pins its subjects to the graph they started on, and a migration moves
+    them to another."""
+
     def pin(self, subjects: list[Any], version: str) -> int:
         """Record `version` for the subjects that have none yet — never
         overwrite one. Return the count newly pinned."""
@@ -324,27 +362,26 @@ class JournalDriver(Protocol):
         waiting in those nodes deleted and renamed alike — pin the subject
         to `version`, overwriting, and raise its revision."""
 
-    def policies(self, subjects: list[Any]) -> dict[Any, str]:
-        """`{subject: policy}` for the subjects that have one."""
 
-    def history(self, subject: Any) -> list[dict[str, Any]]:
-        """The archived rows of one subject, oldest archive first (ties by
-        node): `node, status, started_at, finished_at, lease, archived_at,
-        reason`."""
+class LimitDriver(Protocol):
+    """NEEDED BY A NODE WITH A `rate` OR A `concurrency`, in the graph or
+    in one of its policies."""
 
-    def archived(self, subjects: list[Any], name: str, reason: str) -> dict[Any, int]:
-        """`{subject: rows of `name` archived with `reason`}`, subjects
-        without any left out."""
+    def limits(self, keys: list[str]) -> dict[str, float]:
+        """`{key: value}` of the stored limiter state, keys never set left out."""
 
-    def prune_history(self, before: str, keep: tuple[str, ...]) -> int:
-        """Delete the history rows archived before `before` whose reason is
-        not in `keep`. Return the count deleted."""
+    def set_limits(self, values: dict[str, float]) -> None:
+        """Store limiter state, creating the keys as needed."""
 
-    def note(self, subjects: list[Any], name: str, *, status: str, reason: str,
-             now: str, ref: str | None) -> int:
-        """Append to each subject's history a row `node=name`, `status`,
-        `reason`, started, finished and archived at `now`, `ref` in `lease`.
-        Return the count written."""
+    def running(self, name: str, policies: tuple[str | None, ...] | None) -> int:
+        """How many rows of `name` are RUNNING — of subjects whose policy is
+        in `policies` (None in it stands for "no policy"), or of all
+        subjects when `policies` is None."""
+
+
+class LaneDriver(Protocol):
+    """NEEDED BY A NODE WITH A `lane`, in the graph or in one of its
+    policies."""
 
     def arrive(self, name: str, subjects: list[Any], *, ref: str | None, now: str,
                merge: str, position: str, urgent: bool,
@@ -374,36 +411,11 @@ class JournalDriver(Protocol):
     def queued(self, name: str) -> int:
         """How many arrivals wait in `name`."""
 
-    def latest(self, subjects: list[Any], name: str,
-               reason: str | None) -> dict[Any, str]:
-        """`{subject: latest archived_at}` of the history rows of `name` —
-        with `reason` when given, any reason otherwise; subjects without any
-        left out."""
 
-    def now(self) -> str:
-        """The storage's clock, in the journal's format (`utc_now`): ONE
-        source of time for every process writing to the same storage."""
-
-    def guard(self, keys: list[str]) -> AbstractContextManager[None]:
-        """SERIALISE writers on `keys` — sorted — from entering the block
-        until the caller's transaction ends (for a storage without
-        transactions, until the block ends). What a claim under a rate or
-        concurrency limit reads and writes inside it, no other claim on the
-        same keys can interleave."""
-
-    def limits(self, keys: list[str]) -> dict[str, float]:
-        """`{key: value}` of the stored limiter state, keys never set left out."""
-
-    def set_limits(self, values: dict[str, float]) -> None:
-        """Store limiter state, creating the keys as needed."""
-
-    def running(self, name: str, policies: tuple[str | None, ...] | None) -> int:
-        """How many rows of `name` are RUNNING — of subjects whose policy is
-        in `policies` (None in it stands for "no policy"), or of all
-        subjects when `policies` is None."""
-
-    def progress(self, subject: Any) -> dict[str, str]:
-        """`{node: status}` for one subject."""
+class ReadingDriver(Protocol):
+    """READS FOR THE APPLICATION, never on a write path: `journal.counts`,
+    `journal.stages` and `journal.parents_concluded` need them, nothing
+    else does."""
 
     def status_counts(self, name: str) -> dict[str, int]:
         """`{status: count}` for one node."""
@@ -415,6 +427,81 @@ class JournalDriver(Protocol):
 
     def parents_concluded(self, parents: tuple[str, ...], subject: Any) -> Any:
         """"Every parent has a satisfying row" — in the driver's terms."""
+
+
+class JournalDriver(CoreDriver, VersionDriver, LimitDriver, LaneDriver, ReadingDriver,
+                    Protocol):
+    """THE WHOLE STORAGE a journal may need: every capability. A driver
+    offers the core and the capabilities its graphs use; the journal says,
+    when it is built, which one is missing (`MissingCapability`).
+
+    OPTIONAL, `skip_where(name, candidates, *, parents, now, version) ->
+    subjects`: `skip` in one write, for a node joining its parents plainly.
+    It writes a `skipped` row, started and finished at `now`, for every
+    candidate with no row for `name`, a satisfying row for every parent,
+    pinned to `version` or to none (any, when `version` is None), and whose
+    revision has not moved — exactly what the journal's own loop would
+    write, which the shared contract checks. Leave it out, and the journal
+    reads the candidates and writes as for a claim.
+
+    OPTIONAL, `progress_many(subjects) -> {subject: progress}` and
+    `rewrite_many(subjects, *, rename, drop, version, now)`: `progress` and
+    `rewrite` for many subjects at once — a subject without rows may be left
+    out of the first. Leave them out, and the journal calls the single ones
+    subject by subject: the same result, a round trip each.
+    """
+
+
+#: The capabilities a driver may offer, by name: the core, and one per
+#: feature a graph may use.
+CAPABILITIES: dict[str, type] = {
+    "core": CoreDriver, "versions": VersionDriver, "limits": LimitDriver,
+    "lanes": LaneDriver, "reading": ReadingDriver}
+
+
+def capability_methods(capability: str) -> tuple[str, ...]:
+    """The methods a driver offers when it offers `capability`."""
+    protocol = CAPABILITIES[capability]
+    return tuple(sorted(n for n, v in vars(protocol).items()
+                        if callable(v) and not n.startswith("_")))
+
+
+class MissingCapability(TypeError):
+    """THE DRIVER LACKS A CAPABILITY this journal needs — raised when the
+    journal is built (or, for `reading`, when a reading method is called),
+    naming the capability, why it is needed and the methods missing."""
+
+    def __init__(self, capability: str, why: str, missing: list[str]) -> None:
+        self.capability = capability
+        self.missing = missing
+        super().__init__(
+            f"the driver lacks the {capability!r} capability, needed by {why}: it has "
+            f"no {', '.join(missing)} — see docs/writing-a-driver.md")
+
+
+def _require(driver: Any, capability: str, why: str) -> None:
+    missing = [m for m in capability_methods(capability)
+               if not callable(getattr(driver, m, None))]
+    if missing:
+        raise MissingCapability(capability, why, missing)
+
+
+def needed_capabilities(dag: tuple[Node, ...] | Graph) -> dict[str, str]:
+    """`{capability: why}` for what a journal on `dag` needs of its driver
+    — `reading` aside, needed only by the reading methods. A policy's
+    variant of a node counts as much as the node itself."""
+    needs = {"core": "every journal"}
+    variants: list[tuple[Node, ...]] = [tuple(dag)] if not isinstance(dag, Graph) else [
+        dag.nodes, *(dag.variant(p) for p in sorted(dag.policies))]
+    if isinstance(dag, Graph):
+        needs["versions"] = "a journal on a Graph (its subjects are pinned to it)"
+    for nodes in variants:
+        for n in nodes:
+            if (n.rate or n.concurrency is not None) and "limits" not in needs:
+                needs["limits"] = f"node {n.name!r}, which has a rate or a concurrency"
+            if n.lane is not None and "lanes" not in needs:
+                needs["lanes"] = f"node {n.name!r}, which is a lane"
+    return needs
 
 
 class NodeJournal:
@@ -430,6 +517,10 @@ class NodeJournal:
         (`JournalDriver.now`): workers on several machines then share one
         time. `rng` spreads retry jitter. `mergers` names the functions a
         lane may merge with (`Lane(merge="fn:<name>")`)."""
+        # WHAT THE GRAPH USES, THE DRIVER MUST OFFER — said now, naming what
+        # is missing, rather than as an AttributeError at the first claim.
+        for capability, why in needed_capabilities(dag).items():
+            _require(driver, capability, why)
         self.driver = driver
         self.graph = dag if isinstance(dag, Graph) else None
         self.dag = dag.nodes if isinstance(dag, Graph) else dag
@@ -660,6 +751,7 @@ class NodeJournal:
         SQL expression for the postgres one, so an application can count
         what is waiting for a node in its own query.
         """
+        _require(self.driver, "reading", "journal.parents_concluded")
         return self.driver.parents_concluded(node(name, self.dag).parents, subject)
 
     # -- conclude ----------------------------------------------------------
@@ -1309,11 +1401,13 @@ class NodeJournal:
         ONE READ FOR THE BATCH, not one per subject. ONLY NODES THAT WORKED:
         a `skipped` row never started. A node STILL RUNNING ends `at`.
         """
+        _require(self.driver, "reading", "journal.stages")
         return self.driver.stages(list(subjects), at=stamp(at))
 
     def counts(self, name: str) -> dict[str, int]:
         """How many subjects stand where, for this node."""
         n = node(name, self.dag)
+        _require(self.driver, "reading", "journal.counts")
         by_status = self.driver.status_counts(name)
         out: dict[str, int] = {status: int(by_status.get(status, 0))
                                for status in (Status.RUNNING, Status.SCHEDULED, *NODE_CONCLUDED)}

@@ -31,6 +31,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The shared driver contract checks a migration that swaps two nodes over
   several subjects, and holds a driver that declares it to its number of
   statements for `arrive`, keeping every ref and `migrate`.
+- The driver protocol is split into five capabilities: `CoreDriver`, and
+  `VersionDriver`, `LimitDriver`, `LaneDriver`, `ReadingDriver` for what a
+  graph may use. A driver offers the core and what its graphs need; a journal
+  whose graph needs a capability the driver lacks refuses to be built, naming
+  it and its missing methods (`MissingCapability`), instead of failing at the
+  first claim. `JournalDriver` is still the whole of it.
+- The shared contract certifies a driver on what it declares: a harness
+  listing its `capabilities` has the tests needing another one skipped.
+- A guide to writing a driver: the capabilities, which methods may return a
+  superset and which must be exact, transactions, grouping keys, the optional
+  fast paths, and certification.
 
 ## [0.4.0] - 2026-09-18
 

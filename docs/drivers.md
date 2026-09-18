@@ -9,6 +9,7 @@ ids and rows per `(subject, node)`; everything else stays yours.
 - [PostgreSQL: the tables you declare](#postgresql-the-tables-you-declare)
 - [PostgreSQL: three layouts, your choice](#postgresql-three-layouts-your-choice)
 - [SQLite](#sqlite)
+- [A transaction around every call](#a-transaction-around-every-call)
 - [Writing a driver](#writing-a-driver)
 
 ## Candidates are your sentence
@@ -232,11 +233,7 @@ their first write raises, and says so.
 
 ## Writing a driver
 
-Implement `quazardous.grampy.journal.JournalDriver` — a few storage operations,
-no rule — and subclass `quazardous.grampy.testing.JournalContract` with a
-harness fixture; see `tests/test_memory_driver.py`. The contract includes
-concurrency tests written in sessions (open, act, commit): how your storage
-stays correct under them is up to it, the outcome is not.
-
-No guarantee may rely on a storage-specific mechanism: it is defined in the
-driver protocol and proven by the shared contract.
+Implement the core of the driver protocol and the capabilities your graphs
+use, then certify it with the shared contract — see
+[writing a driver](writing-a-driver.md): what each method may return, the
+transaction it runs in, and how `JournalContract` holds it to its word.

@@ -17,12 +17,12 @@ Usage, in a test module (pytest is only needed here):
 A harness provides:
 
     journal(dag, clock, subject_type=str)
-    journal_on(journal, dag, clock)
-                                 a second NodeJournal on the SAME storage as
-                                 `journal`, for another graph (versions)
                                  a NodeJournal on EMPTY storage whose subjects
                                  are `str` or `int` (the storage's subject
                                  column typed accordingly)
+    journal_on(journal, dag, clock)
+                                 a second NodeJournal on the SAME storage as
+                                 `journal`, for another graph (versions)
     candidates(subjects)         the driver's candidates, in this order
     seed(journal, subject, progress)
                                  write rows directly, bypassing the API
@@ -32,6 +32,13 @@ A harness provides:
                                  `.candidates(subjects)`, `.commit()`,
                                  `.rollback()`; sessions may live in threads
         .close()                 drops what the store created
+
+and, optionally:
+
+    capabilities                 the capabilities the driver offers, among
+                                 `quazardous.grampy.CAPABILITIES` — "core"
+                                 always. A test that needs one left out is
+                                 skipped; left out, every one is expected.
 
 and, optionally, for the cost tests (skipped without them):
 
@@ -46,6 +53,7 @@ and, optionally, for the cost tests (skipped without them):
 """
 from __future__ import annotations
 
+import functools
 import itertools
 import json
 import os
@@ -71,7 +79,7 @@ from .dag import (
     omitted_by,
 )
 from .graph import Document, Graph
-from .journal import MigrationError
+from .journal import MigrationError, MissingCapability
 from .names import Merge, Outcome, Per, Position, Reason, Status, WhileRunning
 from .timing import Rate, Retry, seconds, shift
 
@@ -2165,3 +2173,27 @@ def _assert_no_orphan(store: Any, subjects: list[Any],
                     f"{missing} are {[progress.get(p) for p in missing]}")
     finally:
         session.rollback()
+
+
+def _skipping_what_the_driver_lacks(test: Any) -> Any:
+    """A TEST RUNS ONLY WHAT THE DRIVER DECLARES. A journal refuses, when it
+    is built, a graph using a capability its driver lacks
+    (`MissingCapability`); a harness that declares `capabilities` without
+    it turns that refusal into a skip. Undeclared, or declared and missing,
+    the refusal fails the test as any error would."""
+
+    @functools.wraps(test)
+    def run(self: Any, *args: Any, **kwargs: Any) -> Any:
+        try:
+            return test(self, *args, **kwargs)
+        except MissingCapability as lacking:
+            declared = getattr(kwargs.get("harness"), "capabilities", None)
+            if declared is not None and lacking.capability not in declared:
+                pytest.skip(f"the driver does not offer {lacking.capability!r}")
+            raise
+    return run
+
+
+for _name, _test in list(vars(JournalContract).items()):
+    if _name.startswith("test_") and callable(_test):
+        setattr(JournalContract, _name, _skipping_what_the_driver_lacks(_test))

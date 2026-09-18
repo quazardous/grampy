@@ -40,12 +40,21 @@ from .dag import (
 )
 from .graph import Document, Graph, GraphFormatError
 from .journal import (
+    CAPABILITIES,
     Arrival,
+    CoreDriver,
     JournalDriver,
     Keyed,
+    LaneDriver,
     Lease,
+    LimitDriver,
     MigrationError,
+    MissingCapability,
     NodeJournal,
+    ReadingDriver,
+    VersionDriver,
+    capability_methods,
+    needed_capabilities,
     utc_now,
 )
 from .names import Backoff, Merge, Name, Outcome, Per, Position, Reason, Status, WhileRunning
@@ -67,6 +76,8 @@ __all__ = [
     "NODE_SATISFYING", "NODE_SCHEDULED", "NODE_SKIPPED", "Rate", "Retry", "DagError",
     "Document", "Graph", "GraphFormatError",
     "Arrival", "Group", "JournalDriver", "Keyed", "Lane", "Lease", "Loop", "MigrationError",
+    "CAPABILITIES", "CoreDriver", "LaneDriver", "LimitDriver", "MissingCapability",
+    "ReadingDriver", "VersionDriver", "capability_methods", "needed_capabilities",
     "Node", "accepts",
     "joined", "omitted_by",
     "NodeJournal", "allowed_transitions", "ancestors", "check_dag", "claimable",
