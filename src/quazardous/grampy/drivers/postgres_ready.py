@@ -152,6 +152,14 @@ class PostgresReadyDriver(PostgresDriver):
             self._list(written, self._children_of([name]))
         return written
 
+    def skip_where(self, name: str, candidates: Any, *, parents: tuple[str, ...],
+                   now: str, version: str | None) -> list[Any]:
+        written = super().skip_where(name, candidates, parents=parents, now=now,
+                                     version=version)
+        self._strike(written, name)
+        self._list(written, self._children_of([name]))
+        return written
+
     def conclude(self, name: str, subjects: list[Any], *, status: str,
                  now: str, lease: str | None, omit: tuple[str, ...],
                  reset: tuple[str, ...], reschedule: str | None) -> int:

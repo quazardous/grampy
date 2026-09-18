@@ -518,3 +518,52 @@ def test_a_column_that_is_not_named_grampy_key_is_never_a_key(engine):
         assert journal.claim("pack", 2, candidates=by_colour.order_by(items.c.id)) == [], (
             "red and blue are two keys: no group of two")
         conn.rollback()
+
+
+@pytest.mark.parametrize("layout", [RowLayout(), ReadyLayout()], ids=["row", "ready"])
+@pytest.mark.parametrize("versioned", [False, True], ids=["tuple", "graph"])
+def test_skip_in_one_write_equals_the_loop(engine, layout, versioned):
+    """`skip` WRITES: a fast path slightly wrong would let children start
+    early. On every progress of the contract's sweep — scheduled rows and a
+    subject of another graph version included — the one-write skip and the
+    journal's own loop must skip exactly the same subjects."""
+    from quazardous.grampy import Document, Graph, Status
+    from quazardous.grampy.testing import DIAMOND, _progresses
+
+    # The last subject would be skipped, were it not pinned to another graph.
+    progresses = [*_progresses(), {"start": Status.DONE, "right": Status.SCHEDULED},
+                  {"start": Status.DONE}]
+    subjects = [f"s{i}" for i in range(len(progresses))]
+    dag = Graph(Document("sweep"), DIAMOND) if versioned else DIAMOND
+
+    def run(fast):
+        with engine.connect() as conn, conn.begin():
+            metadata = sa.MetaData()
+            tables = layout.tables(metadata, f"grampy_{next(_TABLES)}")
+            metadata.create_all(conn)
+            driver = layout.driver(conn.execute, tables, DIAMOND)
+            if not fast:
+                driver.skip_where = None           # the journal falls back to its loop
+            journal = NodeJournal(driver, dag, clock=lambda: SEEDED)
+            for subject, progress in zip(subjects, progresses, strict=True):
+                layout.seed(conn, tables, subject, progress, driver)
+            pinned = subjects[-1]
+            if versioned:                           # one subject belongs to another graph
+                conn.execute(sa.update(tables["revisions"])
+                             .where(tables["revisions"].c.subject == pinned)
+                             .values(version="elsewhere"))
+                conn.execute(sa.insert(tables["revisions"]).from_select(
+                    ["subject", "revision", "version"],
+                    sa.select(sa.literal(pinned), sa.literal(0), sa.literal("elsewhere"))
+                    .where(~sa.exists().where(tables["revisions"].c.subject == pinned))))
+            count = journal.skip("right", candidates=ordered_subjects(subjects))
+            after = {s: journal.progress(s) for s in subjects}
+            conn.rollback()
+            return count, after
+
+    fast_count, fast = run(True)
+    loop_count, loop = run(False)
+    assert fast_count == loop_count
+    assert fast == loop
+    assert fast_count > 0, "the sweep must skip something, or it proves nothing"
+    assert ("right" in fast[subjects[-1]]) is not versioned

@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `journal.skip` on `PostgresDriver` and `PostgresReadyDriver` writes in two
+  statements whatever the number of candidates, instead of reading them page
+  by page: the rule and the revision guard are applied in SQL. A driver may
+  offer the same through the optional `skip_where` method; the others keep
+  the loop.
 - `journal.prune_history(before)` keeps the history table from growing
   forever: it deletes what was archived before a date, except the `retry` and
   `loop` rows that retry limits and loop bounds count — so a subject pruned

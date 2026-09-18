@@ -502,6 +502,62 @@ class PostgresDriver(PostgresCommon):
             .returning(self._subject)).fetchall()
         return [row[0] for row in rows]
 
+    def skip_where(self, name: str, candidates: Any, *, parents: tuple[str, ...],
+                   now: str, version: str | None) -> list[Any]:
+        """`skip` IN ONE WRITE, instead of reading every candidate page.
+
+        The rule, in SQL: no row for `name` at all, every parent satisfying,
+        a subject pinned to `version` or to none. The same guard as a claim
+        then holds it: the revisions read are locked `FOR SHARE` in the
+        statement that writes, and a subject whose revision moved meanwhile
+        — a parent forgotten — is not skipped. Two statements whatever the
+        number of candidates: the revisions seeded, then the write."""
+        t, r = self.table, self.revisions
+        key = self._subject.key
+
+        def eligible(candidate: Any) -> list[Any]:
+            held = t.alias("held")
+            conditions = [~sa.exists().where(held.c[key] == candidate, held.c.node == name)]
+            if parents:
+                conditions.append(self.parents_concluded(parents, candidate))
+            if version is not None:
+                other = r.alias("other")
+                conditions.append(~sa.exists().where(
+                    other.c[self._rev_subject.key] == candidate,
+                    other.c.version.is_not(None), other.c.version != version))
+            return conditions
+
+        c = _ranked(candidates)
+        candidate = list(c.c)[0]
+        self._execute(
+            postgresql.insert(r).from_select(
+                [self._rev_subject.key, "revision"],
+                sa.select(candidate, sa.literal(0)).distinct().where(*eligible(candidate)))
+            .on_conflict_do_nothing())
+        c = _ranked(candidates)
+        candidate = list(c.c)[0]
+        seen = r.alias("seen")
+        read = (sa.select(candidate.label("subject"), seen.c.revision.label("revision"))
+                .distinct()
+                .select_from(c.join(seen, seen.c[self._rev_subject.key] == candidate))
+                .where(*eligible(candidate))
+                .cte("read"))
+        unchanged = (
+            sa.select(self._rev_subject)
+            .join(read, sa.and_(self._rev_subject == read.c.subject,
+                                r.c.revision == read.c.revision))
+            .with_for_update(read=True, of=r)
+            .cte("unchanged"))
+        rows = self._execute(
+            postgresql.insert(t).from_select(
+                [key, "node", "status", "started_at", "finished_at"],
+                sa.select(unchanged.c[self._rev_subject.key], sa.literal(name),
+                          sa.literal(Status.SKIPPED), sa.literal(now), sa.literal(now))
+                .order_by(unchanged.c[self._rev_subject.key]))
+            .on_conflict_do_nothing()
+            .returning(self._subject)).fetchall()
+        return [row[0] for row in rows]
+
     def conclude(self, name: str, subjects: list[Any], *, status: str,
                  now: str, lease: str | None, omit: tuple[str, ...],
                  reset: tuple[str, ...], reschedule: str | None) -> int:

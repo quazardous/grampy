@@ -233,6 +233,15 @@ class JournalDriver(Protocol):
 
     A driver NEVER validates against the graph, never decides what is
     claimable — the journal does both — and never commits.
+
+    OPTIONAL, `skip_where(name, candidates, *, parents, now, version) ->
+    subjects`: `skip` in one write, for a node joining its parents plainly.
+    It writes a `skipped` row, started and finished at `now`, for every
+    candidate with no row for `name`, a satisfying row for every parent,
+    pinned to `version` or to none (any, when `version` is None), and whose
+    revision has not moved — exactly what the journal's own loop would
+    write, which the shared contract checks. Leave it out, and the journal
+    reads the candidates and writes as for a claim.
     """
 
     def scan(self, candidates: Any, *, name: str | None, nodes: tuple[str, ...],
@@ -747,17 +756,27 @@ class NodeJournal:
                 f"node {name!r} is not optional — skipping it would move "
                 f"the graph forward without its work")
         now = self._clock()
-        chosen: dict[tuple[Any, int], None] = {}
-        for page in self.driver.scan(candidates, name=name,
-                                     nodes=(name, *n.parents),
-                                     parents=() if n.custom_join else n.parents,
-                                     page=PAGE, now=now):
-            chosen.update(dict.fromkeys(
-                (e.subject, e.revision) for e in page
-                if self._mine(e) and name not in e.rows and joined(name, self.dag, e.rows)))
-        # One write, as for a claim.
-        written = self.driver.insert_if_unchanged(
-            name, list(chosen), status=Status.SKIPPED, now=now, lease=None) if chosen else []
+        # A DRIVER MAY SKIP IN ONE WRITE (`skip_where`, optional): the rule
+        # for a plain join is SQL-shaped — no row, every parent satisfying —
+        # and the contract proves the fast path equal to the loop below. A
+        # custom join (`on`, `need`) always takes the loop.
+        fast = getattr(self.driver, "skip_where", None)
+        if fast is not None and not n.custom_join:
+            written = fast(name, candidates, parents=n.parents, now=now, version=self.version)
+        else:
+            chosen: dict[tuple[Any, int], None] = {}
+            for page in self.driver.scan(candidates, name=name,
+                                         nodes=(name, *n.parents),
+                                         parents=() if n.custom_join else n.parents,
+                                         page=PAGE, now=now):
+                chosen.update(dict.fromkeys(
+                    (e.subject, e.revision) for e in page
+                    if self._mine(e) and name not in e.rows
+                    and joined(name, self.dag, e.rows)))
+            # One write, as for a claim.
+            written = self.driver.insert_if_unchanged(
+                name, list(chosen), status=Status.SKIPPED, now=now,
+                lease=None) if chosen else []
         self._pin(written)
         return len(written)
 
