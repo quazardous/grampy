@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- On PostgreSQL, a claim failed when the executor returned JSON as text —
+  asyncpg's default, a text loader, a host's own shim: the rows the claim's
+  page brings back were walked as a string. JSON is now read decoded or as
+  text, on every layout.
+
 ## [0.5.0] - 2026-09-18
 
 ### Added

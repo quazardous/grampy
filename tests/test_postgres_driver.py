@@ -411,6 +411,53 @@ class _DocumentedResult:
         return self._result.fetchone()
 
 
+class _JsonAsText(_DocumentedResult):
+    """An executor whose adapter returns JSON as text — asyncpg's default, a
+    text loader, a host's shim: every list or dict in a row, as a string."""
+
+    @staticmethod
+    def _row(row):
+        import json
+        return None if row is None else tuple(
+            json.dumps(v) if isinstance(v, (list, dict)) else v for v in row)
+
+    def fetchall(self):
+        return [self._row(r) for r in super().fetchall()]
+
+    def fetchone(self):
+        return self._row(super().fetchone())
+
+
+@pytest.mark.parametrize("layout", [RowLayout(), SubjectLayout(), ReadyLayout()],
+                         ids=["row", "subject", "ready"])
+def test_json_returned_as_text_reads_as_json(engine, layout):
+    """THE DRIVER TAKES AN `execute` CALLABLE to stay neutral about the
+    adapter behind it: the JSON it reads back — a claim page's rows, a
+    subject's document — must work decoded or as text."""
+    from quazardous.grampy import Lane, Node
+    dag = (Node("in", lane=Lane()), Node("a", parents=("in",)),
+           Node("b", parents=("a",), optional=True), Node("c", parents=("b",)))
+    with engine.connect() as conn, conn.begin():
+        metadata = sa.MetaData()
+        tables = layout.tables(metadata, f"grampy_{next(_TABLES)}")
+        metadata.create_all(conn)
+        driver = layout.driver(lambda statement: _JsonAsText(conn.execute(statement)),
+                               tables, dag)
+        journal = NodeJournal(driver, dag, clock=lambda: SEEDED)
+        subjects = ["s1", "s2"]
+        journal.arrive("in", subjects)
+        assert journal.settle(ordered_subjects(subjects))["in"] == {"entered": 2}
+        lease = journal.claim("a", 10, candidates=ordered_subjects(subjects))
+        assert sorted(lease) == subjects, "the claim page's rows, read as text"
+        journal.conclude("a", list(lease), token=lease.token)
+        assert journal.skip("b", candidates=ordered_subjects(subjects)) == 2
+        assert sorted(journal.claim("c", 10, candidates=ordered_subjects(subjects))) == subjects
+        assert journal.progress_many(subjects)["s1"] == {
+            "in": "done", "a": "done", "b": "skipped", "c": "running"}
+        journal.arrive("in", ["s1"])
+        conn.rollback()
+
+
 @pytest.mark.parametrize("layout", [RowLayout(), SubjectLayout(), ReadyLayout()],
                          ids=["row", "subject", "ready"])
 def test_the_driver_needs_only_the_result_methods_it_documents(engine, layout):

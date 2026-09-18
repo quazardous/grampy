@@ -37,7 +37,8 @@ THE CONNECTION IS INJECTED TOO, AS AN `execute`
 `execute(statement)` runs a SQLAlchemy Core statement and returns a
 result with `fetchall()`, `fetchone()` and `rowcount`, rows indexable by
 position. A SQLAlchemy `Connection.execute` fits as is; an application
-executing through its own driver compiles first. The driver never
+executing through its own driver compiles first. A JSON value may come back
+decoded or as text, whichever the adapter gives: the driver reads both. The driver never
 commits — and it REFUSES TO RUN OUTSIDE A TRANSACTION: under an
 autocommitting executor its locks and its two-statement writes would
 protect nothing, silently, so its first write checks, once.
@@ -87,6 +88,7 @@ reads `-1` would pass for "nothing done".
 """
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -149,6 +151,16 @@ def _plain(candidates: Any) -> Any:
     if candidates._limit_clause is not None or candidates._offset_clause is not None:
         return candidates.subquery("c")
     return candidates.order_by(None).subquery("c")
+
+
+def _decoded(value: Any) -> Any:
+    """A JSON value as the executor returned it — decoded already (psycopg's
+    default), or as text (asyncpg's default, a text loader, a host's shim).
+    The driver takes an `execute` callable to stay neutral about that layer;
+    this is where it has to be."""
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode()
+    return json.loads(value) if isinstance(value, str) else value
 
 
 def _epoch(moment: Any) -> Any:
@@ -483,7 +495,7 @@ class PostgresDriver(PostgresCommon):
                 rows: dict[str, str] = {}
                 due: dict[str, str] = {}
                 finished: dict[str, str] = {}
-                for n, status, started, ended in f[6] or ():
+                for n, status, started, ended in _decoded(f[6]) or ():
                     rows[n] = status
                     if status == Status.SCHEDULED:
                         due[n] = started

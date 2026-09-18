@@ -54,6 +54,11 @@ called, since no graph needs them.
 - With `limits`: the limiter state, a value per key. With `lanes`: the arrivals
   waiting in each lane.
 
+**What a SQL driver reads back depends on the adapter**, not on the driver:
+psycopg decodes JSON, asyncpg returns it as text by default, and a host may
+put a shim in between. A driver that takes an `execute` callable reads what it
+selects in either form — the PostgreSQL drivers decode JSON given as text.
+
 **A subject is the application's id:** an `int` or a `str`, stored and returned
 exactly as given — never converted, built or split. Times are strings in the
 journal's format (`utc_now()`), compared as text: store them as given.

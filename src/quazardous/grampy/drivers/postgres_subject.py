@@ -61,7 +61,7 @@ from ..dag import (
 )
 from ..names import Outcome, Reason, Status
 from ..protocol import Entry, Page
-from .postgres import PostgresCommon, _clock, _epoch, _plain, _ranked
+from .postgres import PostgresCommon, _clock, _decoded, _epoch, _plain, _ranked
 
 #: THE COLUMNS THE SUBJECTS TABLE MUST CARRY, besides the subject.
 SUBJECT_COLUMNS = ("revision", "policy", "version", "nodes")
@@ -196,7 +196,7 @@ class PostgresSubjectDriver(PostgresCommon):
             last = found[-1][1]
             entries = []
             for f in found:
-                progress = {n: r for n, r in (f[6] or {}).items() if n in wanted}
+                progress = {n: r for n, r in (_decoded(f[6]) or {}).items() if n in wanted}
                 entries.append(Entry(
                     f[0], int(f[2]),
                     {n: r["status"] for n, r in progress.items()},
@@ -426,7 +426,7 @@ class PostgresSubjectDriver(PostgresCommon):
         wanted = dict(entries)
         subjects = sorted(wanted)
         self._seed(subjects)
-        current = {r[0]: (int(r[1]), r[2] or {}) for r in self._execute(
+        current = {r[0]: (int(r[1]), _decoded(r[2]) or {}) for r in self._execute(
             sa.select(self._subject, s.c.revision, s.c.nodes)
             .where(self._in(self._subject, subjects))
             .order_by(self._subject).with_for_update()).fetchall()}
@@ -464,7 +464,7 @@ class PostgresSubjectDriver(PostgresCommon):
         return self.progress_many([subject]).get(subject, {})
 
     def progress_many(self, subjects: list[Any]) -> dict[Any, dict[str, str]]:
-        return {subject: {n: r["status"] for n, r in (nodes or {}).items()}
+        return {subject: {n: r["status"] for n, r in (_decoded(nodes) or {}).items()}
                 for subject, nodes in self._execute(
                     sa.select(self._subject, self.subjects.c.nodes)
                     .where(self._in(self._subject, list(subjects)))).fetchall()}
