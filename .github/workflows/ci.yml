@@ -47,4 +47,5 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: pip install -e ".[test,postgres]" "psycopg[binary]"
-      - run: pytest -o addopts="" -q
+      # Four workers: the PostgreSQL harness names its tables per process.
+      - run: pytest -o addopts="" -q -n 4

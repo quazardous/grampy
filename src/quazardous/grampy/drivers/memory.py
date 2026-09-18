@@ -50,12 +50,62 @@ def _split(candidate: Any) -> tuple[Any, str | None]:
     return candidate, None
 
 
+class _Rows(dict):
+    """`(subject, node) → Row`, and each subject's nodes beside it: reading
+    one subject's progress is then a lookup, not a scan of every row. Every
+    way a row is written or removed keeps the index, including a harness
+    writing `driver.rows[...]` directly."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        #: A dict, not a set: a progress keeps the order rows were written.
+        self.nodes_of: dict[Any, dict[str, None]] = {}
+
+    def __setitem__(self, key: tuple[Any, str], row: Any) -> None:
+        super().__setitem__(key, row)
+        self.nodes_of.setdefault(key[0], {})[key[1]] = None
+
+    def __delitem__(self, key: tuple[Any, str]) -> None:
+        super().__delitem__(key)
+        self._forget(key)
+
+    def pop(self, key: tuple[Any, str], *default: Any) -> Any:
+        if key in self:
+            self._forget(key)
+        return super().pop(key, *default)
+
+    def setdefault(self, key: tuple[Any, str], row: Any = None) -> Any:
+        if key not in self:
+            self[key] = row
+        return self[key]
+
+    def update(self, *args: Any, **kwargs: Any) -> None:
+        for key, row in dict(*args, **kwargs).items():
+            self[key] = row
+
+    def clear(self) -> None:
+        super().clear()
+        self.nodes_of.clear()
+
+    def popitem(self) -> Any:
+        key, row = super().popitem()
+        self._forget(key)
+        return key, row
+
+    def _forget(self, key: tuple[Any, str]) -> None:
+        nodes = self.nodes_of.get(key[0])
+        if nodes is not None:
+            nodes.pop(key[1], None)
+            if not nodes:
+                del self.nodes_of[key[0]]
+
+
 class MemoryDriver:
     """`(subject, node) → Row`, `subject → revision`. A lock makes each call
     atomic across threads."""
 
     def __init__(self) -> None:
-        self.rows: dict[tuple[Any, str], Row] = {}
+        self.rows: _Rows = _Rows()
         self.revisions: dict[Any, int] = {}
         self.policy_of: dict[Any, str] = {}
         self.version_of: dict[Any, str] = {}
@@ -241,7 +291,8 @@ class MemoryDriver:
 
     def progress(self, subject: Any) -> dict[str, str]:
         with self._lock:
-            return {n: row.status for (s, n), row in self.rows.items() if s == subject}
+            return {n: self.rows[(subject, n)].status
+                    for n in self.rows.nodes_of.get(subject, ())}
 
     def history(self, subject: Any) -> list[dict[str, Any]]:
         with self._lock:

@@ -55,6 +55,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pinned again. A driver of your own may read the clock in its page too
   (`scan_reads_clock`, and `scan(now=None)`).
 
+### Fixed
+
+- The memory driver read one subject's progress by scanning every row of
+  every subject: a journal slowed down as it grew. Rows are now indexed by
+  subject; the demo's simulation runs in less than half the time.
+
 ## [0.4.0] - 2026-09-18
 
 ### Added

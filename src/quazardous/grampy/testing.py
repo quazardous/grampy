@@ -175,6 +175,11 @@ PERFORMANCE = pytest.mark.skipif(
     not os.environ.get("GRAMPY_PERF"),
     reason="a performance test: run it knowingly, with GRAMPY_PERF=1")
 
+#: HOW MANY RANDOM RUNS the model tests draw. A handful in every run, enough
+#: to walk each driver through arrivals, loops and forgets; the mass of them —
+#: minutes on a SQL driver — with the performance set, run knowingly.
+MODEL_EXAMPLES = 50 if os.environ.get("GRAMPY_PERF") else 10
+
 
 class Clock:
     """A clock that only moves when told to."""
@@ -1522,7 +1527,7 @@ class JournalContract:
 
         run_state_machine_as_test(
             _model_machine(harness, subject_type),
-            settings=settings(max_examples=50, stateful_step_count=50,
+            settings=settings(max_examples=MODEL_EXAMPLES, stateful_step_count=50,
                               deadline=None, derandomize=True,
                               suppress_health_check=list(HealthCheck)))
 
@@ -1535,7 +1540,7 @@ class JournalContract:
 
         run_state_machine_as_test(
             _model_machine(harness, str, lane_root=True),
-            settings=settings(max_examples=50, stateful_step_count=50,
+            settings=settings(max_examples=MODEL_EXAMPLES, stateful_step_count=50,
                               deadline=None, derandomize=True,
                               suppress_health_check=list(HealthCheck)))
 

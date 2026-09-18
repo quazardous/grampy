@@ -53,7 +53,7 @@ Every user-visible change adds a line to `CHANGELOG.md` under
 ## Commands
 
 ```bash
-uv run --with pytest --with sqlalchemy pytest   # tests (PG skipped without DSN)
+uv run --with pytest --with pytest-xdist --with sqlalchemy pytest   # tests, 4 workers (PG skipped without DSN)
 uv run --with ruff ruff check                   # lint
 cd src && uv run --with mypy python -m mypy --python-version 3.10 \
     --ignore-missing-imports --explicit-package-bases \

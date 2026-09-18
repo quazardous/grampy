@@ -30,6 +30,9 @@ For usage questions, open an issue on the tracker and label it `question`.
    pytest
    ```
 
+   The suite runs on four workers (`pytest-xdist`, `-n 4` in the project's
+   options); `pytest -n 0` runs it in one process, to debug a single test.
+
    Changes to the journal or a driver must also pass against PostgreSQL:
 
    ```bash
@@ -37,7 +40,8 @@ For usage questions, open an issue on the tracker and label it `question`.
    ```
 
    **Performance tests** — long by their size, such as one call on 70,000
-   subjects — are skipped unless asked for. Run them knowingly, when a
+   subjects, or the model tests' full fifty random runs (ten otherwise) —
+   are skipped unless asked for. Run them knowingly, when a
    change touches how many values a statement binds or how much a call
    reads:
 
