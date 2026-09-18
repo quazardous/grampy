@@ -326,12 +326,6 @@ def engine():
 class _OnPostgres(JournalContract):
     layout: object
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "every PostgreSQL layout binds a value per subject and fails past "
-        "psycopg's 65,535-parameter cap; binding arrays fixes it — then this "
-        "passes and the marker must go"))
-    def test_one_call_handles_tens_of_thousands_of_subjects(self, harness, clock):
-        super().test_one_call_handles_tens_of_thousands_of_subjects(harness, clock)
 
     @pytest.fixture
     def harness(self, engine):

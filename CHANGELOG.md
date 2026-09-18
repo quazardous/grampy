@@ -69,6 +69,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a lane's queue): an application executing through its own driver, honouring
   the documented `fetchall` / `fetchone` / `rowcount`, failed on its first
   claim. It now needs only those, and a test holds every layout to it.
+- The PostgreSQL drivers failed outright on a call over more than about
+  32,700 subjects — a janitor's `skip` over a large table, a bulk `forget` —
+  on the 65,535 values one statement may bind. Every list of subjects is now
+  bound as one array, whatever its length.
+- An injected clock in another time zone or layout — `11:00+02:00`, `Z`, a
+  space for the `T` — was compared as text with the journal's UTC times, and
+  misordered them by hours without an error. Every time that comes from
+  outside (a clock, `release(older_than=)`, `stages(at=)`) is now read into
+  UTC; a `datetime` works too, and a time without a zone is refused.
 - `journal.release()` handed back leases held on subjects of another graph
   version; it now leaves them to the journal of their own version, as
   `expire()` already did.

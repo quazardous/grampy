@@ -53,7 +53,6 @@ from collections.abc import Callable, Iterator
 from typing import Any
 
 import sqlalchemy as sa
-from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import JSONB
 
 from ..dag import (
@@ -112,15 +111,13 @@ class PostgresSubjectDriver(PostgresCommon):
     def _seed(self, subjects: list[Any]) -> None:
         """Create the rows missing, so that a lock can be taken on each."""
         self._execute(
-            postgresql.insert(self.subjects)
-            .values([{self._key: s, "revision": 0, "nodes": {}} for s in sorted(subjects)])
+            self._insert_rows(self.subjects, {self._key: sorted(subjects)}, revision=0, nodes={})
             .on_conflict_do_nothing())
 
     def _raise_revisions(self, subjects: list[Any]) -> None:
         """Locks the rows until the transaction ends — see the module."""
         s = self.subjects
-        insert = postgresql.insert(s).values(
-            [{self._key: x, "revision": 1, "nodes": {}} for x in sorted(subjects)])
+        insert = self._insert_rows(s, {self._key: sorted(subjects)}, revision=1, nodes={})
         self._execute(insert.on_conflict_do_update(
             index_elements=[self._key], set_={"revision": s.c.revision + 1}))
 
@@ -212,9 +209,10 @@ class PostgresSubjectDriver(PostgresCommon):
             return []
         s = self.subjects
         row = _row(status, now, None if status == Status.RUNNING else now, lease)
-        insert = postgresql.insert(s).values(
-            [{self._key: x, "revision": revision, "nodes": {name: row}}
-             for x, revision in sorted(entries, key=lambda e: e[0])])
+        entries = sorted(entries, key=lambda e: e[0])
+        insert = self._insert_rows(s, {self._key: [x for x, _ in entries],
+                                       "revision": [v for _, v in entries]},
+                                   nodes={name: row})
         rows = self._execute(insert.on_conflict_do_update(
             index_elements=[self._key],
             set_={"nodes": self._merged(s.c.nodes, insert.excluded.nodes)},
@@ -240,7 +238,7 @@ class PostgresSubjectDriver(PostgresCommon):
         if omit:
             parts.append(self._json({o: _row(Status.OMITTED, now, now, None) for o in omit}))
         parts += [s.c.nodes, sa.func.jsonb_build_object(name, concluded_row, type_=JSONB)]
-        update = sa.update(s).where(self._subject.in_(sorted(subjects)),
+        update = sa.update(s).where(self._in(self._subject, sorted(subjects)),
                                     self._field(name, "status") == Status.RUNNING)
         if lease is not None:
             update = update.where(self._field(name, "lease") == lease)
@@ -248,22 +246,21 @@ class PostgresSubjectDriver(PostgresCommon):
             update.values(nodes=self._merged(*parts)).returning(self._subject)).fetchall()]
         if reset and concluded:
             self._raise_revisions(concluded)
-            self._take_away(self._subject.in_(sorted(concluded)), list(reset),
+            self._take_away(self._in(self._subject, sorted(concluded)), list(reset),
                             now=now, reason=Reason.LOOP)
         if reschedule is not None and concluded:
-            self._take_away(self._subject.in_(sorted(concluded)), [name],
+            self._take_away(self._in(self._subject, sorted(concluded)), [name],
                             now=now, reason=Reason.RETRY)
             self._execute(
-                sa.update(s).where(self._subject.in_(sorted(concluded)))
+                sa.update(s).where(self._in(self._subject, sorted(concluded)))
                 .values(nodes=self._merged(s.c.nodes, self._json(
                     {name: _row(Status.SCHEDULED, reschedule, None, None)}))))
         return len(concluded)
 
     def adopt(self, name: str, subjects: list[Any], *, now: str) -> int:
         s = self.subjects
-        insert = postgresql.insert(s).values(
-            [{self._key: x, "revision": 0, "nodes": {name: _row(Status.DONE, now, now, None)}}
-             for x in sorted(subjects)])
+        insert = self._insert_rows(s, {self._key: sorted(subjects)}, revision=0,
+                                   nodes={name: _row(Status.DONE, now, now, None)})
         return len(self._execute(insert.on_conflict_do_update(
             index_elements=[self._key],
             set_={"nodes": self._merged(s.c.nodes, insert.excluded.nodes)},
@@ -275,7 +272,7 @@ class PostgresSubjectDriver(PostgresCommon):
         everything committed before the lock was granted."""
         subjects = sorted(subjects)
         self._raise_revisions(subjects)
-        return len(self._take_away(self._subject.in_(subjects), [name],
+        return len(self._take_away(self._in(self._subject, subjects), [name],
                                    now=now, reason=Reason.FORGET))
 
     def release(self, name: str, *, older_than: str, now: str,
@@ -308,9 +305,8 @@ class PostgresSubjectDriver(PostgresCommon):
     def pin(self, subjects: list[Any], version: str) -> int:
         """ONE upsert: a subject gets a version only when it has none."""
         s = self.subjects
-        insert = postgresql.insert(s).values(
-            [{self._key: x, "revision": 0, "nodes": {}, "version": version}
-             for x in sorted(subjects)])
+        insert = self._insert_rows(s, {self._key: sorted(subjects)}, revision=0, nodes={},
+                                   version=version)
         return len(self._execute(insert.on_conflict_do_update(
             index_elements=[self._key], set_={"version": insert.excluded.version},
             where=s.c.version.is_(None)).returning(self._subject)).fetchall())
@@ -319,7 +315,7 @@ class PostgresSubjectDriver(PostgresCommon):
         s = self.subjects
         return {r[0]: r[1] for r in self._execute(
             sa.select(self._subject, s.c.version)
-            .where(self._subject.in_(list(subjects)), s.c.version.is_not(None))).fetchall()}
+            .where(self._in(self._subject, list(subjects)), s.c.version.is_not(None))).fetchall()}
 
     def rewrite(self, subject: Any, *, rename: dict[str, str], drop: tuple[str, ...],
                 version: str, now: str) -> None:
@@ -342,9 +338,8 @@ class PostgresSubjectDriver(PostgresCommon):
     def enroll(self, subjects: list[Any], policy: str | None) -> int:
         s = self.subjects
         rows = self._execute(
-            postgresql.insert(s)
-            .values([{self._key: x, "revision": 0, "nodes": {}, "policy": policy}
-                     for x in sorted(subjects)])
+            self._insert_rows(s, {self._key: sorted(subjects)}, revision=0, nodes={},
+                              policy=policy)
             .on_conflict_do_update(index_elements=[self._key], set_={"policy": policy})
             .returning(self._subject)).fetchall()
         return len(rows)
@@ -353,7 +348,7 @@ class PostgresSubjectDriver(PostgresCommon):
         s = self.subjects
         return {r[0]: r[1] for r in self._execute(
             sa.select(self._subject, s.c.policy)
-            .where(self._subject.in_(list(subjects)), s.c.policy.is_not(None))).fetchall()}
+            .where(self._in(self._subject, list(subjects)), s.c.policy.is_not(None))).fetchall()}
 
     def enter(self, name: str, entries: list[tuple[Any, int]], *,
               archive: tuple[str, ...], now: str) -> list[Any]:
@@ -367,12 +362,12 @@ class PostgresSubjectDriver(PostgresCommon):
         self._seed(subjects)
         current = {r[0]: (int(r[1]), r[2] or {}) for r in self._execute(
             sa.select(self._subject, s.c.revision, s.c.nodes)
-            .where(self._subject.in_(subjects))
+            .where(self._in(self._subject, subjects))
             .order_by(self._subject).with_for_update()).fetchall()}
         a_subject = a.c[self._key]
         waiting = {r[0]: (r[1], r[2]) for r in self._execute(
             sa.select(a_subject, a.c.ref, a.c.arrived_at)
-            .where(a.c.node == name, a_subject.in_(subjects))
+            .where(a.c.node == name, self._in(a_subject, subjects))
             .order_by(a_subject).with_for_update()).fetchall()}
         entering = [
             x for x in subjects
@@ -383,13 +378,14 @@ class PostgresSubjectDriver(PostgresCommon):
             return []
         self._raise_revisions(entering)
         if archive:
-            self._take_away(self._subject.in_(entering), list(archive),
+            self._take_away(self._in(self._subject, entering), list(archive),
                             now=now, reason=Reason.ARRIVAL)
-        self._execute(sa.delete(a).where(a.c.node == name, a_subject.in_(entering)))
-        self._execute(sa.insert(h).values(
-            [{self._key: x, "node": name, "status": Outcome.ENTERED,
-              "started_at": waiting[x][1], "finished_at": now, "lease": waiting[x][0],
-              "archived_at": now, "reason": Reason.LANE} for x in entering]))
+        self._execute(sa.delete(a).where(a.c.node == name, self._in(a_subject, entering)))
+        self._execute(self._insert_rows(
+            h, {self._key: entering, "started_at": [waiting[x][1] for x in entering],
+                "lease": [waiting[x][0] for x in entering]},
+            node=name, status=Outcome.ENTERED, finished_at=now, archived_at=now,
+            reason=Reason.LANE))
         for x in entering:
             self._execute(sa.update(s).where(self._subject == x).values(
                 nodes=self._merged(s.c.nodes, self._json(
@@ -426,7 +422,7 @@ class PostgresSubjectDriver(PostgresCommon):
                           sa.func.round(_epoch(ended) - _epoch(started), 1)
                           .label("seconds"))
                 .select_from(s.join(each, sa.true()))
-                .where(self._subject.in_(chunk),
+                .where(self._in(self._subject, chunk),
                        status.not_in((Status.SKIPPED, Status.OMITTED, Status.SCHEDULED)))
                 .order_by(sa.literal_column("ended"), each.c.key)).fetchall()
             for r in rows:

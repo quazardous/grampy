@@ -36,6 +36,18 @@ For usage questions, open an issue on the tracker and label it `question`.
    GRAMPY_TEST_PG_DSN=postgresql+psycopg://user:pass@localhost/test pytest
    ```
 
+   **Performance tests** — long by their size, such as one call on 70,000
+   subjects — are skipped unless asked for. Run them knowingly, when a
+   change touches how many values a statement binds or how much a call
+   reads:
+
+   ```bash
+   GRAMPY_PERF=1 GRAMPY_TEST_PG_DSN=… pytest -k tens_of_thousands
+   ```
+
+   The layouts' benchmark (`benchmarks/layouts.py`) is separate again: it
+   measures, it does not pass or fail.
+
 4. Lint with `ruff check`, and type-check with
    `cd src && mypy --explicit-package-bases --namespace-packages quazardous/grampy`.
 5. Add a line to `CHANGELOG.md` under `[Unreleased]` if a user would

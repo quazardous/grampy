@@ -94,9 +94,10 @@ class PostgresReadyDriver(PostgresDriver):
 
     def _list(self, subjects: Iterable[Any], names: Iterable[str]) -> None:
         names = self._listed(names)
-        pairs = [{self._key: s, "node": n} for s in sorted(set(subjects)) for n in names]
+        pairs = [(s, n) for s in sorted(set(subjects)) for n in names]
         if pairs:
-            self._execute(postgresql.insert(self.ready).values(pairs)
+            self._execute(self._insert_rows(self.ready, {self._key: [s for s, _ in pairs],
+                                                         "node": [n for _, n in pairs]})
                           .on_conflict_do_nothing())
 
     def _children_of(self, names: Iterable[str]) -> list[str]:
@@ -105,7 +106,7 @@ class PostgresReadyDriver(PostgresDriver):
     def _strike(self, subjects: list[Any], name: str) -> None:
         if subjects:
             self._execute(sa.delete(self.ready).where(
-                self.ready.c.node == name, self.ready.c[self._key].in_(sorted(subjects))))
+                self.ready.c.node == name, self._in(self.ready.c[self._key], sorted(subjects))))
 
     def refill(self) -> int:
         """List every pair the node rows allow: each node with parents, for
