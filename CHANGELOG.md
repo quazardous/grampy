@@ -59,6 +59,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a lane's queue): an application executing through its own driver, honouring
   the documented `fetchall` / `fetchone` / `rowcount`, failed on its first
   claim. It now needs only those, and a test holds every layout to it.
+- `journal.release()` handed back leases held on subjects of another graph
+  version; it now leaves them to the journal of their own version, as
+  `expire()` already did.
+- A PostgreSQL graph with a group or a lane keeping every version, but no rate
+  or concurrency, asked for a `limits` table it never uses; the guard it takes
+  is a lock, and needs no table.
+- PostgreSQL candidates carrying a `LIMIT` or an `OFFSET` keep the `ORDER BY`
+  that chooses which rows those are.
+- History rows archived in the same second come back in the order they were
+  written, on PostgreSQL too when the history table has an `id` identity
+  column (the documentation's does).
+- `stages()` passes subjects to the storage as they are, instead of as text.
+- The documentation's PostgreSQL arrivals table lacked the `refs` column the
+  driver requires; it is there now, and the documented tables are built by the
+  test suite.
 - The SQL drivers refuse to run outside a transaction. Under an autocommitting
   executor every lock they take was released by the next statement, and the
   writes made of two statements lost their guarantee, with no error at all;

@@ -501,12 +501,6 @@ class NodeJournal:
             return self.driver.insert_if_unchanged(
                 name, group, status=Status.RUNNING, now=now, lease=token)
 
-        # A GROUPING CLAIM READS AND WRITES UNDER THE GUARD, taken before it
-        # reads anything. Two claimers would otherwise each decide on a state
-        # the other was about to change and each win a piece of one group — a
-        # bag of two and a bag of one, neither of them a group, and no row
-        # looking wrong. The guard is on the NODE: one lock, over a read a
-        # grouping node makes rarely and in bulk.
         # ONE WRITE PER CLAIM. A storage that locks while writing takes its
         # locks in one go, in one order, and two claimers cannot hold each
         # other. The price: a subject refused by the write is not replaced —
@@ -774,7 +768,8 @@ class NodeJournal:
     def release(self, name: str, older_than: str) -> int:
         """Give back the leases a dead worker has held for too long."""
         node(name, self.dag)
-        return self.driver.release(name, older_than=older_than, now=self._clock())
+        return self.driver.release(name, older_than=older_than, now=self._clock(),
+                                   version=self.version)
 
     # -- read --------------------------------------------------------------
 
@@ -1216,7 +1211,7 @@ class NodeJournal:
         ONE READ FOR THE BATCH, not one per subject. ONLY NODES THAT WORKED:
         a `skipped` row never started. A node STILL RUNNING ends `at`.
         """
-        return self.driver.stages([str(s) for s in subjects], at=at)
+        return self.driver.stages(list(subjects), at=at)
 
     def counts(self, name: str) -> dict[str, int]:
         """How many subjects stand where, for this node."""

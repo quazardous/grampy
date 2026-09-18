@@ -49,6 +49,7 @@ def node_table(metadata, name, subject_type=str):
 def history_table(metadata, name, subject_type=str):
     return sa.Table(
         name, metadata,
+        sa.Column("id", sa.BigInteger, sa.Identity(), primary_key=True),
         sa.Column("subject", _type(subject_type), nullable=False),
         sa.Column("node", sa.Text, nullable=False),
         sa.Column("status", sa.Text, nullable=False),
@@ -441,3 +442,56 @@ def test_an_autocommitting_executor_is_refused(engine, layout):
                 journal.claim("a", 1, candidates=ordered_subjects(["s1"]))
     finally:
         metadata.drop_all(engine)
+
+
+def test_the_tables_the_documentation_declares_are_the_ones_the_driver_takes():
+    """The docs' code is not run by the README test: build its tables here."""
+    import re
+    from pathlib import Path
+    text = (Path(__file__).parent.parent / "docs" / "drivers.md").read_text()
+    block = next(b for b in re.findall(r"```python\n(.*?)```", text, re.S)
+                 if "arrivals = sa.Table" in b)
+    declarations = block.split("journal = NodeJournal(")[0]
+    scope = {"sa": sa, "metadata": sa.MetaData()}
+    exec(declarations, scope)
+    PostgresDriver(lambda statement: None, scope["nodes"], scope["revisions"],
+                   scope["history"], subject="job_id", limits=scope["limits"],
+                   arrivals=scope["arrivals"])
+
+
+@pytest.mark.parametrize("layout", [RowLayout(), SubjectLayout(), ReadyLayout()],
+                         ids=["row", "subject", "ready"])
+def test_a_group_claims_without_a_limits_table(engine, layout):
+    """A guard is an advisory lock: it needs no table. A graph with a group
+    and no rate or concurrency is given none."""
+    from quazardous.grampy import Group, Node
+    with engine.connect() as conn, conn.begin():
+        metadata = sa.MetaData()
+        tables = dict(layout.tables(metadata, f"grampy_{next(_TABLES)}"), limits=None)
+        metadata.create_all(conn)
+        dag = (Node("pack", group=Group(size=2)),)
+        journal = NodeJournal(layout.driver(conn.execute, tables, dag), dag)
+        lease = journal.claim("pack", 2, candidates=keyed_subjects([("a", "red"), ("b", "red")]))
+        assert sorted(lease) == ["a", "b"]
+        conn.rollback()
+
+
+@pytest.mark.parametrize("layout", [RowLayout(), SubjectLayout(), ReadyLayout()],
+                         ids=["row", "subject", "ready"])
+def test_candidates_with_a_limit_are_the_first_by_their_order(engine, layout):
+    """A LIMIT picks rows by the ORDER BY it comes with, and must keep it."""
+    from quazardous.grampy import Node
+    with engine.connect() as conn, conn.begin():
+        metadata = sa.MetaData()
+        tables = layout.tables(metadata, f"grampy_{next(_TABLES)}")
+        items = sa.Table(f"grampy_items_{next(_TABLES)}", metadata,
+                         sa.Column("id", sa.Text), sa.Column("priority", sa.Integer))
+        metadata.create_all(conn)
+        # Written in the reverse of their priority, so that table order lies.
+        conn.execute(sa.insert(items), [{"id": f"s{i}", "priority": i}
+                                        for i in reversed(range(200))])
+        dag = (Node("a"),)
+        journal = NodeJournal(layout.driver(conn.execute, tables, dag), dag)
+        top = sa.select(items.c.id).order_by(items.c.priority).limit(3)
+        assert sorted(journal.claim("a", 10, candidates=top)) == ["s0", "s1", "s2"]
+        conn.rollback()

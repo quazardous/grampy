@@ -96,6 +96,7 @@ revisions = sa.Table("job_revisions", metadata,
     sa.Column("policy", sa.Text),
     sa.Column("version", sa.Text))
 history = sa.Table("job_node_history", metadata,
+    sa.Column("id", sa.BigInteger, sa.Identity(), primary_key=True),  # the order written
     *[sa.Column(c.name, c.type) for c in nodes.columns],
     sa.Column("archived_at", sa.Text, nullable=False),
     sa.Column("reason", sa.Text, nullable=False))
@@ -109,7 +110,8 @@ arrivals = sa.Table("job_arrivals", metadata,    # only for graphs with a lane
     sa.Column("ref", sa.Text),
     sa.Column("place", sa.Text, nullable=False),
     sa.Column("arrived_at", sa.Text, nullable=False),
-    sa.Column("urgent", sa.Boolean, nullable=False))
+    sa.Column("urgent", sa.Boolean, nullable=False),
+    sa.Column("refs", sa.Text))                  # every version kept, for Lane.batch
 
 journal = NodeJournal(
     PostgresDriver(conn.execute, nodes, revisions, history, subject="job_id",

@@ -20,7 +20,9 @@ none. It needs two `sqlalchemy.Table`s sharing a subject column (named by
                 as primary key. Rows are created on demand.
     history     the rows taken away: the node table's columns, plus
                 `archived_at` and `reason` (text); append-only, no key
-                required.
+                required. An `id` column (an identity) is read, when there
+                is one, to give rows archived in the same second back in
+                the order they were written.
     limits      optional, needed by nodes with a `rate` or a `concurrency`:
                 `key` (text, primary key) and `value` (double precision).
     arrivals    optional, needed by graphs with a lane: the subject and `node`
@@ -132,6 +134,10 @@ def _ranked(candidates: Any) -> Any:
             "candidates' priority cannot be carried into the claim")
     rank = (sa.func.row_number().over(order_by=list(order)) if order
             else sa.func.row_number().over())
+    # A LIMIT OR AN OFFSET PICKS ROWS BY THE ORDER: it keeps its ORDER BY, or
+    # it would pick whichever rows came first.
+    if candidates._limit_clause is not None or candidates._offset_clause is not None:
+        return candidates.add_columns(rank.label("grampy_rank")).subquery("c")
     return candidates.order_by(None).add_columns(rank.label("grampy_rank")).subquery("c")
 
 
@@ -202,8 +208,8 @@ class PostgresCommon:
     def guard(self, keys: list[str]) -> Iterator[None]:
         """Transaction-scoped advisory locks, taken in a statement of their
         own before the claim reads anything: that claim's statements then
-        see every commit of the claimer they waited for."""
-        self._need_limits()
+        see every commit of the claimer they waited for. No table: a lock
+        is the server's, not a row's."""
         for key in sorted(keys):
             self._execute(sa.select(sa.func.pg_advisory_xact_lock(
                 sa.func.hashtextextended(key, 0))))
@@ -240,7 +246,8 @@ class PostgresCommon:
         return [dict(zip(keys, row, strict=True)) for row in self._execute(
             sa.select(*[h.c[k] for k in keys])
             .where(h.c[self._key] == subject)
-            .order_by(h.c.archived_at, h.c.node)).fetchall()]
+            .order_by(h.c.archived_at, h.c.node,
+                      *([h.c.id] if "id" in h.c else []))).fetchall()]
 
     def note(self, subjects: list[Any], name: str, *, status: str, reason: str,
              now: str, ref: str | None) -> int:

@@ -69,7 +69,7 @@ from .dag import (
 )
 from .graph import Document, Graph
 from .journal import MigrationError
-from .names import Merge, Per, Position, Reason, Status, WhileRunning
+from .names import Merge, Outcome, Per, Position, Reason, Status, WhileRunning
 from .timing import Rate, Retry, seconds, shift
 
 #: A fork, a join, an optional branch — the diamond.
@@ -212,6 +212,28 @@ class JournalContract:
             if self._claim(harness, journal, n.name, ["s1"]):
                 got.add(n.name)
         assert got == expected, f"{progress}: driver={sorted(got)} rule={sorted(expected)}"
+
+    def test_a_retry_due_exactly_now_is_claimable(self, harness, journal, clock):
+        """"Due by now" includes now: the four places that write the rule
+        (the journal, the pre-filters, the write) all say `<=`."""
+        harness.seed(journal, "s1", {"start": Status.SCHEDULED})
+        assert clock.now == "2026-01-01T00:00:00+00:00", "the seeded due time"
+        assert self._claim(harness, journal, "start", ["s1"]) == ["s1"]
+
+    def test_stages_takes_the_subjects_as_they_are(self, harness, clock):
+        journal = harness.journal((Node("a"),), clock, subject_type=int)
+        lease = journal.claim("a", 5, candidates=harness.candidates([7]))
+        journal.conclude("a", list(lease), token=lease.token)
+        assert list(journal.stages([7], at=clock.now)) == ["7"], (
+            "an int subject found as given; the keys are text, for JSON")
+
+    def test_history_of_one_second_comes_back_in_the_order_written(self, harness, journal,
+                                                                   clock):
+        for status in (Outcome.MERGED, Outcome.DROPPED, Outcome.ENTERED, Outcome.QUEUED):
+            journal.driver.note(["s1"], "start", status=status, reason=Reason.LANE,
+                                now=clock.now, ref=None)
+        assert [row["status"] for row in journal.history("s1")] == [
+            Outcome.MERGED, Outcome.DROPPED, Outcome.ENTERED, Outcome.QUEUED]
 
     # -- scale and cost --------------------------------------------------------
 
@@ -751,6 +773,15 @@ class JournalContract:
             v2.migrate(["s1"], self.V1, {"crop": "trim", "fetch": "trim"})
         with pytest.raises(ValueError, match="does not have"):
             v2.migrate(["s1"], self.V1, {"ghost": "trim", "crop": "trim"})
+
+    def test_release_leaves_the_leases_of_another_version_alone(self, harness, clock):
+        v1 = harness.journal(self.V1, clock)
+        v2 = harness.journal_on(v1, self.V2, clock)
+        assert self._claim(harness, v1, "fetch", ["old"]) == ["old"]
+        clock.now = "2026-01-02T00:00:00+00:00"
+        assert v2.release("fetch", older_than=clock.now) == 0, (
+            "a journal on v2 does not hand back a v1 subject's lease")
+        assert v1.release("fetch", older_than=clock.now) == 1
 
     # -- rate and concurrency ------------------------------------------------------
 
