@@ -1,6 +1,6 @@
 # grampy
 
-[![PyPI](https://img.shields.io/pypi/v/grampy-q)](https://pypi.org/project/grampy-q/)
+[![PyPI](https://img.shields.io/pypi/v/grampy-q?cacheSeconds=3600)](https://pypi.org/project/grampy-q/)
 [![Python](https://img.shields.io/pypi/pyversions/grampy-q)](https://pypi.org/project/grampy-q/)
 [![License: MIT](https://img.shields.io/pypi/l/grampy-q)](LICENSE)
 [![CI](https://github.com/quazardous/grampy/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/quazardous/grampy/actions/workflows/ci.yml)
