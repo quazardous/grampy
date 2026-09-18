@@ -95,3 +95,29 @@ def test_nothing_admitted_consumes_nothing():
 def test_a_rate_that_cannot_hold_is_refused(kwargs):
     with pytest.raises(ValueError):
         Rate(**kwargs)
+
+
+def test_stamp_reads_any_moment_into_utc_to_the_second():
+    from datetime import datetime, timedelta, timezone
+
+    from quazardous.grampy.timing import stamp
+    utc = "2026-01-01T09:00:00+00:00"
+    assert stamp("2026-01-01T11:00:00+02:00") == utc
+    assert stamp("2026-01-01T09:00:00Z") == utc, "Z, even on 3.10"
+    assert stamp("2026-01-01 09:00:00+00:00") == utc, "a space for the T"
+    assert stamp("2026-01-01T09:00:00.999999+00:00") == utc, "fractions dropped"
+    assert stamp(datetime(2026, 1, 1, 10, tzinfo=timezone(timedelta(hours=1)))) == utc
+
+
+def test_stamp_refuses_a_moment_without_a_zone_or_not_a_moment():
+    from datetime import datetime
+
+    import pytest
+
+    from quazardous.grampy.timing import stamp
+    with pytest.raises(ValueError, match="no time zone"):
+        stamp("2026-01-01T09:00:00")
+    with pytest.raises(ValueError, match="no time zone"):
+        stamp(datetime(2026, 1, 1, 9))
+    with pytest.raises(ValueError, match="not a moment"):
+        stamp("yesterday")

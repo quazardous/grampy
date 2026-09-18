@@ -119,7 +119,7 @@ from .dag import (
 )
 from .graph import Graph
 from .names import Merge, Outcome, Per, Reason, Status, WhileRunning
-from .timing import admit, seconds, shift
+from .timing import admit, seconds, shift, stamp
 
 #: HOW MANY CANDIDATES A CLAIM READS AT ONCE, at least — more when the
 #: limit is higher. A page is one read and at most one write.
@@ -405,7 +405,10 @@ class NodeJournal:
         #: `Document.identity`, so two workflows sharing a version string stay
         #: strangers. None for a tuple of nodes.
         self.version = dag.document.identity if isinstance(dag, Graph) else None
-        self._clock = clock or driver.now
+        # AN INJECTED CLOCK IS READ INTO THE ONE FORMAT (`timing.stamp`): in
+        # another zone or layout, its times would sort wrong as text. The
+        # driver's own clock already writes that format.
+        self._clock = (lambda: stamp(clock())) if clock is not None else driver.now
         self._rng = rng or random.Random()
         #: THE MERGE FUNCTIONS A LANE MAY NAME. The graph stays data — it
         #: holds `fn:<name>`, never the code — and the name is resolved here,
@@ -765,10 +768,10 @@ class NodeJournal:
         node(name, self.dag)
         return self.driver.forget(name, _unique(subjects), now=self._clock())
 
-    def release(self, name: str, older_than: str) -> int:
+    def release(self, name: str, older_than: str | datetime) -> int:
         """Give back the leases a dead worker has held for too long."""
         node(name, self.dag)
-        return self.driver.release(name, older_than=older_than, now=self._clock(),
+        return self.driver.release(name, older_than=stamp(older_than), now=self._clock(),
                                    version=self.version)
 
     # -- read --------------------------------------------------------------
@@ -1205,13 +1208,13 @@ class NodeJournal:
         return self.driver.archived([subject], name, Reason.RETRY).get(subject, 0)
 
     def stages(self, subjects: list[Any], *,
-               at: str) -> dict[str, list[list[Any]]]:
+               at: str | datetime) -> dict[str, list[list[Any]]]:
         """What a BATCH went through — `{subject: [[node, end, seconds, status], …]}`.
 
         ONE READ FOR THE BATCH, not one per subject. ONLY NODES THAT WORKED:
         a `skipped` row never started. A node STILL RUNNING ends `at`.
         """
-        return self.driver.stages(list(subjects), at=at)
+        return self.driver.stages(list(subjects), at=stamp(at))
 
     def counts(self, name: str) -> dict[str, int]:
         """How many subjects stand where, for this node."""

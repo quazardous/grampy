@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import os
 import threading
 from typing import Any
 
@@ -157,6 +158,14 @@ def _listing(**lane: Any) -> tuple[Node, ...]:
     return (Node("arrive", lane=Lane(**lane)), *LISTING[1:])
 
 
+#: A PERFORMANCE TEST: long by its size, not by what it checks. Left out of
+#: every run unless asked for — `GRAMPY_PERF=1 pytest` — so that the default
+#: suite, and a driver author's, stays quick. Asking for it is a decision.
+PERFORMANCE = pytest.mark.skipif(
+    not os.environ.get("GRAMPY_PERF"),
+    reason="a performance test: run it knowingly, with GRAMPY_PERF=1")
+
+
 class Clock:
     """A clock that only moves when told to."""
 
@@ -235,6 +244,19 @@ class JournalContract:
         assert [row["status"] for row in journal.history("s1")] == [
             Outcome.MERGED, Outcome.DROPPED, Outcome.ENTERED, Outcome.QUEUED]
 
+    def test_a_clock_in_another_zone_is_read_as_the_same_instant(self, harness, clock):
+        """Times compare as text: 01:30+02:00 sorts after 00:00+00:00 though
+        it is half an hour earlier. The journal reads the clock into UTC."""
+        journal = harness.journal(DIAMOND, lambda: "2026-01-01T01:30:00+02:00")
+        harness.seed(journal, "s1", {"start": Status.SCHEDULED})   # due 00:00 UTC
+        assert self._claim(harness, journal, "start", ["s1"]) == [], (
+            "23:30 UTC the day before: not due yet")
+
+    def test_a_clock_without_a_time_zone_is_refused(self, harness):
+        journal = harness.journal(DIAMOND, lambda: "2026-01-01T00:00:00")
+        with pytest.raises(ValueError, match="no time zone"):
+            self._claim(harness, journal, "start", ["s1"])
+
     # -- scale and cost --------------------------------------------------------
 
     #: ONE CALL, TENS OF THOUSANDS OF SUBJECTS. Past the number of parameters a
@@ -242,6 +264,7 @@ class JournalContract:
     #: that sends a value per subject fails outright — not slowly.
     SCALE = 70_000
 
+    @PERFORMANCE
     def test_one_call_handles_tens_of_thousands_of_subjects(self, harness, clock):
         graph = (Node("a"), Node("b", parents=("a",), optional=True))
         journal = harness.journal(graph, clock)

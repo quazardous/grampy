@@ -71,6 +71,35 @@ def seconds(duration: float | int | str | timedelta) -> float:
     return value
 
 
+def stamp(moment: str | datetime) -> str:
+    """ANY MOMENT, IN THE JOURNAL'S FORMAT: UTC, ISO-8601, to the second.
+
+    Times are compared as TEXT, which orders them only in one format and one
+    offset: `11:00+02:00` sorts after `10:00+00:00` though it is an hour
+    earlier. So every time that comes from outside — an injected clock, an
+    `older_than` — is read, converted to UTC and written back in the one
+    format. A `datetime` works as well as a string; a moment without a time
+    zone is refused, since nothing says which zone it meant. `Z` is read on
+    every Python (3.10's `fromisoformat` does not know it). Fractions of a
+    second are dropped, as the journal's own clocks do.
+    """
+    if isinstance(moment, datetime):
+        instant = moment
+    else:
+        text = str(moment).strip()
+        if text[-1:] in ("Z", "z"):
+            text = text[:-1] + "+00:00"
+        try:
+            instant = datetime.fromisoformat(text)
+        except ValueError:
+            raise ValueError(f"not a moment: {moment!r} — expected ISO-8601, "
+                             f"such as 2026-01-01T10:00:00+00:00") from None
+    if instant.utcoffset() is None:
+        raise ValueError(f"{moment!r} has no time zone: say which "
+                         f"(+00:00, Z, or an aware datetime)")
+    return instant.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+
+
 def shift(moment: str, by: float) -> str:
     """`moment` moved by `by` seconds, in the journal's format (UTC, seconds)."""
     instant = datetime.fromisoformat(moment).astimezone(timezone.utc)
