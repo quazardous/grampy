@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-18
+
 ### Fixed
 
 - On a large node table, a claim on the row-per-node and ready-list layouts
@@ -355,7 +357,8 @@ The first release. Installed as `grampy-q`, imported as
   claimers, claims racing a requeue) and random sequences of operations on
   random graphs checked step by step against the rule.
 
-[Unreleased]: https://github.com/quazardous/grampy/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/quazardous/grampy/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/quazardous/grampy/releases/tag/v0.5.1
 [0.5.0]: https://github.com/quazardous/grampy/releases/tag/v0.5.0
 [0.4.0]: https://github.com/quazardous/grampy/releases/tag/v0.4.0
 [0.3.1]: https://github.com/quazardous/grampy/releases/tag/v0.3.1
