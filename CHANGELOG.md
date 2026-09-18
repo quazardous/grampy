@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-18
+
 ### Added
 
 - `journal.progress_many(subjects)` and `Items.progress_many(objects)` read
@@ -48,8 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A guide to operating in production: the indexes worth adding on each
   PostgreSQL layout, each backed by a measured plan before and after
   (`benchmarks/indexes.py`), what grows and how the janitor keeps it bounded.
-- `skip(..., limit=)` and `settle(..., limit=)`, on the journal and on `Items`, bound a
-  janitor's pass: at most `limit` subjects written — per node for `settle` —
+- `skip(..., limit=)` and `settle(..., limit=)`, on the journal and on
+  `Items`, bound a janitor's pass: at most `limit` subjects written — per node for `settle` —
   the first in the order they would be taken. Call again while a pass writes
   `limit`; repeated passes end where one unbounded call does, which the shared
   contract checks on every driver.
@@ -66,6 +68,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The driver protocol and the types a driver exchanges live in
   `quazardous.grampy.protocol`; importing them from `quazardous.grampy` or
   `quazardous.grampy.journal` works as before.
+- `JournalContract`'s model tests draw ten random runs by default, fifty
+  with `GRAMPY_PERF=1`: a driver's default test run stays quick, the full
+  mass is run knowingly.
 
 ### Fixed
 
@@ -337,7 +342,8 @@ The first release. Installed as `grampy-q`, imported as
   claimers, claims racing a requeue) and random sequences of operations on
   random graphs checked step by step against the rule.
 
-[Unreleased]: https://github.com/quazardous/grampy/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/quazardous/grampy/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/quazardous/grampy/releases/tag/v0.5.0
 [0.4.0]: https://github.com/quazardous/grampy/releases/tag/v0.4.0
 [0.3.1]: https://github.com/quazardous/grampy/releases/tag/v0.3.1
 [0.3.0]: https://github.com/quazardous/grampy/releases/tag/v0.3.0
