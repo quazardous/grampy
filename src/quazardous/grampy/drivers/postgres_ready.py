@@ -131,15 +131,15 @@ class PostgresReadyDriver(PostgresDriver):
 
     # -- the claim reads the list -------------------------------------------
 
-    def _narrow(self, query: Any, candidate: Any, name: str | None,
-                parents: tuple[str, ...]) -> Any:
+    def _narrowing(self, candidate: Any, name: str | None,
+                   parents: tuple[str, ...]) -> list[Any]:
         # ONLY WHERE THE JOURNAL ASKS FOR THE PARENTS' PRE-FILTER: the list
         # stands for "parents concluded", so a claim that waives that test —
         # or a join the pre-filter cannot know — reads every candidate.
         if name is None or not parents:
-            return query
+            return []
         r = self.ready
-        return query.where(sa.exists().where(r.c[self._key] == candidate, r.c.node == name))
+        return [sa.exists().where(r.c[self._key] == candidate, r.c.node == name)]
 
     # -- every write keeps it listing enough ---------------------------------
 

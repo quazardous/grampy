@@ -20,6 +20,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- On PostgreSQL, a claim against a large queue sorted the whole queue: the
+  candidates were numbered with `row_number()` before a page could be cut,
+  on every page, the first one included — a claim of 30 out of 1.3 million
+  candidates read a million blocks and wrote temporary files. Candidates are
+  now read in slices taken in their own order (their `ORDER BY`, `LIMIT n`),
+  which PostgreSQL answers along the index that serves that order, then
+  filtered; a slice that yields little is followed by a larger one. On the
+  bundled queue benchmark (`benchmarks/claim_queue.py`), 1.3 million
+  candidates: a claim goes from 1.2–1.7 s to under 15 ms, or from 2–2.6 s to
+  about 0.6 s when 26,000 untakable subjects stand at the head of the queue.
+  `skip(..., limit=)` takes its first candidates the same way.
+
 ## [0.6.0] - 2026-09-18
 
 ### Added

@@ -767,3 +767,82 @@ def test_ready_counted_in_one_read_equals_the_walk(engine, layout, versioned):
     fast, walked = snapshot(True), snapshot(False)
     assert fast == walked
     assert any(ready for ready, _ in fast.values()), "the sweep must count something"
+
+
+ORDERS = {
+    "asc": lambda t: (t.c.score, t.c.seq),
+    "desc": lambda t: (t.c.score.desc(), t.c.seq),
+    "nulls-first": lambda t: (t.c.score.nulls_first(), t.c.seq.desc()),
+    "desc-nulls-last": lambda t: (t.c.score.desc().nulls_last(),),
+    "ties-only": lambda t: (t.c.score,),
+    "mixed": lambda t: (t.c.grp, t.c.score.desc().nulls_first()),
+    "expression": lambda t: ((t.c.score * -1).nulls_first(), t.c.seq),
+    "none": lambda t: (),
+}
+
+
+@pytest.mark.parametrize("layout", [RowLayout(), SubjectLayout(), ReadyLayout()],
+                         ids=["row", "subject", "ready"])
+@pytest.mark.parametrize("order", [*ORDERS, "by-text"])
+def test_pages_resume_exactly_where_they_end_in_any_order(engine, layout, order):
+    """PAGES BY KEY: resumed after the last key read, they must give the
+    candidates in exactly their ORDER BY — ties broken by the subject, NULLs
+    where PostgreSQL puts them, a page cut in the middle of a tie. An order
+    named by text falls back to a rank, and must give the same."""
+    from quazardous.grampy.testing import DIAMOND
+    rows = [(f"s{i:02d}", None if i % 5 == 0 else i % 3, i, f"g{i % 2}") for i in range(17)]
+    with engine.connect() as conn, conn.begin():
+        metadata = sa.MetaData()
+        tables = layout.tables(metadata, f"grampy_{next(_TABLES)}")
+        items = sa.Table(f"grampy_{next(_TABLES)}_items", metadata,
+                         sa.Column("subject", sa.Text, primary_key=True),
+                         sa.Column("score", sa.Integer), sa.Column("seq", sa.Integer),
+                         sa.Column("grp", sa.Text))
+        metadata.create_all(conn)
+        conn.execute(sa.insert(items), [dict(zip(("subject", "score", "seq", "grp"), r,
+                                                 strict=True)) for r in rows])
+        driver = layout.driver(conn.execute, tables, DIAMOND)
+        if order == "by-text":
+            candidates = sa.select(items.c.subject.label("label")).order_by("label")
+            expected = sorted(r[0] for r in rows)
+        else:
+            terms = ORDERS[order](items)
+            candidates = sa.select(items.c.subject).order_by(*terms)
+            # The subject breaks ties: the order the pages must give.
+            expected = [r[0] for r in conn.execute(
+                sa.select(items.c.subject).order_by(*terms, items.c.subject)).fetchall()]
+        # At most one page per three rows, and one more: a resume that went
+        # back would loop forever instead of failing.
+        pages = itertools.islice(driver.scan(
+            candidates, name=None, nodes=("start",), parents=(), page=3, now=SEEDED),
+            len(rows) // 3 + 2)
+        seen = [e.subject for page in pages for e in page]
+        conn.rollback()
+    assert seen == expected
+
+
+@pytest.mark.parametrize("layout", [RowLayout(), SubjectLayout(), ReadyLayout()],
+                         ids=["row", "subject", "ready"])
+def test_a_claim_reads_past_slices_that_yield_nothing(engine, layout):
+    """THE TAKABLE SUBJECTS ARE AT THE END: 470 candidates first that a
+    claim may not take, then 30 it may. The claim must read slice after
+    slice until it finds them — and take all 30, in a handful of statements."""
+    from quazardous.grampy.testing import DIAMOND
+    subjects = [f"s{i:03d}" for i in range(500)]
+    with engine.connect() as conn, conn.begin():
+        metadata = sa.MetaData()
+        tables = layout.tables(metadata, f"grampy_{next(_TABLES)}")
+        metadata.create_all(conn)
+        driver = layout.driver(conn.execute, tables, DIAMOND)
+        journal = NodeJournal(driver, DIAMOND, clock=lambda: SEEDED)
+        for subject in subjects[:470]:
+            layout.seed(conn, tables, subject, {"start": "running"}, driver)
+        for subject in subjects[470:]:
+            layout.seed(conn, tables, subject, {"start": "done"}, driver)
+        journal.claim("left", 1, candidates=ordered_subjects(["warm"]))
+        sent = []
+        sa.event.listen(conn, "before_cursor_execute", lambda *_: sent.append(1))
+        taken = journal.claim("left", 30, candidates=ordered_subjects(subjects))
+        conn.rollback()
+    assert sorted(taken) == subjects[470:]
+    assert len(sent) <= 5, f"{len(sent)} statements"

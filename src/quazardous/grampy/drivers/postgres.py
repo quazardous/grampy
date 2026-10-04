@@ -73,14 +73,21 @@ subjects can still meet a deadlock: PostgreSQL reports it as an error,
 and the caller retries the transaction.
 
 ────────────────────────────────────────────────────────────────────────
-THE PRIORITY SURVIVES THE NESTING, BECAUSE IT IS MADE A COLUMN
+THE PRIORITY IS READ IN SLICES, ALONG ITS OWN INDEX
 ────────────────────────────────────────────────────────────────────────
 
 `candidates` is an opaque `SELECT` whose FIRST column is the subject, its
-`ORDER BY` being the priority. SQL does not promise that a subquery's
-`ORDER BY` still holds once the outer query filters and limits it, so the
-ordering is turned into a `row_number()` column: pages are read in that
-order, each one after the last rank seen.
+`ORDER BY` being the priority. A claim reads it in slices: the candidates'
+own ORDER BY expressions made columns, the subject breaking ties, `LIMIT
+n` — a query PostgreSQL answers along the index that serves that order,
+reading as far as the slice and no further — and only then filtered. The
+next slice resumes after the last key judged; one that yields little is
+followed by a larger one (`_slices`).
+
+Not a `row_number()` over the candidates: it numbered every one of them
+before a page could be cut, the first page included — a whole sort of the
+queue on every claim. Nor the filters on the whole candidate set: on a
+large table the planner, estimating them badly, scanned and sorted it all.
 
 COUNTS COME FROM `RETURNING`, NOT `rowcount`: SQLAlchemy reports `-1`
 for a Core `INSERT` on some execution paths, and a count that silently
@@ -91,17 +98,25 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, NamedTuple
 
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.sql import operators
 from sqlalchemy.sql.dml import UpdateBase
+from sqlalchemy.sql.elements import UnaryExpression, _textual_label_reference
 
 from ..dag import (
     NODE_SATISFYING,
 )
 from ..names import Merge, Outcome, Position, Reason, Status
 from ..protocol import Arrival, Entry, Page
+
+#: A label named by text in an ORDER BY: no column to page by.
+_TextualLabelReference = _textual_label_reference
+#: The modifiers an ORDER BY term may wear: direction and NULLs placement.
+_ORDERING = (operators.asc_op, operators.desc_op, operators.nulls_first_op,
+             operators.nulls_last_op)
 
 #: THE COLUMNS THE NODE TABLE MUST CARRY, besides the subject.
 REQUIRED_COLUMNS = ("node", "status", "started_at", "finished_at", "lease")
@@ -143,6 +158,178 @@ def _ranked(candidates: Any) -> Any:
     if candidates._limit_clause is not None or candidates._offset_clause is not None:
         return candidates.add_columns(rank.label("grampy_rank")).subquery("c")
     return candidates.order_by(None).add_columns(rank.label("grampy_rank")).subquery("c")
+
+
+class _Key(NamedTuple):
+    """One column a page is ordered by: where it is, which way, and where
+    its NULLs go."""
+
+    column: Any
+    descending: bool
+    nulls_last: bool
+
+
+def _keyed(candidates: Any) -> tuple[Any, list[_Key]] | None:
+    """The candidates as subquery `c`, their ORDER BY expressions exposed as
+    columns `grampy_o0`, `grampy_o1`… — and the keys a page is ordered and
+    resumed by: those, then the subject, which breaks every tie.
+
+    PAGES BY KEY, NOT BY RANK. A `row_number()` over the candidates numbers
+    every one of them before any page can be cut — a whole sort of the queue
+    on every claim. Ordered by the keys themselves, a page reads as far as
+    it needs, along the index that serves the candidates' order, and the
+    next one resumes after the last key read.
+
+    None when an ORDER BY term cannot be made a column: the caller numbers
+    the candidates instead (`_ranked`)."""
+    order = getattr(candidates, "_order_by_clauses", None)
+    if order is None:  # pragma: no cover - depends on SQLAlchemy
+        raise RuntimeError(
+            "SQLAlchemy no longer exposes `Select._order_by_clauses`: the "
+            "candidates' priority cannot be carried into the claim")
+    terms: list[tuple[Any, bool, bool]] = []
+    for clause in order:
+        element, descending, nulls = clause, False, None
+        while isinstance(element, UnaryExpression) and element.modifier in _ORDERING:
+            if element.modifier in (operators.nulls_first_op, operators.nulls_last_op):
+                nulls = nulls if nulls is not None else (
+                    element.modifier is operators.nulls_last_op)
+            elif element.modifier is operators.desc_op:
+                descending = True
+            element = element.element
+        if isinstance(element, _TextualLabelReference):
+            # ORDER BY "label": the selected column of that name, if any.
+            named = candidates.selected_columns.get(element.element)
+            if named is None:
+                return None
+            element = named
+        if not isinstance(element, sa.ColumnElement):
+            return None
+        # PostgreSQL's default: NULLs last ascending, first descending.
+        terms.append((element, descending, (not descending) if nulls is None else nulls))
+    limited = candidates._limit_clause is not None or candidates._offset_clause is not None
+    base = candidates if limited else candidates.order_by(None)
+    c = base.add_columns(*[e.label(f"grampy_o{i}") for i, (e, _, _) in enumerate(terms)]
+                         ).subquery("c")
+    keys = [_Key(c.c[f"grampy_o{i}"], d, n) for i, (_, d, n) in enumerate(terms)]
+    keys.append(_Key(list(c.c)[0], False, True))
+    return c, keys
+
+
+def _paged(candidates: Any) -> tuple[Any, list[_Key]]:
+    """The candidates as subquery `c`, and the keys pages go by: their own
+    ORDER BY when it can be made columns (`_keyed`), their rank otherwise."""
+    keyed = _keyed(candidates)
+    if keyed is not None:
+        return keyed
+    c = _ranked(candidates)
+    return c, [_Key(c.c.grampy_rank, False, True)]
+
+
+#: HOW LARGE A SLICE OF CANDIDATES MAY GROW, at most.
+SLICE_MAX = 65_536
+
+
+def _slices(execute: Callable[[Any], Any], candidates: Any, page: int,
+            judge: Callable[[Any, Any], tuple[Any, list[Any]]],
+            columns: Callable[[Any, Any], tuple[list[Any], Any]],
+            ) -> Iterator[tuple[list[Any], str]]:
+    """THE CANDIDATES IN SLICES, each slice read in their own order — by
+    their ORDER BY keys, `LIMIT n`, which PostgreSQL can only answer along
+    the index that serves that order, whatever it estimates of the filters —
+    and filtered after: one statement a slice. Yields `(takable rows, the
+    clock read)`, the rows ordered as the candidates are.
+
+    A slice resumes after the last candidate judged, taken or not; one
+    candidate more than the slice is read to know whether another follows.
+    At most `page` takable rows come back from a slice — the next one
+    resumes after the last of them — and a slice that yields fewer is
+    followed by one twice as large, up to `SLICE_MAX`: a queue where few can
+    be taken is read in a handful of statements, not one per page.
+
+    `judge(chunk, candidate)` gives what a slice is joined to and the
+    conditions that make one of its candidates takable; `columns(picked,
+    candidate)` the columns to read of each takable one — candidate first,
+    the clock last — and what they are read from. They are read only for the
+    rows that come back."""
+    c, keys = _paged(candidates)
+    size = max(int(page), 1)
+    last: tuple[Any, ...] | None = None
+    names = [k.column.key for k in keys]
+    while True:
+        # One candidate more than the slice: it says whether another follows,
+        # without a last read that finds nothing.
+        first = sa.select(*c.c).order_by(*_ordered(keys)).limit(size + 1)
+        if last is not None:
+            first = first.where(_after(keys, last))
+        inner = first.subquery("slice")
+        slice_keys = [_Key(inner.c[n], k.descending, k.nulls_last) for n, k in zip(
+            names, keys, strict=True)]
+        chunk = (sa.select(*inner.c, sa.func.row_number().over(
+                     order_by=_ordered(slice_keys)).label("grampy_n"))
+                 .cte("chunk").prefix_with("MATERIALIZED"))
+        subject = list(chunk.c)[0]
+        count = sa.select(sa.func.count()).select_from(chunk).scalar_subquery()
+        # THE TAKABLE ONES: the conditions in the WHERE, so PostgreSQL picks
+        # the join that suits the slice, and stops at the first `page`.
+        where, takable = judge(chunk, subject)
+        picked = (sa.select(*chunk.c).select_from(where)
+                  .where(chunk.c.grampy_n <= size, *takable)
+                  .order_by(chunk.c.grampy_n).limit(int(page)).subquery("picked"))
+        candidate = picked.c[subject.key]
+        grouped = (picked.c["grampy_key"] if "grampy_key" in picked.c
+                   else sa.literal(None)).label("grampy_key")
+        read, source = columns(picked, candidate)
+        read = [read[0], *read[1:4], grouped, *read[4:]]
+        rows = sa.select(*read, sa.true().label("grampy_ok"), count.label("grampy_count"),
+                         picked.c.grampy_n, *[picked.c[n] for n in names]).select_from(source)
+        # THE LAST CANDIDATE OF THE SLICE, taken or not: where the next resumes.
+        tail = sa.select(chunk.c[subject.key], *[sa.null()] * (len(read) - 2), read[-1],
+                         sa.false(), count, chunk.c.grampy_n, *[chunk.c[n] for n in names]
+                         ).where(chunk.c.grampy_n == sa.func.least(count, size))
+        both = sa.union_all(rows, tail).subquery("both")
+        found = execute(sa.select(*both.c).order_by(both.c.grampy_n)).fetchall()
+        if not found:
+            return
+        width = len(read)
+        taken = [f for f in found if f[width]]
+        ends = [f for f in found if not f[width]]
+        yield taken, found[0][width - 1]
+        if len(taken) >= page:
+            last = tuple(taken[-1][width + 3:])      # more may follow in this slice
+            continue
+        if not ends or int(ends[0][width + 1]) <= size:
+            return
+        last = tuple(ends[0][width + 3:])
+        size = min(size * 2, SLICE_MAX)
+
+
+def _ordered(keys: list[_Key]) -> list[Any]:
+    """The ORDER BY clauses of `keys`."""
+    out = []
+    for k in keys:
+        term = k.column.desc() if k.descending else k.column.asc()
+        out.append(term.nulls_last() if k.nulls_last else term.nulls_first())
+    return out
+
+
+def _after(keys: list[_Key], last: tuple[Any, ...]) -> Any:
+    """THE ROWS AFTER `last` in the order of `keys`: some key past its value,
+    every key before it tied — NULLs and directions spelled out, so any
+    ORDER BY resumes exactly where its page ended."""
+    alternatives = []
+    for i, (k, value) in enumerate(zip(keys, last, strict=True)):
+        if value is None:
+            # Past a NULL: only non-NULLs, and only when NULLs come first.
+            past = sa.false() if k.nulls_last else k.column.is_not(None)
+        else:
+            bound = sa.literal(value, type_=k.column.type)
+            beyond = k.column < bound if k.descending else k.column > bound
+            past = sa.or_(beyond, k.column.is_(None)) if k.nulls_last else beyond
+        tied = [prev.column.is_not_distinct_from(sa.literal(v, type_=prev.column.type))
+                for prev, v in zip(keys[:i], last[:i], strict=True)]
+        alternatives.append(sa.and_(*tied, past))
+    return sa.or_(*alternatives)
 
 
 def _plain(candidates: Any) -> Any:
@@ -450,87 +637,57 @@ class PostgresDriver(PostgresCommon):
     def scan(self, candidates: Any, *, name: str | None, nodes: tuple[str, ...],
              parents: tuple[str, ...], page: int, now: str | None,
              after: tuple[str, ...] = ()) -> Iterator[list[Entry]]:
-        """ONE STATEMENT PER PAGE: the candidates, their revision, and their
-        rows on `nodes` gathered in a JSON column — and, when `now` is None,
-        the server's clock. Pre-filters in SQL what cannot be taken — a row
-        for `name`, a parent not concluded, a descendant started — so that a
-        page is mostly takable."""
+        """ONE STATEMENT PER SLICE OF CANDIDATES: a slice read in their own
+        order, the subjects of it that can be taken, their revision and
+        their rows on `nodes` — and, when `now` is None, the server's clock.
+        A slice that yields little is followed by a larger one (`_slices`)."""
         t, r = self.table, self.revisions
-        c = _ranked(candidates)
-        columns = list(c.c)
-        candidate = columns[0]
-        # THE GROUPING KEY IS THE COLUMN NAMED `grampy_key`, carried and never
-        # read; any other column is the query's own business.
-        grouped = c.c["grampy_key"] if "grampy_key" in c.c else sa.literal(None)
         clock = _clock() if now is None else sa.literal(now)
-        own = t.alias("own")
-        rows_of = (sa.select(sa.func.json_agg(sa.func.json_build_array(
-                       own.c.node, own.c.status, own.c.started_at, own.c.finished_at)))
-                   .where(own.c[self._subject.key] == candidate,
-                          own.c.node.in_(list(nodes)))
-                   .scalar_subquery())
-        held = t.alias("d")
-        query = (
-            sa.select(candidate, c.c.grampy_rank,
-                      sa.func.coalesce(r.c.revision, 0), r.c.policy, r.c.version,
-                      grouped.label("grampy_key"), rows_of.label("grampy_rows"),
-                      clock.label("grampy_now"))
-            .select_from(c.outerjoin(r, self._rev_subject == candidate))
-            .order_by(c.c.grampy_rank)
-            .limit(int(page)))
-        if name is not None:
-            query = query.where(~sa.exists().where(
-                held.c[self._subject.key] == candidate, held.c.node == name,
-                ~sa.and_(held.c.status == Status.SCHEDULED, held.c.started_at <= clock)))
-        if parents:
-            query = query.where(self.parents_concluded(parents, candidate))
-        query = self._narrow(query, candidate, name, parents)
-        # THE SUBJECTS THAT HAVE MOVED PAST `name` — a row, any, on a node
-        # after it — are left out in SQL only once a page shows they crowd
-        # the candidates. On a large table that filter costs a scan of the
-        # node rows on every page; where few candidates have moved past, the
-        # first page is enough without it, and the journal leaves those few
-        # out as it judges. Where most have (a replay that left the later
-        # steps in place), the pages after the first carry the filter, and
-        # the rest is read in one.
-        filtered = query
-        if after:
-            later = t.alias("later")
-            filtered = query.where(~sa.exists().where(
-                later.c[self._subject.key] == candidate, later.c.node.in_(list(after))))
-        later_nodes = set(after)
-        crowded = False
-        last = None
-        while True:
-            current = filtered if crowded else query
-            paged = current if last is None else current.where(c.c.grampy_rank > last)
-            found = self._execute(paged).fetchall()
-            if not found:
-                return
-            last = found[-1][1]
+
+        def judge(chunk: Any, candidate: Any) -> tuple[Any, list[Any]]:
+            held, later = t.alias("d"), t.alias("later")
+            takable: list[Any] = []
+            if name is not None:
+                takable.append(~sa.exists().where(
+                    held.c[self._subject.key] == candidate, held.c.node == name,
+                    ~sa.and_(held.c.status == Status.SCHEDULED, held.c.started_at <= clock)))
+            if parents:
+                takable.append(self.parents_concluded(parents, candidate))
+            if after:
+                # THE SUBJECT HAS MOVED PAST `name`: a row, any, on a node after it.
+                takable.append(~sa.exists().where(
+                    later.c[self._subject.key] == candidate, later.c.node.in_(list(after))))
+            return chunk, [*takable, *self._narrowing(candidate, name, parents)]
+
+        def columns(judged: Any, candidate: Any) -> tuple[list[Any], Any]:
+            own = t.alias("own")
+            rows_of = (sa.select(sa.func.json_agg(sa.func.json_build_array(
+                           own.c.node, own.c.status, own.c.started_at, own.c.finished_at)))
+                       .where(own.c[self._subject.key] == candidate,
+                              own.c.node.in_(list(nodes)))
+                       .scalar_subquery())
+            return ([candidate, sa.func.coalesce(r.c.revision, 0), r.c.policy, r.c.version,
+                     rows_of, clock], judged.outerjoin(r, self._rev_subject == candidate))
+
+        for found, now_read in _slices(self._execute, candidates, page, judge, columns):
             entries = []
             for f in found:
                 rows: dict[str, str] = {}
                 due: dict[str, str] = {}
                 finished: dict[str, str] = {}
-                for n, status, started, ended in _decoded(f[6]) or ():
+                for n, status, started, ended in _decoded(f[5]) or ():
                     rows[n] = status
                     if status == Status.SCHEDULED:
                         due[n] = started
                     if ended is not None:
                         finished[n] = ended
-                entries.append(Entry(f[0], int(f[2]), rows, due, finished, f[3], f[4], f[5]))
-            yield Page(entries, now=found[0][7])
-            if len(found) < page:
-                return
-            if later_nodes and not crowded:
-                past = sum(1 for e in entries if later_nodes & e.rows.keys())
-                crowded = 2 * past >= len(entries)
+                entries.append(Entry(f[0], int(f[1]), rows, due, finished, f[2], f[3], f[4]))
+            yield Page(entries, now=now_read)
 
-    def _narrow(self, query: Any, candidate: Any, name: str | None,
-                parents: tuple[str, ...]) -> Any:
-        """Where a layout adds its own pre-filter to a page; none here."""
-        return query
+    def _narrowing(self, candidate: Any, name: str | None,
+                   parents: tuple[str, ...]) -> list[Any]:
+        """The conditions a layout adds to what a slice may take; none here."""
+        return []
 
     def _unchanged(self, entries: list[tuple[Any, int]]) -> Any:
         """THE SUBJECTS WHOSE REVISION IS STILL THE ONE READ, held until the
@@ -634,11 +791,12 @@ class PostgresDriver(PostgresCommon):
         each subject read — its revision row locked `FOR SHARE` if it still
         carries the revision read, or inserted by this same statement if it
         had none — and a subject whose revision moved meanwhile (a parent
-        forgotten) is not skipped. Unranked unless `limit` asks for the first
-        candidates by rank: a whole skip does not depend on their order."""
+        forgotten) is not skipped. Unordered unless `limit` asks for the
+        first candidates, by their own keys: a whole skip does not depend
+        on their order."""
         t, r = self.table, self.revisions
         key, rev_key = self._subject.key, self._rev_subject.key
-        c = _plain(candidates) if limit is None else _ranked(candidates)
+        c, keys = (_plain(candidates), []) if limit is None else _paged(candidates)
         candidate = list(c.c)[0]
         held = t.alias("held")
         eligible = [~sa.exists().where(held.c[key] == candidate, held.c.node == name)]
@@ -650,11 +808,12 @@ class PostgresDriver(PostgresCommon):
         read = (sa.select(candidate.label("subject"), seen.c.revision.label("revision"))
                 .select_from(c.outerjoin(seen, seen.c[rev_key] == candidate))
                 .where(*eligible))
-        if limit is None:
-            read = read.distinct()
-        else:
-            read = (read.group_by(candidate, seen.c.revision)
-                    .order_by(sa.func.min(c.c.grampy_rank)).limit(int(limit)))
+        if limit is not None:
+            # The first `limit` by the candidates' own keys — no numbering
+            # of them all — then each subject once.
+            first = read.order_by(*_ordered(keys)).limit(int(limit)).subquery("first")
+            read = sa.select(first.c.subject, first.c.revision)
+        read = read.distinct()
         read = read.cte("read")
         locked = (sa.select(self._rev_subject.label("subject"))
                   .join(read, sa.and_(self._rev_subject == read.c.subject,

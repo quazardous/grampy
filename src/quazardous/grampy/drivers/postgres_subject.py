@@ -61,7 +61,16 @@ from ..dag import (
 )
 from ..names import Outcome, Reason, Status
 from ..protocol import Entry, Page
-from .postgres import PostgresCommon, _clock, _decoded, _epoch, _plain, _ranked
+from .postgres import (
+    PostgresCommon,
+    _clock,
+    _decoded,
+    _epoch,
+    _ordered,
+    _paged,
+    _plain,
+    _slices,
+)
 
 #: THE COLUMNS THE SUBJECTS TABLE MUST CARRY, besides the subject.
 SUBJECT_COLUMNS = ("revision", "policy", "version", "nodes")
@@ -162,52 +171,42 @@ class PostgresSubjectDriver(PostgresCommon):
     def scan(self, candidates: Any, *, name: str | None, nodes: tuple[str, ...],
              parents: tuple[str, ...], page: int, now: str | None,
              after: tuple[str, ...] = ()) -> Iterator[list[Entry]]:
-        """Pre-filters in SQL, and brings the progress in the same read —
-        and, when `now` is None, the server's clock."""
+        """ONE STATEMENT PER SLICE OF CANDIDATES (`_slices`), each candidate
+        read with its document — and, when `now` is None, the server's clock."""
         s = self.subjects
-        c = _ranked(candidates)
-        columns = list(c.c)
-        candidate = columns[0]
-        grouped = c.c["grampy_key"] if "grampy_key" in c.c else sa.literal(None)
         clock = _clock() if now is None else sa.literal(now)
-        query = (
-            sa.select(candidate, c.c.grampy_rank, sa.func.coalesce(s.c.revision, 0),
-                      s.c.policy, s.c.version, grouped.label("grampy_key"), s.c.nodes,
-                      clock.label("grampy_now"))
-            .select_from(c.outerjoin(s, self._subject == candidate))
-            .order_by(c.c.grampy_rank)
-            .limit(int(page)))
-        if name is not None:
-            query = query.where(sa.or_(
-                s.c.nodes.op("->", return_type=JSONB)(name).is_(None),
-                sa.and_(self._field(name, "status") == Status.SCHEDULED,
-                        self._field(name, "started_at") <= clock)))
-        for p in parents:
-            query = query.where(self._field(p, "status").in_(NODE_SATISFYING))
-        for d in after:
-            query = query.where(s.c.nodes.op("->", return_type=JSONB)(d).is_(None))
+
+        def judge(chunk: Any, candidate: Any) -> tuple[Any, list[Any]]:
+            mine = s.alias("mine")
+            takable: list[Any] = []
+            if name is not None:
+                takable.append(sa.or_(
+                    mine.c.nodes.op("->", return_type=JSONB)(name).is_(None),
+                    sa.and_(self._field(name, "status", mine.c.nodes) == Status.SCHEDULED,
+                            self._field(name, "started_at", mine.c.nodes) <= clock)))
+            takable += [self._field(p, "status", mine.c.nodes).in_(NODE_SATISFYING)
+                        for p in parents]
+            takable += [mine.c.nodes.op("->", return_type=JSONB)(d).is_(None) for d in after]
+            return chunk.outerjoin(mine, mine.c[self._key] == candidate), takable
+
+        def columns(judged: Any, candidate: Any) -> tuple[list[Any], Any]:
+            return ([candidate, sa.func.coalesce(s.c.revision, 0), s.c.policy, s.c.version,
+                     s.c.nodes, clock], judged.outerjoin(s, self._subject == candidate))
+
         wanted = set(nodes)
-        last = None
-        while True:
-            paged = query if last is None else query.where(c.c.grampy_rank > last)
-            found = self._execute(paged).fetchall()
-            if not found:
-                return
-            last = found[-1][1]
+        for found, now_read in _slices(self._execute, candidates, page, judge, columns):
             entries = []
             for f in found:
-                progress = {n: r for n, r in (_decoded(f[6]) or {}).items() if n in wanted}
+                progress = {n: r for n, r in (_decoded(f[5]) or {}).items() if n in wanted}
                 entries.append(Entry(
-                    f[0], int(f[2]),
+                    f[0], int(f[1]),
                     {n: r["status"] for n, r in progress.items()},
                     {n: r["started_at"] for n, r in progress.items()
                      if r["status"] == Status.SCHEDULED},
                     {n: r["finished_at"] for n, r in progress.items()
                      if r.get("finished_at") is not None},
-                    f[3], f[4], f[5]))
-            yield Page(entries, now=found[0][7])
-            if len(found) < page:
-                return
+                    f[2], f[3], f[4]))
+            yield Page(entries, now=now_read)
 
     def insert_if_unchanged(self, name: str, entries: list[tuple[Any, int]], *,
                             status: str, now: str, lease: str | None) -> list[Any]:
@@ -266,10 +265,10 @@ class PostgresSubjectDriver(PostgresCommon):
         `version` or to none. The upsert's own condition — the revision
         still the one read, still no row for `name` — is checked by
         PostgreSQL on each document's latest version, as for a claim: a
-        subject whose revision moved meanwhile is not skipped. Unranked
-        unless `limit` asks for the first candidates by rank."""
+        subject whose revision moved meanwhile is not skipped. Unordered
+        unless `limit` asks for the first candidates, by their own keys."""
         s = self.subjects
-        c = _plain(candidates) if limit is None else _ranked(candidates)
+        c, keys = (_plain(candidates), []) if limit is None else _paged(candidates)
         candidate = list(c.c)[0]
         mine = s.alias("mine")
         eligible = [mine.c.nodes.op("->", return_type=JSONB)(name).is_(None)]
@@ -281,12 +280,10 @@ class PostgresSubjectDriver(PostgresCommon):
                           sa.func.coalesce(mine.c.revision, 0).label("revision"))
                 .select_from(c.outerjoin(mine, mine.c[self._key] == candidate))
                 .where(*eligible))
-        if limit is None:
-            read = read.distinct()
-        else:
-            read = (read.group_by(candidate, mine.c.revision)
-                    .order_by(sa.func.min(c.c.grampy_rank)).limit(int(limit)))
-        read = read.subquery("read")
+        if limit is not None:
+            first = read.order_by(*_ordered(keys)).limit(int(limit)).subquery("first")
+            read = sa.select(first.c.subject, first.c.revision)
+        read = read.distinct().subquery("read")
         insert = postgresql.insert(s).from_select(
             [self._key, "revision", "nodes"],
             sa.select(read.c.subject, read.c.revision,
