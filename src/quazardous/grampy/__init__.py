@@ -68,7 +68,7 @@ from .states import (
 )
 from .timing import Rate, Retry
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 
 __all__ = [
     "Backoff", "Merge", "Name", "Outcome", "Per", "Position", "Reason", "Status",
